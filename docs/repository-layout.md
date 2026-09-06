@@ -126,14 +126,14 @@ service start/deploy scripts just to validate a source checkout.
 Committing or pushing this project is independent of deploying it. The new shared
 Workspace UI workflow builds once and publishes a versioned package to one
 persistent Portal directory; VM API/SSE/WebSocket traffic remains node-scoped.
-Enable it through a separately authorized, one-time Portal migration. Subsequent
+The production Portal completed that authorized one-time migration on September 6,
+2026. New installations must explicitly enable it after publishing their first package. Subsequent
 UI updates atomically switch the shared active release without VM updates or
 service restarts. See [the shared UI workflow](./codey-shared-workspace-ui.md).
 
-Until that migration, the existing production workflow still updates each VM's
-hashed static assets and atomically replaces its `index.html`, without a VM,
-copilot-api or CloudCLI service restart. Do not run both publication modes as
-part of ordinary source synchronization.
+The old VM static assets remain available for pre-migration tabs and rollback.
+The per-VM static updater is no longer the normal production UI publication path.
+Do not run both publication modes as part of ordinary source synchronization.
 
 The initial publication's test results and known Windows/backend validation
 limitations are recorded in [the validation report](./validation-2026-09-06.md).

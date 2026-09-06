@@ -35,15 +35,16 @@ npm test
 - [浏览器直连 / ACA VNet 连接选项](./docs/codey-node-connection-modes.md)
 - [多用户与节点隔离](./docs/codey-multiuser-design.md)
 - [手动语音润色、撤销与恢复](./docs/codey-voice-rewrite.md)
-- [Workspace 前端统一发布（源码已实现，待首次迁移）](./docs/codey-shared-workspace-ui.md)
+- [Workspace 前端统一发布（已上线）](./docs/codey-shared-workspace-ui.md)
 
-**当前 ACA 部署（2026-09-05）：** Codey 支持多个用户名密码账号；原 `zhn`
+**当前 ACA 部署（2026-09-06）：** Codey 支持多个用户名密码账号；原 `zhn`
 为管理员，在“账号与节点 → 用户管理”创建账号。节点设置按不可变 owner ID
 保存，新账号不继承任何节点；知道别人的节点名称也不能获得 Usage、未共享的
 Session History 或 Workspace 访问权。Shared 为所有登录用户可读的公共区。
 进入自己的 Workspace 无需二次登录。Usage / 节点 Session History 默认浏览器直连，
 可在刷新按钮旁勾选 **VNet**，供非 CorpNet 机器访问。
 选择只影响当前浏览器，不自动切换；本机节点仅在直连模式显示。
+Workspace 前端已统一托管：纯 UI 更新构建、发布一次即可，API、终端及用户数据仍按节点隔离。
 下文部分 AAD / 独立 CloudCLI 登录步骤为早期或本地部署记录，以设计文档为准。
 
 把本机和多台远程机器上的 `copilot-api` 用量汇总到一个页面。本地部署模式由

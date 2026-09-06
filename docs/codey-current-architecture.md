@@ -1,10 +1,14 @@
 # Codey 当前架构
 
 > 快照日期：2026-09-06（UTC+08:00）  
-> 18:31 更新：四个 Workspace 已发布“恢复上次润色 / 重新生成”菜单及快捷恢复，
+> 22:16 更新：已完成工作区前端统一托管迁移；四节点共用同一份前端包，
+> API/WebSocket 与数据仍按节点隔离，未部署或重启 VM。线上资源、认证、
+> 越权拒绝及宽窄屏浏览器验证通过，见
+> [统一发布记录](./codey-shared-workspace-ui.md#生产迁移记录2026-09-06utc)。
+> 前次 18:31 更新：四个 Workspace 已发布“恢复上次润色 / 重新生成”菜单及快捷恢复，
 > 仅更新静态资源，线上入口与关键 JS/CSS 校验通过；Portal 与节点服务未变。见
 > [恢复/重新生成发布记录](./codey-voice-rewrite.md#恢复重新生成更新发布2026-09-06utc)。
-> 前次 17:33 更新：Portal 与四个 Workspace 已发布手动 GPT-5.6 Terra 语音润色、
+> 更早 17:33 更新：Portal 与四个 Workspace 已发布手动 GPT-5.6 Terra 语音润色、
 > 原文查看和撤销；生产接口与节点入口校验通过，节点服务未重启。见
 > [发布与验证记录](./codey-voice-rewrite.md#生产发布2026-09-06utc)。
 > 更早 12:03 更新：四个远程节点已发布简化后的输入工具栏，仅更新静态资源，
@@ -12,13 +16,14 @@
 > [源码仓库说明](./repository-layout.md)。
 > Azure Container App：`codey`  
 > FQDN：`codey.ambitiouspond-a4ecfeb2.japaneast.azurecontainerapps.io`  
-> Revision：`codey--rewrite-0906090024`  
-> Portal image：`codey:20260906-rewrite-090024`  
+> Revision：`codey--shared-ui-0906140800`  
+> Portal image：`codey:20260906-shared-ui-135826`  
+> Workspace UI：`ui-20260906t133855z-20bb3a16`  
 > CloudCLI nodes：`zhn-a100`、`jpe2`、`jpe3`、`westus2`
 
-源码后续更新（待上线）：已实现 Portal 统一托管工作区前端、一次构建/发布、
-运行时节点配置和按节点的浏览器缓存。**下面仍是当前生产架构快照**；
-首次切换需单独发布 Portal，迁移方案见
+工作区前端现由 Portal 统一托管，一次构建/发布即可更新各 Workspace；
+运行时节点配置、API/终端和浏览器缓存保持节点隔离。首次迁移已经完成，
+后续纯 UI 发布不再更新 ACA 镜像或四个节点，操作说明见
 [Workspace 前端统一发布](./codey-shared-workspace-ui.md)。
 
 ## 1. 总览
@@ -44,7 +49,9 @@ Codey ACA
   │     ├── Usage/History：默认 browser ticket 直连，可选 ACA/VNet 私网 HTTPS
   │     ├── per-principal node list
   │     ├── /cloudcli/<node>/api/voice/codey/* → authenticated Azure Speech/MAI broker
-  │     └── /cloudcli/<node>/ HTTP + WebSocket reverse proxy
+  │     ├── /cloudcli/<node>/ UI + runtime → shared Azure Files UI release
+  │     ├── /cloudcli-ui/<release>/ → authenticated immutable static assets
+  │     └── /cloudcli/<node>/api, ws, shell → node HTTP + WebSocket reverse proxy
   │
   └── mcp container
         ├── Session Share MCP
@@ -145,20 +152,24 @@ Workspace 使用同源 iframe，浏览器仍只访问 Codey FQDN：
 Browser
   → https://codey.../cloudcli/zhn-a100/
   → Codey verifies password session and node assignment
-  → ACA VNet
-  → https://10.0.0.7:3001/ + per-request signed assertion
+      ├─ UI / runtime / PWA → Portal shared UI store
+      └─ API / SSE / WebSocket → ACA VNet
+                               → https://10.0.0.7:3001/ + per-request signed assertion
 ```
 
-Codey 会从转发路径中移除 `/cloudcli/zhn-a100`：
+页面由 Portal 提供；仅转发给节点的端点移除 `/cloudcli/zhn-a100`：
 
 ```text
-/cloudcli/zhn-a100/                  → /
+/cloudcli/zhn-a100/                  → shared UI page (no VM request)
+/cloudcli/zhn-a100/_ui/runtime.js    → node-specific runtime configuration
+/cloudcli-ui/<release>/assets/...    → shared immutable assets
 /cloudcli/zhn-a100/api/projects      → /api/projects
 /cloudcli/zhn-a100/ws                → /ws
 /cloudcli/zhn-a100/shell             → /shell
 ```
 
-HTTP、SSE 和 WebSocket 都走同一条 VNet 链路。浏览器不会看到 A100 私网 IP。
+节点 API 的 HTTP、SSE 和 WebSocket 仍走同一条 VNet 链路；
+共享页面和资源不再访问 VM。浏览器不会看到 A100 私网 IP。
 
 为避免把 Codey 登录凭据发送给节点，gateway 会删除请求中的 Portal `Cookie`
 header，并删除客户端 Authorization 与身份头。节点依赖 Codey 签名而不是该
@@ -166,11 +177,13 @@ Cookie；TLS 使用固定 CA 和节点 hostname 验证，不跳过证书校验�
 
 ## 4. CloudCLI fork 的 Codey 适配
 
-fork 保留原有 CloudCLI 后端和 UI，只增加子路径部署支持：
+fork 保留原有 CloudCLI 后端和 UI，Codey 适配包括：
 
-- `VITE_BASE_PATH=/cloudcli/zhn-a100/`。
+- 共享构建使用 `VITE_BASE_PATH=/cloudcli-ui/<release>/`；
+  运行时从各节点页面设置 `/cloudcli/<node>/` API 前缀和 Router basename。
 - API、SSE、chat WebSocket 和 shell WebSocket 自动加 deployment prefix。
-- favicon、manifest、service worker 和 PWA URL 使用 deployment prefix。
+- JS/CSS/favicon 等静态资源使用共享前缀；manifest、service worker 和 PWA scope
+  仍按节点限定，草稿和用户偏好的浏览器副本也按节点分区。
 - CloudCLI auth token 按 deployment path 命名。
 - Codey-managed build 禁用 CloudCLI 原生 in-place updater，避免覆盖 fork 适配。
 - Codey-managed UI 只显示节点已经配置的 Codex provider；Claude、Cursor 和
@@ -188,7 +201,8 @@ fork 保留原有 CloudCLI 后端和 UI，只增加子路径部署支持：
 
 ### 5.1 服务与部署
 
-各节点运行同一个 fork 源码包 `1.37.2`，按节点编译不同的 URL base path：
+本次不升级节点后端。下表保留此前的节点部署记录；当前工作区 UI 已改为
+Portal 统一发布，不再为各节点分别编译和分发。后端/API 升级仍需单独验证并部署。
 
 | Node | VM listener | ACA upstream | Release | CloudCLI Node runtime |
 | --- | --- | --- | --- | --- |
@@ -397,7 +411,7 @@ CloudCLI 替换不会删除或迁移 Session Share 数据。
 
 | Container | 主要职责 |
 | --- | --- |
-| `portal` | Codey 页面、AAD、per-user nodes、Usage/History、CloudCLI VNet proxy、MCP proxy |
+| `portal` | Codey 页面、认证、per-user nodes、Usage/History、共享 Workspace UI、CloudCLI VNet proxy、MCP proxy |
 | `mcp` | Session Share MCP、Azure Files、Search 和 embedding |
 
 Portal 的 CloudCLI allowlist：

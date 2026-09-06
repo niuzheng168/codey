@@ -1,7 +1,8 @@
 # Workspace 前端统一发布
 
-状态：2026-09-06 已实现并完成本地验证，**尚未切换生产 Portal**。
-线上目前仍使用四节点静态副本；本次没有更新 ACA、VM、模型或生产存储。
+状态：2026-09-06 **已完成生产 Portal 首次迁移**。
+四个 Workspace 共用同一份版本化前端；本次只发布共享前端包并更新 Portal，
+没有部署或重启四台 VM，也没有修改模型或节点后端配置。
 
 ## 改变了什么
 
@@ -184,7 +185,7 @@ npm run lint
 - 前端类型检查、生产构建和本次修改文件的 lint 通过。初次全仓库 lint 检查曾有两个
   既有后端 `boundaries(no-unknown)` 错误，位于 `auth.middleware.ts` 和
   `websocket-auth.service.ts`，已通过下述后续配置修复消除，未修改这两个文件。
-- Azure 目标执行了零请求 dry-run；真实 Azure 上传/首次迁移尚未执行。
+- 开发验证阶段对 Azure 目标只执行了零请求 dry-run；后续生产迁移记录见下文。
 - 工作区中并行的 Codex 会话后端改动被保留，不包含在前端包中。
 
 本机完整验证记录为
@@ -198,4 +199,53 @@ npm run lint
 复验全量 lint 为 0 errors、127 条原有 warnings；前后端类型检查、
 44 项认证/WebSocket 测试和 7 项正反向模块边界验证全部通过。
 记录位于 `artifacts/backend-lint-fix-20260906/`。本修复仅影响开发检查，
-无需部署或重启节点；共享 UI 的首次迁移仍待执行。
+无需部署或重启节点；共享 UI 的首次迁移属于下述独立发布。
+
+## 生产迁移记录（2026-09-06，UTC）
+
+- Portal 修订：`codey--shared-ui-0906140800`，创建于 `14:08:13 UTC`。
+- Portal 镜像：`codey:20260906-shared-ui-135826`，部署固定到
+  `sha256:235f429751c746b368b0293c761d8b134b4e1a6b237d0736315be0b72eecfa16`。
+- 前端版本：`ui-20260906t133855z-20bb3a16`，于 `14:01:06 UTC` 发布到
+  既有 Azure Files 的 `cloudcli-ui` 专用目录。整个包共 164 个文件，
+  manifest SHA-256：
+  `d709c13cd4e8256b3890c1bbfa7d1cb2ca6635d43a1f95666ab04bdfce2e8dc5`。
+- 发布源码：Codey `107c79d`、CloudCLI `65e855b`。
+  本次没有包含工作区中并行的 Codex 会话后端改动。
+- `portal` 与 `mcp` 容器均 ready、restart count 为 0，100% traffic 指向最新修订。
+  通过新 GET 逐字段核对，只有预期 Portal 镜像、修订名及
+  `PORTAL_CLOUDCLI_UI_ROOT=/data/cloudcli-ui` 变化；
+  MCP、认证、网络、现有环境变量/secret 绑定及存储挂载配置保持不变。
+
+验证结果：
+
+- 审阅快照的 120 项 Portal、451 项前端、44 项认证/WebSocket、
+  9 项发布器和 8 项 secret helper 测试通过；前后端类型检查、隔离生产构建通过。
+  Lint 为 0 errors、127 条原有 warnings。后端测试使用临时 HOME、内存盘 SQLite
+  测试目录和独立源码快照，未使用运行中的数据库。
+- 四节点返回相同 UI release 和入口 JS；运行时配置、深层路由、PWA scope 各自隔离。
+  对外可读的 161 个共享资源逐个校验 SHA-256，节点旧入口引用的 20 个关键资源
+  也仍可获取且内容不变。
+- 四节点 SSO、语音配置均为 200，两个转写服务及手动润色 capability 保持配置；
+  WebSocket 为 101，未登录、跨账号和跨源访问被拒绝。
+- 实际生产页面完成 A100 1200px 与 westus2 375px 浏览器验证，没有页面错误、
+  资源加载失败或横向溢出。业务数据使用合成响应；未读取真实聊天、修改节点数据、
+  录音、发送终端命令或调用模型。
+- 临时验证账号与会话已清理，并确认旧验证 cookie 被拒绝。
+
+本机发布、配置对比、HTTP/WebSocket、浏览器与清理记录位于
+`artifacts/shared-ui-deploy-20260906-133827/`。Git 推送状态单独记录；
+部署完成不代表设备登录授权或 push 已完成。
+
+下一次纯 UI 更新直接发布一次，不再更新 ACA 或 VM：
+
+```sh
+npm run workspace:publish -- \
+  --config config/workspace-ui-publish.json \
+  --apply --expected-current ui-20260906t133855z-20bb3a16
+```
+
+首次迁移若需回退，可在确认当前仍是本修订后，移除 Portal 的
+`PORTAL_CLOUDCLI_UI_ROOT` 并恢复原镜像
+`sha256:53a26e48795405b9d1307a66abd6ebb4e083b5dc772d0a2713078ac314b8af14`。
+原节点静态资源未被覆盖；无需重新部署节点。共享包保留，不应为回滚而删除它。
