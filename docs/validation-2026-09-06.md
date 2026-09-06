@@ -15,6 +15,11 @@ owner's request. This removes a private-clone permission requirement, not
 CloudCLI's plugin system. The template's Git history was backed up locally before
 removal; it contained no Codey feature changes.
 
+During native Linux development setup, the management-config test fixture was
+made portable: its portal-host key paths now use the current OS's temporary
+directory rather than a Windows-only literal. The production absolute-path
+validation remains unchanged, including rejection of relative key paths.
+
 ## Deployed UI
 
 - Four remote CloudCLI instances received the new composer static assets.

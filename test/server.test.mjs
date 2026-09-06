@@ -696,18 +696,20 @@ test("management config accepts only the supported transport and updater combina
     }),
     /invalid sshHost/,
   );
+  // These key files live on the portal host, not on the remote Windows node.
+  // Use the host OS's absolute path syntax so this fixture also runs on Linux.
+  const keyRoot = path.join(tmpdir(), "codey-management-fixture");
   const windows = validateConfig({
     nodes: [
       {
         id: "windows",
         name: "Windows",
         endpoint: "https://windows.test/usage",
-        apiKeyFile: "C:\\Users\\zhn\\.config\\windows.api.key",
+        apiKeyFile: path.join(keyRoot, "windows.api.key"),
         management: {
           transport: "windows-ssh",
           sshHost: "windows-alias",
-          sessionApiKeyFile:
-            "C:\\Users\\zhn\\.config\\windows.session.key",
+          sessionApiKeyFile: path.join(keyRoot, "windows.session.key"),
           copilotApi: "windows-startup",
           codexCli: "desktop-managed",
         },
@@ -715,6 +717,11 @@ test("management config accepts only the supported transport and updater combina
     ],
   });
   assert.equal(windows.nodes[0].management.transport, "windows-ssh");
+  assert.equal(windows.nodes[0].apiKeyFile, path.join(keyRoot, "windows.api.key"));
+  assert.throws(
+    () => validateConfig({ nodes: [{ ...windows.nodes[0], apiKeyFile: "relative.key" }] }),
+    /apiKeyFile must be absolute/,
+  );
 });
 
 test("client nodes are normalized and reject duplicate ids", () => {
