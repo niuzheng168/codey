@@ -200,11 +200,12 @@ export function resolveCloudCliGatewayConfig(
 }
 
 export class CloudCliGateway {
-  constructor(config, { sessionAuthenticator, nodePolicy, accessLeaseMs = 5000 } = {}) {
+  constructor(config, { sessionAuthenticator, nodePolicy, accessLeaseMs = 5000, ui } = {}) {
     this.config = config;
     this.sessionAuthenticator = sessionAuthenticator;
     this.nodePolicy = nodePolicy;
     this.accessLeaseMs = accessLeaseMs;
+    this.ui = ui;
     if (config.ssoMaster && !sessionAuthenticator) {
       throw new Error("Workspace SSO requires revocable portal authentication");
     }
@@ -273,6 +274,9 @@ export class CloudCliGateway {
       res.end();
       return true;
     }
+    // Share static UI only after the same ownership checks as an upstream request.
+    // All API/SSE/plugin routes and legacy /assets requests continue to the VM.
+    if (this.ui && await this.ui.handleWorkspace(req, res, node)) return true;
 
     const target = new URL(node.upstream);
     target.pathname = requestUrl.pathname.slice(node.basePath.length) || "/";

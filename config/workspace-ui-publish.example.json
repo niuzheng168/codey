@@ -1,0 +1,7 @@
+{
+  "subscription": "00000000-0000-0000-0000-000000000000",
+  "resourceGroup": "your-codey-resource-group",
+  "storageAccount": "yourcodeystorage",
+  "share": "session-data",
+  "directory": "cloudcli-ui"
+}

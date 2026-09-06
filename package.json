@@ -12,7 +12,11 @@
     "dev": "node --watch src/server.mjs",
     "skill:build": "node scripts/build-node-skill.mjs",
     "skill:check": "node scripts/build-node-skill.mjs --check",
+    "workspace:build": "node scripts/build-cloudcli-ui.mjs",
+    "workspace:publish": "node scripts/publish-cloudcli-ui.mjs",
+    "check:workspace": "node --check src/cloudcli-ui.mjs && node --check src/cloudcli-ui-package.mjs && node --check scripts/build-cloudcli-ui.mjs && node --check scripts/publish-cloudcli-ui.mjs && node --check cloudcli/public/sw.js",
+    "voice:rewrite:probe": "node scripts/verify-codey-voice-rewrite.mjs",
     "test": "node --test \"test/*.test.mjs\"",
-    "check": "node --check src/server.mjs && node --check src/password-auth.mjs && node --check src/workspace-sso.mjs && node --check src/client-ticket.mjs && node --check src/cloudcli-gateway.mjs && node --check src/node-data-gateway.mjs && node --check src/signed-store.mjs && node --check src/account-store.mjs && node --check src/node-policy.mjs && node --check src/settings-api.mjs && node --check node-relay/server.mjs && node --check public/app.js && node --check public/login.js && node --check public/portal-session.js && node --check public/client-aggregator.js && node --check public/client-history.js && node --check public/node-transport.js && node --check public/settings.js && node --check scripts/build-node-skill.mjs && node --check skills/codey-node-onboarding/scripts/gateway-entry.mjs"
+    "check": "node --check src/server.mjs && node --check src/voice-service.mjs && node --check src/voice-gateway.mjs && node --check src/voice-rewrite-service.mjs && node --check scripts/verify-codey-voice-rewrite.mjs && node --check src/password-auth.mjs && node --check src/workspace-sso.mjs && node --check src/client-ticket.mjs && node --check src/cloudcli-gateway.mjs && node --check src/node-data-gateway.mjs && node --check src/signed-store.mjs && node --check src/account-store.mjs && node --check src/node-policy.mjs && node --check src/settings-api.mjs && node --check node-relay/server.mjs && node --check public/app.js && node --check public/login.js && node --check public/portal-session.js && node --check public/client-aggregator.js && node --check public/client-history.js && node --check public/node-transport.js && node --check public/settings.js && node --check scripts/build-node-skill.mjs && node --check skills/codey-node-onboarding/scripts/gateway-entry.mjs"
   }
 }

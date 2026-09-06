@@ -23,6 +23,8 @@ import { NodePolicy } from "./node-policy.mjs";
 import { SettingsApi } from "./settings-api.mjs";
 import { VoiceService, resolveVoiceServiceConfig } from "./voice-service.mjs";
 import { VoiceGateway } from "./voice-gateway.mjs";
+import { VoiceRewriteService, resolveVoiceRewriteConfig } from "./voice-rewrite-service.mjs";
+import { CloudCliUi } from "./cloudcli-ui.mjs";
 import {
   createCloudCliGateway,
   resolveCloudCliGatewayConfig,
@@ -268,6 +270,7 @@ export function createPortalServer(options) {
   const portalName = String(options.portalName || "Codex Usage Portal").slice(0, 80);
   const mcpProxyUrl = String(options.mcpProxyUrl ?? "").trim();
   const cloudCliGateway = options.cloudCliGateway ?? null;
+  const cloudCliUi = options.cloudCliUi ?? null;
   const nodeDataGateway = options.nodeDataGateway ?? null;
   const voiceGateway = options.voiceGateway ?? null;
   const nodePolicy = options.nodePolicy ?? null;
@@ -359,6 +362,7 @@ export function createPortalServer(options) {
           return;
         }
       }
+      if (cloudCliUi && await cloudCliUi.handleAssets(req, res)) return;
       if (nodeDataGateway && await nodeDataGateway.handle(req, res, dataNodeIds)) return;
       if (req.method === "GET" && url.pathname === "/api/cloudcli/nodes") {
         sendJson(res, 200, {
@@ -1040,15 +1044,23 @@ async function main() {
     publicBaseUrl,
     staticRoot: path.join(PROJECT_ROOT, "public"),
   }) : null;
+  const cloudCliUiRoot = String(process.env.PORTAL_CLOUDCLI_UI_ROOT ?? "").trim();
+  if (cloudCliUiRoot && (!passwordMode || !process.env.PORTAL_CLOUDCLI_CONFIG)) {
+    throw new Error("Shared Workspace UI requires password login and a CloudCLI gateway");
+  }
+  const cloudCliUi = cloudCliUiRoot ? new CloudCliUi(cloudCliUiRoot) : null;
   const cloudCliGateway = createCloudCliGateway(
     resolveCloudCliGatewayConfig(process.env),
-    { sessionAuthenticator: passwordAuthenticator, nodePolicy },
+    { sessionAuthenticator: passwordAuthenticator, nodePolicy, ui: cloudCliUi },
   );
   const nodeDataConfig = resolveNodeDataGatewayConfig(process.env);
   const nodeDataGateway = nodeDataConfig ? new NodeDataGateway(nodeDataConfig, { nodePolicy }) : null;
   const voiceGateway = passwordAuthenticator ? new VoiceGateway(
     new VoiceService(resolveVoiceServiceConfig(process.env)),
-    { authenticator: passwordAuthenticator, nodePolicy },
+    {
+      authenticator: passwordAuthenticator, nodePolicy,
+      rewriteService: new VoiceRewriteService(resolveVoiceRewriteConfig(process.env)),
+    },
   ) : null;
   const settingsApi = accountStore ? new SettingsApi({
     accounts: accountStore, nodePolicy, authenticator: passwordAuthenticator, cloudCliGateway, nodeDataGateway,
@@ -1069,6 +1081,7 @@ async function main() {
     allowedPrincipalId,
     mcpProxyUrl,
     cloudCliGateway,
+    cloudCliUi,
     nodeDataGateway,
     voiceGateway,
     passwordAuthenticator,

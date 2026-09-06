@@ -10,6 +10,8 @@ import test from "node:test";
 import { PasswordAuthenticator, hashPassword } from "../src/password-auth.mjs";
 import { createMultiUserPortalServer } from "../src/server.mjs";
 import { CloudCliGateway } from "../src/cloudcli-gateway.mjs";
+import { CloudCliUi } from "../src/cloudcli-ui.mjs";
+import { uiFixture } from "./helpers/cloudcli-ui.mjs";
 import { NodeDataGateway } from "../src/node-data-gateway.mjs";
 import { validateConfig } from "../src/config.mjs";
 
@@ -132,6 +134,7 @@ async function upgrade(url, cookie, suppliedOrigin = origin) {
 
 test("all portal data/static/mutation/WS routes require login; SSO has no browser JWT and logout closes sockets", async (t) => {
   const auth = await authenticator(t);
+  const ui = new CloudCliUi((await uiFixture(t)).store);
   const seen = [];
   const upstream = http.createServer((req, res) => {
     seen.push({ url: req.url, headers: req.headers });
@@ -147,7 +150,7 @@ test("all portal data/static/mutation/WS routes require login; SSO has no browse
   const gateway = new CloudCliGateway({
     ssoMaster: randomBytes(32).toString("base64url"),
     nodes: [{ id: "node-a", name: "Node A", basePath: "/cloudcli/node-a", region: "test", upstream: new URL(nodeUrl) }],
-  }, { sessionAuthenticator: auth });
+  }, { sessionAuthenticator: auth, ui });
   const config = validateConfig({
     nodes: [{ id: "node-a", name: "Node A", endpoint: "http://127.0.0.1:4141/usage" }],
     clientNodes: [{ id: "node-a", name: "Node A", endpoint: "https://node-a.example.test:8443/usage" }],
@@ -156,6 +159,7 @@ test("all portal data/static/mutation/WS routes require login; SSO has no browse
     passwordAuthenticator: auth,
     allowedPrincipalId: credential.principalId,
     cloudCliGateway: gateway,
+    cloudCliUi: ui,
     nodeDataGateway: new NodeDataGateway({
       signingKey: "test-data-key".repeat(4),
       nodes: [{ id: "node-a", upstream: new URL(nodeUrl), tlsServerName: "node-a.example.test" }],
@@ -164,7 +168,7 @@ test("all portal data/static/mutation/WS routes require login; SSO has no browse
     config,
   });
   const url = await listen(t, server);
-  for (const pathname of ["/api/nodes", "/api/client-nodes", "/api/cloudcli/nodes", "/api/node-data/node-a/usage", "/api/node-data/node-a/session-history", "/node-transport.js", "/app.js", "/styles.css", "/cloudcli/node-a/", "/cloudcli/node-a/api/projects", "/cloudcli/node-a/api/auth/register"]) {
+  for (const pathname of ["/api/nodes", "/api/client-nodes", "/api/cloudcli/nodes", "/api/node-data/node-a/usage", "/api/node-data/node-a/session-history", "/node-transport.js", "/app.js", "/styles.css", "/cloudcli/node-a/", "/cloudcli/node-a/api/projects", "/cloudcli/node-a/api/auth/register", "/cloudcli/node-a/_ui/runtime.js", "/cloudcli/node-a/sw.js", "/cloudcli-ui/ui-one/assets/app.js"]) {
     for (const method of ["GET", "POST"]) {
       const result = await fetch(`${url}${pathname}`, {
         method, redirect: "manual",
@@ -188,6 +192,8 @@ test("all portal data/static/mutation/WS routes require login; SSO has no browse
   assert.equal(loginResponse.status, 200);
   const cookie = loginResponse.headers.get("set-cookie").split(";")[0];
   assert.equal((await fetch(`${url}/api/cloudcli/nodes`, { headers: { cookie } })).status, 200);
+  assert.match(await (await fetch(`${url}/cloudcli/node-a/`, { headers: { cookie } })).text(), /cloudcli-ui\/ui-one/);
+  assert.equal((await fetch(`${url}/cloudcli-ui/ui-one/assets/app.js`, { headers: { cookie } })).status, 200);
   const protectedRequest = await fetch(`${url}/cloudcli/node-a/api/projects`, {
     headers: { cookie, authorization: "Bearer attacker-jwt", "x-codey-workspace-assertion": "forged" },
   });
@@ -222,6 +228,7 @@ test("all portal data/static/mutation/WS routes require login; SSO has no browse
   assert.equal(logout.status, 200);
   await disconnected;
   assert.equal((await fetch(`${url}/cloudcli/node-a/api/projects`, { headers: { cookie } })).status, 401);
+  assert.equal((await fetch(`${url}/cloudcli-ui/ui-one/assets/app.js`, { headers: { cookie } })).status, 401);
   assert.equal((await fetch(`${url}/api/node-data/node-a/usage`, { headers: { cookie } })).status, 401);
   const expired = await upgrade(`${url}/cloudcli/node-a/shell`, cookie);
   assert.match(expired.output, /401 Unauthorized/);

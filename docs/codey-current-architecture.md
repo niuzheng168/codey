@@ -1,14 +1,25 @@
 # Codey 当前架构
 
 > 快照日期：2026-09-06（UTC+08:00）  
-> 12:03 更新：四个远程节点已发布简化后的输入工具栏，仅更新静态资源，
+> 18:31 更新：四个 Workspace 已发布“恢复上次润色 / 重新生成”菜单及快捷恢复，
+> 仅更新静态资源，线上入口与关键 JS/CSS 校验通过；Portal 与节点服务未变。见
+> [恢复/重新生成发布记录](./codey-voice-rewrite.md#恢复重新生成更新发布2026-09-06utc)。
+> 前次 17:33 更新：Portal 与四个 Workspace 已发布手动 GPT-5.6 Terra 语音润色、
+> 原文查看和撤销；生产接口与节点入口校验通过，节点服务未重启。见
+> [发布与验证记录](./codey-voice-rewrite.md#生产发布2026-09-06utc)。
+> 更早 12:03 更新：四个远程节点已发布简化后的输入工具栏，仅更新静态资源，
 > 没有重启 CloudCLI、copilot-api 或 VM；仓库和配置边界见
 > [源码仓库说明](./repository-layout.md)。
 > Azure Container App：`codey`  
 > FQDN：`codey.ambitiouspond-a4ecfeb2.japaneast.azurecontainerapps.io`  
-> Revision：`codey--mai15-0906110539`  
-> Portal image：`codey:20260906-voice-011421`  
+> Revision：`codey--rewrite-0906090024`  
+> Portal image：`codey:20260906-rewrite-090024`  
 > CloudCLI nodes：`zhn-a100`、`jpe2`、`jpe3`、`westus2`
+
+源码后续更新（待上线）：已实现 Portal 统一托管工作区前端、一次构建/发布、
+运行时节点配置和按节点的浏览器缓存。**下面仍是当前生产架构快照**；
+首次切换需单独发布 Portal，迁移方案见
+[Workspace 前端统一发布](./codey-shared-workspace-ui.md)。
 
 ## 1. 总览
 
@@ -19,6 +30,9 @@ Codey 是一个 ACA 托管的多节点 Codex 门户，目前包含四类功能�
 3. 节点上的完整 CloudCLI Web IDE。
 4. CloudCLI 语音输入：浏览器录音，ACA 认证转写代理；Azure Speech 和
    MAI-Transcribe-1.5 均已在用户提供的 West US Speech 资源上实测启用。
+   转写后可手动点击纸笔按钮，由同一 Foundry 资源的 `gpt-5.6-terra`
+   结合有限最近对话润色；支持查看原文、撤销及本地恢复上次结果。
+   已有结果时，纸笔菜单可选择恢复或重新生成，不自动发送聊天消息。
 
 ```text
 Browser

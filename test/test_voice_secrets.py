@@ -99,6 +99,23 @@ class VoiceSecretPlanTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("explicit Speech endpoint", result.stderr)
 
+    def test_rewrite_binding_uses_an_explicit_deployment_and_keeps_keys_secret(self):
+        result = self.invoke(self.aliases(), "--rewrite-deployment", "my-gpt-5.6-deployment")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        binding = dict(item.split("=", 1) for item in json.loads(result.stdout)["bindings"])
+        self.assertEqual(binding["VOICE_REWRITE_DEPLOYMENT"], "my-gpt-5.6-deployment")
+        self.assertNotIn("VOICE_REWRITE_API_KEY", binding)
+        result = self.invoke(
+            self.aliases() + "VOICE_REWRITE_ENDPOINT=https://other.openai.azure.com/openai/v1/\n",
+            "--rewrite-deployment", "my-gpt-5.6-deployment",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires its own key", result.stderr)
+
+    def test_invalid_rewrite_model_or_effort_is_rejected_without_writing(self):
+        self.assertNotEqual(self.invoke(self.aliases(), "--rewrite-deployment", "../bad").returncode, 0)
+        self.assertNotEqual(self.invoke(self.aliases() + "VOICE_REWRITE_REASONING_EFFORT=unlimited\n").returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

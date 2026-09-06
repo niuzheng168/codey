@@ -11,6 +11,8 @@ import { AccountStore } from "../src/account-store.mjs";
 import { NodePolicy } from "../src/node-policy.mjs";
 import { NodeDataGateway } from "../src/node-data-gateway.mjs";
 import { CloudCliGateway } from "../src/cloudcli-gateway.mjs";
+import { CloudCliUi } from "../src/cloudcli-ui.mjs";
+import { uiFixture } from "./helpers/cloudcli-ui.mjs";
 import { PasswordAuthenticator, hashPassword } from "../src/password-auth.mjs";
 import { SettingsApi } from "../src/settings-api.mjs";
 import { UserConfigStore } from "../src/user-config-store.mjs";
@@ -151,13 +153,14 @@ async function fixture(t) {
       new URL(`${target.pathname}${target.search}`, vmByHost[target.hostname].url), options, callback,
     ),
   });
+  const ui = new CloudCliUi((await uiFixture(t)).store);
   const workspace = new CloudCliGateway({
     ssoMaster: master,
     nodes: [
       { id: "alice-node", name: "Alice private", basePath: "/cloudcli/alice-node", upstream: new URL(vmA.url) },
       { id: nodeB.id, name: "Bob private", basePath: `/cloudcli/${nodeB.id}`, upstream: new URL(vmB.url) },
     ],
-  }, { sessionAuthenticator: auth, nodePolicy: policy, accessLeaseMs: 20 });
+  }, { sessionAuthenticator: auth, nodePolicy: policy, accessLeaseMs: 20, ui });
   const shared = {
     status: async () => ({ configured: true }),
     list: async () => ({
@@ -170,7 +173,7 @@ async function fixture(t) {
   const settingsApi = new SettingsApi({ accounts, nodePolicy: policy, authenticator: auth, cloudCliGateway: workspace, nodeDataGateway: dataGateway });
   const server = createMultiUserPortalServer({
     config: defaults, passwordAuthenticator: auth, nodePolicy: policy, settingsApi,
-    userConfigStore: policy, cloudCliGateway: workspace, nodeDataGateway: dataGateway,
+    userConfigStore: policy, cloudCliGateway: workspace, cloudCliUi: ui, nodeDataGateway: dataGateway,
     sessionHistoryClient: shared, readOnly: true, clientOnly: true, clientRelaySigningKey: ticketMaster,
     // The deployed legacy environment still contains this restriction.
     // Multi-user password authentication must not reject valid non-bootstrap users.
@@ -231,6 +234,9 @@ test("multi-user security: independent accounts, immutable node ownership and ob
       }
       const ownWorkspace = await api(cookie, `/cloudcli/${ownId}/api/projects`);
       assert.equal((await ownWorkspace.json()).privateOwner, ownOwner);
+      const ownShell = await api(cookie, `/cloudcli/${ownId}/`);
+      assert.ok((await ownShell.text()).includes(`src="/cloudcli/${ownId}/_ui/runtime.js"`));
+      assert.equal((await api(cookie, "/cloudcli-ui/ui-one/assets/app.js")).status, 200);
       const ownSocket = await upgrade(`${f.url}/cloudcli/${ownId}/ws`, cookie);
       assert.equal(ownSocket.status, 101);
       ownSocket.socket.destroy();
@@ -243,6 +249,11 @@ test("multi-user security: independent accounts, immutable node ownership and ob
         `/api/session-history/${foreignId}/active/known-session/archive`,
         `/cloudcli/${foreignId}/api/projects`,
         `/cloudcli/${foreignId}/api/files?path=/home/zhn`,
+        `/cloudcli/${foreignId}/`,
+        `/cloudcli/${foreignId}/_ui/runtime.js`,
+        `/cloudcli/${foreignId}/_ui/version.json`,
+        `/cloudcli/${foreignId}/manifest.json`,
+        `/cloudcli/${foreignId}/sw.js`,
         `/api/settings/nodes/${foreignId}`,
       ]) {
         const result = await api(cookie, endpoint, "GET", undefined, {

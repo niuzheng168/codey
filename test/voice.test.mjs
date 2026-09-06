@@ -12,6 +12,7 @@ import { validateConfig } from "../src/config.mjs";
 import { createMultiUserPortalServer } from "../src/server.mjs";
 import { VoiceGateway } from "../src/voice-gateway.mjs";
 import { MAX_VOICE_BYTES, VoiceError, VoiceService, resolveVoiceServiceConfig, validateVoiceWave } from "../src/voice-service.mjs";
+import { VoiceRewriteService, resolveVoiceRewriteConfig, MAX_REWRITE_BYTES } from "../src/voice-rewrite-service.mjs";
 
 const azureKey = "test-only-azure-key-".repeat(3);
 const maiKey = "test-only-mai-key-".repeat(3);
@@ -201,10 +202,21 @@ async function fixture(t) {
     async canAccess(id, nodeId) { return owned.get(id)?.includes(nodeId) || false; },
   };
   const seen = [];
-  const behavior = { fetch: async () => json({ combinedPhrases: [{ text: "Hello from voice" }] }) };
+  const rewriteResponse = () => json({
+    status: "completed",
+    output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify({ text: "Please check the voice settings.", ambiguities: [] }) }] }],
+  });
+  const rewriteSeen = [];
+  const behavior = {
+    fetch: async () => json({ combinedPhrases: [{ text: "Hello from voice" }] }),
+    rewriteFetch: async () => rewriteResponse(),
+  };
   const service = new VoiceService(resolveVoiceServiceConfig(environment), { fetchImpl: async (...args) => { seen.push(args); return behavior.fetch(...args); } });
+  const rewriteService = new VoiceRewriteService(resolveVoiceRewriteConfig({
+    ...environment, VOICE_REWRITE_DEPLOYMENT: "test-only-gpt-5.6",
+  }), { fetchImpl: async (...args) => { rewriteSeen.push(args); return behavior.rewriteFetch(...args); } });
   let clock = Date.now();
-  const gateway = new VoiceGateway(service, { authenticator: auth, nodePolicy: policy, clock: () => clock, leaseMs: 15, uploadTimeoutMs: 200 });
+  const gateway = new VoiceGateway(service, { authenticator: auth, nodePolicy: policy, rewriteService, clock: () => clock, leaseMs: 15, uploadTimeoutMs: 200 });
   let vmRequests = 0;
   const server = createMultiUserPortalServer({
     passwordAuthenticator: auth, nodePolicy: policy, voiceGateway: gateway,
@@ -223,7 +235,7 @@ async function fixture(t) {
     headers: { Origin: origin, ...(cookie ? { Cookie: cookie } : {}), "Content-Type": "audio/wav", ...extra },
     ...(!["GET", "HEAD"].includes(method) ? { body } : {}),
   });
-  return { request, cookieA, cookieB, auth, owned, seen, gateway, behavior, base,
+  return { request, cookieA, cookieB, auth, owned, seen, rewriteSeen, rewriteResponse, gateway, behavior, base,
     nextMinute() { clock += 61000; }, vmRequests: () => vmRequests };
 }
 
@@ -249,6 +261,76 @@ test("voice HTTP uses real portal sessions, enforces per-node ownership and neve
   }
   assert.equal(f.vmRequests(), 0);
   assert.equal(f.gateway.active, 0);
+});
+
+test("manual rewrite HTTP authenticates, confines history to data and never contacts a VM or forwards portal credentials", async (t) => {
+  const f = await fixture(t);
+  const options = {
+    path: "rewrite", extra: { "Content-Type": "application/json" },
+    body: JSON.stringify({ transcript: "Please, um, check the voice settings.", history: [{ role: "assistant", content: "Reference only." }], language: "auto" }),
+  };
+  assert.equal((await f.request("node-a", "", options)).status, 401);
+  assert.equal((await f.request("node-a", f.cookieB, options)).status, 404);
+  assert.equal((await f.request("node-a", f.cookieA, { ...options, extra: { ...options.extra, Origin: "https://evil.test" } })).status, 403);
+  assert.equal(f.rewriteSeen.length, 0);
+  const result = await f.request("node-a", f.cookieA, options);
+  assert.equal(result.status, 200);
+  assert.equal((await result.json()).text, "Please check the voice settings.");
+  assert.equal(result.headers.get("set-cookie"), null);
+  assert.equal(f.vmRequests(), 0);
+  assert.equal(f.seen.length, 0);
+  assert.equal(f.gateway.rewriteActive, 0);
+  const [, upstream] = f.rewriteSeen[0];
+  assert.equal(upstream.headers.Cookie, undefined);
+  assert.equal(upstream.headers.Authorization, undefined);
+  assert.equal(JSON.parse(upstream.body).model, "test-only-gpt-5.6");
+  const config = await f.request("node-a", f.cookieA, { path: "config", method: "GET" });
+  const visible = await config.text();
+  assert.equal(JSON.parse(visible).rewrite.configured, true);
+  for (const secret of [azureKey, "test-only-gpt-5.6", "voice-test"]) assert.ok(!visible.includes(secret));
+});
+
+test("rewrite HTTP rejects invalid requests and has a separate bounded per-account quota", async (t) => {
+  const f = await fixture(t);
+  const options = { path: "rewrite", extra: { "Content-Type": "application/json" }, body: '{"transcript":"hello"}' };
+  for (const [patch, status] of [
+    [{ method: "GET" }, 405], [{ extra: { "Content-Type": "audio/wav" } }, 415],
+    [{ path: "rewrite?model=other" }, 400], [{ body: "{" }, 400],
+    [{ body: '{"transcript":"hello","endpoint":"https://evil.test"}' }, 400],
+    [{ body: Buffer.alloc(MAX_REWRITE_BYTES + 1) }, 413],
+  ]) assert.equal((await f.request("node-a", f.cookieA, { ...options, ...patch })).status, status);
+  assert.equal(f.rewriteSeen.length, 0);
+  f.nextMinute();
+  for (let index = 0; index < 8; index++) assert.equal((await f.request("node-a", f.cookieA, options)).status, 200);
+  assert.equal((await f.request("node-a", f.cookieA, options)).status, 429);
+  assert.equal((await f.request("node-b", f.cookieB, options)).status, 200);
+  // Exhausting rewrite never consumes the transcription allowance.
+  assert.equal((await f.request("node-a", f.cookieA)).status, 200);
+  assert.equal(f.gateway.rewriteActive, 0);
+});
+
+test("logout and ownership revocation cancel pending rewrites without returning a late model result", async (t) => {
+  for (const action of ["logout", "remove-node"]) {
+    const f = await fixture(t);
+    let started;
+    const ready = new Promise((resolve) => { started = resolve; });
+    let aborted = false;
+    f.behavior.rewriteFetch = (_url, { signal }) => new Promise((_resolve, reject) => {
+      started();
+      signal.addEventListener("abort", () => { aborted = true; reject(signal.reason); }, { once: true });
+    });
+    const pending = f.request("node-a", f.cookieA, {
+      path: "rewrite", extra: { "Content-Type": "application/json" }, body: '{"transcript":"hello"}',
+    });
+    await ready;
+    if (action === "logout") await f.auth.revoke({ headers: { cookie: f.cookieA } });
+    else f.owned.set("voice-owner-a", []);
+    const result = await pending;
+    assert.equal(result.status, action === "logout" ? 401 : 403);
+    assert.equal(aborted, true);
+    assert.equal(f.gateway.rewriteActive, 0);
+    assert.ok(!(await result.text()).includes("Please check"));
+  }
 });
 
 test("voice HTTP rejects cross-origin, malformed audio, excessive uploads, endpoint overrides and wrong methods", async (t) => {

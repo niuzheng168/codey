@@ -34,6 +34,8 @@ npm test
 - [用户名密码与 Workspace SSO](./docs/codey-password-sso-design.md)
 - [浏览器直连 / ACA VNet 连接选项](./docs/codey-node-connection-modes.md)
 - [多用户与节点隔离](./docs/codey-multiuser-design.md)
+- [手动语音润色、撤销与恢复](./docs/codey-voice-rewrite.md)
+- [Workspace 前端统一发布（源码已实现，待首次迁移）](./docs/codey-shared-workspace-ui.md)
 
 **当前 ACA 部署（2026-09-05）：** Codey 支持多个用户名密码账号；原 `zhn`
 为管理员，在“账号与节点 → 用户管理”创建账号。节点设置按不可变 owner ID

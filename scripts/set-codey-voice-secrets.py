@@ -14,6 +14,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("env_file", nargs="?", type=pathlib.Path, default=workspace / ".env")
 parser.add_argument("bindings_file", nargs="?", type=pathlib.Path)
 parser.add_argument("--mai-model", choices=["MAI-Transcribe-1", "MAI-Transcribe-1.5", "MAI-Transcribe-2"])
+parser.add_argument("--rewrite-deployment", help="Explicit existing Foundry deployment; no model or resource is created.")
 parser.add_argument("--secret-suffix", default="", help="Version the new secrets so an old revision keeps its original key.")
 parser.add_argument("--expect-env-sha256", help="Refuse a .env changed since the successful transcription probe.")
 parser.add_argument("--dry-run", action="store_true", help="Validate and show only names/SecretRef bindings; do not call Azure.")
@@ -35,6 +36,10 @@ for line in raw_env.decode("utf-8-sig").splitlines():
 # understood by the running image. Never rewrite the user's .env or duplicate keys.
 values["FOUNDRY_API_KEY"] = values.get("FOUNDRY_API_KEY") or values.get("FOUNDRY_KEY", "")
 values["AZURE_SPEECH_ENDPOINT"] = values.get("AZURE_SPEECH_ENDPOINT") or values.get("SPEECH_ENDPOINT", "")
+if args.rewrite_deployment:
+    values["VOICE_REWRITE_DEPLOYMENT"] = args.rewrite_deployment
+if values.get("VOICE_REWRITE_DEPLOYMENT") and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", values["VOICE_REWRITE_DEPLOYMENT"]):
+    raise SystemExit("Invalid rewrite deployment; no secret changes made")
 if args.mai_model:
     values["MAI_TRANSCRIBE_MODEL"] = args.mai_model
     values["MAI_TRANSCRIBE_SPEECH_ENDPOINT"] = (
@@ -47,10 +52,13 @@ allowed = {
     "FOUNDRY_ENDPOINT", "FOUNDRY_API_KEY", "AZURE_SPEECH_ENDPOINT",
     "AZURE_SPEECH_KEY", "AZURE_SPEECH_API_KEY", "MAI_TRANSCRIBE_SPEECH_ENDPOINT",
     "MAI_TRANSCRIBE_KEY", "MAI_TRANSCRIBE_API_KEY", "MAI_TRANSCRIBE_MODEL",
+    "VOICE_REWRITE_ENDPOINT", "VOICE_REWRITE_API_KEY", "VOICE_REWRITE_DEPLOYMENT",
+    "VOICE_REWRITE_REASONING_EFFORT",
 }
 selected = {key: value for key, value in values.items() if key in allowed and value}
-if not (selected.get("FOUNDRY_API_KEY") or selected.get("AZURE_SPEECH_KEY") or selected.get("AZURE_SPEECH_API_KEY")):
-    raise SystemExit("A server-side Speech key is required")
+if not (selected.get("FOUNDRY_API_KEY") or selected.get("AZURE_SPEECH_KEY") or selected.get("AZURE_SPEECH_API_KEY")
+        or selected.get("VOICE_REWRITE_API_KEY")):
+    raise SystemExit("A server-side Speech or rewrite key is required")
 for name, value in selected.items():
     if name.endswith("_ENDPOINT"):
         endpoint = urlsplit(value)
@@ -63,6 +71,25 @@ if args.mai_model and not (selected.get("MAI_TRANSCRIBE_KEY") or selected.get("M
     mai = urlsplit(selected["MAI_TRANSCRIBE_SPEECH_ENDPOINT"])
     if not azure.hostname or (azure.scheme, azure.hostname, azure.port) != (mai.scheme, mai.hostname, mai.port):
         raise SystemExit("A separate MAI resource requires its own key; no secret changes made")
+if selected.get("VOICE_REWRITE_REASONING_EFFORT", "low") not in {"none", "low", "medium"}:
+    raise SystemExit("Unsupported rewrite reasoning effort; no secret changes made")
+if selected.get("VOICE_REWRITE_DEPLOYMENT"):
+    foundry = urlsplit(selected.get("FOUNDRY_ENDPOINT", ""))
+    rewrite = urlsplit(selected.get("VOICE_REWRITE_ENDPOINT") or selected.get("FOUNDRY_ENDPOINT", ""))
+    if not rewrite.hostname or not re.fullmatch(r"[a-z0-9-]+\.(?:services\.ai\.azure\.com|openai\.azure\.com)", rewrite.hostname, re.I):
+        raise SystemExit("Rewrite requires a Foundry/OpenAI HTTPS endpoint; no secret changes made")
+    valid_path = (
+        re.fullmatch(r"/(?:openai/v1(?:/responses)?/?)?", rewrite.path)
+        if selected.get("VOICE_REWRITE_ENDPOINT")
+        else re.fullmatch(r"/(?:api/projects/[a-zA-Z0-9_.-]+/?)?", rewrite.path)
+    )
+    if not valid_path or rewrite.query or rewrite.port not in {None, 443}:
+        raise SystemExit("Unsupported rewrite endpoint path/query/port; no secret changes made")
+    if not selected.get("VOICE_REWRITE_API_KEY") and (
+        not foundry.hostname or rewrite.hostname.split(".")[0] != foundry.hostname.split(".")[0]
+        or not selected.get("FOUNDRY_API_KEY")
+    ):
+        raise SystemExit("A separate rewrite resource requires its own key; no secret changes made")
 
 secret_values = [value for name, value in selected.items() if name.endswith("_KEY")]
 old_factory = logging.getLogRecordFactory()

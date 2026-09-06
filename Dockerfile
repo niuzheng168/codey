@@ -20,6 +20,9 @@ ENV NODE_ENV=production \
     PORTAL_NODE_DATA_CONFIG=/app/config/node-data.aca.json \
     SESSION_SHARE_PORTAL_CONFIG=/app/config/session-share.aca.json
 
+# Workspace UI releases are published separately to the existing persistent
+# share, not copied to VMs or baked into this backend image. After the first
+# package is published, enable PORTAL_CLOUDCLI_UI_ROOT=/data/cloudcli-ui.
 WORKDIR /app
 
 COPY package.json package-lock.json README.md ./

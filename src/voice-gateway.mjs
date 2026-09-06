@@ -1,6 +1,7 @@
 import { MAX_VOICE_BYTES, VOICE_LANGUAGES, VoiceError } from "./voice-service.mjs";
+import { MAX_REWRITE_BYTES, validateRewriteRequest } from "./voice-rewrite-service.mjs";
 
-const ROUTE = /^\/cloudcli\/([a-z0-9][a-z0-9_-]{0,31})\/api\/voice\/codey\/(config|transcribe)$/;
+const ROUTE = /^\/cloudcli\/([a-z0-9][a-z0-9_-]{0,31})\/api\/voice\/codey\/(config|transcribe|rewrite)$/;
 
 function send(req, res, status, value, headers = {}) {
   if (res.destroyed) return;
@@ -17,7 +18,7 @@ function send(req, res, status, value, headers = {}) {
   res.end(req.method === "HEAD" ? undefined : bytes);
 }
 
-function readAudio(req, signal, timeoutMs) {
+function readBody(req, signal, timeoutMs, maxBytes = MAX_VOICE_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let bytes = 0;
@@ -40,7 +41,7 @@ function readAudio(req, signal, timeoutMs) {
     const abort = () => fail(signal.reason || new VoiceError(499, "VOICE_CANCELLED", "Audio upload cancelled."));
     const data = (chunk) => {
       bytes += chunk.length;
-      if (bytes > MAX_VOICE_BYTES) { fail(new VoiceError(413, "VOICE_AUDIO_TOO_LARGE", "Audio upload is too large.")); return; }
+      if (bytes > maxBytes) { fail(new VoiceError(413, maxBytes === MAX_VOICE_BYTES ? "VOICE_AUDIO_TOO_LARGE" : "VOICE_REWRITE_INPUT_INVALID", "Voice payload is too large.")); return; }
       chunks.push(chunk);
     };
     const end = () => { cleanup(); resolve(Buffer.concat(chunks)); };
@@ -79,28 +80,32 @@ async function discardRejectedUpload(req) {
   });
 }
 
-/** Authenticated Codey-only STT endpoints intercepted before the per-VM Workspace proxy. */
+/** Authenticated Codey-only STT/rewrite endpoints intercepted before the per-VM Workspace proxy. */
 export class VoiceGateway {
-  constructor(service, { authenticator, nodePolicy, clock = Date.now, uploadTimeoutMs = 20000, leaseMs = 5000 } = {}) {
-    Object.assign(this, { service, authenticator, nodePolicy, clock, uploadTimeoutMs, leaseMs });
+  constructor(service, { authenticator, nodePolicy, rewriteService, clock = Date.now, uploadTimeoutMs = 20000, leaseMs = 5000 } = {}) {
+    Object.assign(this, { service, authenticator, nodePolicy, rewriteService, clock, uploadTimeoutMs, leaseMs });
     this.active = 0;
     this.users = new Map();
+    this.rewriteActive = 0;
+    this.rewriteUsers = new Map();
   }
 
-  reserve(userId) {
+  reserve(userId, rewrite = false) {
+    const users = rewrite ? this.rewriteUsers : this.users;
+    const active = rewrite ? "rewriteActive" : "active";
     const now = this.clock();
-    for (const [id, state] of this.users) {
-      if (!state.active && now - state.since >= 60000) this.users.delete(id);
+    for (const [id, state] of users) {
+      if (!state.active && now - state.since >= 60000) users.delete(id);
     }
-    const state = this.users.get(userId) || { active: false, since: now, attempts: 0 };
-    if (state.active || this.active >= 4 || state.attempts >= 8 || (!this.users.has(userId) && this.users.size >= 512)) {
+    const state = users.get(userId) || { active: false, since: now, attempts: 0 };
+    if (state.active || this[active] >= 4 || state.attempts >= 8 || (!users.has(userId) && users.size >= 512)) {
       throw new VoiceError(429, "VOICE_BUSY", "Voice requests are busy. Please wait and retry.");
     }
     state.active = true;
     state.attempts++;
-    this.users.set(userId, state);
-    this.active++;
-    return () => { state.active = false; this.active--; };
+    users.set(userId, state);
+    this[active]++;
+    return () => { state.active = false; this[active]--; };
   }
 
   async handle(req, res, workspaceNodeIds) {
@@ -125,26 +130,35 @@ export class VoiceGateway {
       if (match[2] === "config") {
         if (!["GET", "HEAD"].includes(req.method)) throw new VoiceError(405, "VOICE_METHOD_INVALID", "Method not allowed.");
         if (url.search) throw new VoiceError(400, "VOICE_QUERY_INVALID", "Invalid voice query.");
-        send(req, res, 200, this.service.publicConfig(principal.id));
+        send(req, res, 200, {
+          ...this.service.publicConfig(principal.id),
+          rewrite: this.rewriteService?.publicConfig() ?? { configured: false },
+        });
         return true;
       }
       if (req.method !== "POST") throw new VoiceError(405, "VOICE_METHOD_INVALID", "Method not allowed.");
       if (!this.authenticator.sameOrigin(req)) throw new VoiceError(403, "VOICE_ORIGIN_DENIED", "Cross-origin voice requests are not allowed.");
-      if ([...url.searchParams.keys()].some((key) => !["provider", "language"].includes(key)) ||
-          url.searchParams.getAll("provider").length !== 1 || url.searchParams.getAll("language").length > 1) {
+      const rewrite = match[2] === "rewrite";
+      if (rewrite && url.search) throw new VoiceError(400, "VOICE_QUERY_INVALID", "Rewrite takes no query parameters.");
+      if (!rewrite && ([...url.searchParams.keys()].some((key) => !["provider", "language"].includes(key)) ||
+          url.searchParams.getAll("provider").length !== 1 || url.searchParams.getAll("language").length > 1)) {
         throw new VoiceError(400, "VOICE_QUERY_INVALID", "Invalid voice query.");
       }
       const provider = url.searchParams.get("provider");
       const language = url.searchParams.get("language") || "auto";
-      if (!["azure-speech", "mai-transcribe"].includes(provider) || !VOICE_LANGUAGES.includes(language)) {
+      if (!rewrite && (!["azure-speech", "mai-transcribe"].includes(provider) || !VOICE_LANGUAGES.includes(language))) {
         throw new VoiceError(400, "VOICE_QUERY_INVALID", "Invalid voice service or language.");
       }
-      if (!this.service.configured(provider)) throw new VoiceError(503, "VOICE_NOT_CONFIGURED", "This voice service is not configured.");
-      if (!["audio/wav", "audio/x-wav"].includes(String(req.headers["content-type"] || "").split(";")[0].trim().toLowerCase())) {
-        throw new VoiceError(415, "VOICE_AUDIO_INVALID", "Expected PCM WAV audio.");
+      if (rewrite ? !this.rewriteService?.publicConfig().configured : !this.service.configured(provider)) {
+        throw new VoiceError(503, rewrite ? "VOICE_REWRITE_NOT_CONFIGURED" : "VOICE_NOT_CONFIGURED", "This voice service is not configured.");
       }
-      if (Number(req.headers["content-length"] || 0) > MAX_VOICE_BYTES) throw new VoiceError(413, "VOICE_AUDIO_TOO_LARGE", "Audio upload is too large.");
-      release = this.reserve(principal.id);
+      const contentType = String(req.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+      if (!(rewrite ? contentType === "application/json" : ["audio/wav", "audio/x-wav"].includes(contentType))) {
+        throw new VoiceError(415, rewrite ? "VOICE_REWRITE_INPUT_INVALID" : "VOICE_AUDIO_INVALID", rewrite ? "Expected JSON." : "Expected PCM WAV audio.");
+      }
+      const maxBytes = rewrite ? MAX_REWRITE_BYTES : MAX_VOICE_BYTES;
+      if (Number(req.headers["content-length"] || 0) > maxBytes) throw new VoiceError(413, rewrite ? "VOICE_REWRITE_INPUT_INVALID" : "VOICE_AUDIO_TOO_LARGE", "Voice payload is too large.");
+      release = this.reserve(principal.id, rewrite);
       stopSessionLease = this.authenticator.track(principal, () => {
         controller.abort(new VoiceError(401, "VOICE_LOGIN_REQUIRED", "Your Codey session has expired."));
       });
@@ -162,8 +176,16 @@ export class VoiceGateway {
         }, this.leaseMs);
         lease.unref?.();
       }
-      const audio = await readAudio(req, controller.signal, this.uploadTimeoutMs);
-      const result = await this.service.transcribe({ provider, language, audio, signal: controller.signal });
+      const body = await readBody(req, controller.signal, this.uploadTimeoutMs, maxBytes);
+      let input;
+      if (rewrite) {
+        try { input = JSON.parse(body.toString("utf8")); }
+        catch { throw new VoiceError(400, "VOICE_REWRITE_INPUT_INVALID", "Invalid rewrite JSON."); }
+        input = validateRewriteRequest(input);
+      }
+      const result = rewrite
+        ? await this.rewriteService.rewrite(input, { nodeId, signal: controller.signal })
+        : await this.service.transcribe({ provider, language, audio: body, signal: controller.signal });
       controller.signal.throwIfAborted();
       const current = await this.authenticator.principal(req);
       if (!current || current.id !== principal.id) throw new VoiceError(401, "VOICE_LOGIN_REQUIRED", "Your Codey session has expired.");

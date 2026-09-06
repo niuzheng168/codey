@@ -1,10 +1,15 @@
 # Codey / CloudCLI 语音输入
 
+手动 GPT 语音润色已于 2026-09-06 发布，其代码、上下文边界和生产验证说明见
+[手动语音润色](./codey-voice-rewrite.md)。下文保留原始语音转写的历史上线记录，
+不将这些旧记录当作新润色功能的验收。
+
 > 2026-09-06。复用 CloudCLI 的录音交互，增加服务端托管的 Azure Speech 和 MAI
 > 转写选项。录音不是 Codex 模型调用，不能把语音服务 key 放进浏览器或 VM。
 >
 > 当前：用户提供的 West US 资源，Azure Speech 与 **MAI-Transcribe-1.5** 均已实测上线。
-> ACA revision：`codey--mai15-0906110539`；沿用原 portal/MCP 镜像与节点前端。
+> MAI 1.5 上线时的 ACA revision：`codey--mai15-0906110539`；
+> 该次沿用原 portal/MCP 镜像与节点前端。
 
 ## 路径和权限
 
