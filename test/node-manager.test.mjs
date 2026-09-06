@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { validateConfig } from "../src/config.mjs";
 import { NodeManager } from "../src/node-manager.mjs";
 
@@ -175,7 +177,7 @@ test("node manager starts the local proxy from a verified artifact", async () =>
         endpoint: "http://127.0.0.1:4141/usage",
         management: {
           transport: "local",
-          sessionRoot: "C:\\Users\\test\\.codex\\sessions",
+          sessionRoot: path.join(tmpdir(), "codey-node-manager-fixture", ".codex", "sessions"),
           copilotApi: "none",
           codexCli: "desktop-managed",
         },
@@ -333,11 +335,11 @@ test("node manager reads and starts a prepared Windows SSH node", async () => {
         id: "windows",
         name: "Windows",
         endpoint: "http://windows.test:4141/usage",
-        apiKeyFile: "C:\\secure\\windows.api.key",
+        apiKeyFile: path.join(tmpdir(), "codey-node-manager-fixture", "windows.api.key"),
         management: {
           transport: "windows-ssh",
           sshHost: "windows-alias",
-          sessionApiKeyFile: "C:\\secure\\windows.session.key",
+          sessionApiKeyFile: path.join(tmpdir(), "codey-node-manager-fixture", "windows.session.key"),
           copilotApi: "windows-startup",
           codexCli: "desktop-managed",
         },

@@ -38,8 +38,10 @@ test("local node session reader lists and opens active and archived histories", 
     writeFile(archivedRollout, ""),
   ]);
   const setup = spawnSync(
-    "python",
+    process.platform === "win32" ? "python" : "python3",
     [
+      "-I",
+      "-S",
       "-c",
       [
         "import sqlite3,sys",
