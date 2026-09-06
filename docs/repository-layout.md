@@ -1,17 +1,24 @@
 # Codey source repositories
 
-The top-level repository is `niuzheng168/codey` (public). Codey-specific dependency
-snapshots are separate **private** repositories in the same account:
+The top-level repository is `niuzheng168/codey` (public). Its two main dependencies
+reuse the owner's **existing public forks**, which are the canonical development
+and deployment sources. They keep both GitHub's fork relationship and local
+`upstream` remotes:
 
-| Checkout path | Repository | Branch | Original upstream |
-| --- | --- | --- | --- |
-| `cloudcli` | `niuzheng168/codey-cloudcli` | `main` | `siteboon/claudecodeui` |
-| `copilot-api` | `niuzheng168/codey-copilot-api` | `dev` | `caozhiyuan/copilot-api` |
-| `cloudcli/plugins/starter` | `niuzheng168/codey-cloudcli-plugin-starter` | `main` | `cloudcli-ai/cloudcli-plugin-starter` |
+| Checkout path | Repository | Branch | Visibility | Upstream |
+| --- | --- | --- | --- | --- |
+| `cloudcli` | `niuzheng168/claudecodeui` | `main` | Public fork | `siteboon/claudecodeui` |
+| `copilot-api` | `niuzheng168/copilot-api` | `dev` | Public fork | `caozhiyuan/copilot-api` |
+| `cloudcli/plugins/starter` | `niuzheng168/codey-cloudcli-plugin-starter` | `main` | Private | `cloudcli-ai/cloudcli-plugin-starter` |
 
-The existing public `niuzheng168/claudecodeui` and `niuzheng168/copilot-api` forks
-are not overwritten. The private repositories retain upstream history and
-licenses. CloudCLI is AGPL-3.0-or-later; copilot-api and the starter plugin are MIT.
+On 2026-09-06, the locally committed Codey customizations were fast-forwarded into
+the two original forks without rewriting their history or changing source trees.
+The redundant `codey-cloudcli` and `codey-copilot-api` private mirrors are no longer
+submodule sources. They have not been deleted; the original working copies retain
+them only as `private-backup` remotes.
+
+Dependencies retain upstream history and licenses. CloudCLI is AGPL-3.0-or-later;
+copilot-api and the starter plugin are MIT.
 This repository does not relicense them. Keep applicable source-offer and
 distribution obligations in mind when sharing modified software.
 
@@ -24,8 +31,8 @@ and build artifacts are not committed.
 
 ## Clone
 
-Authenticate Git with a GitHub account that can read all three private
-repositories, then run:
+Authenticate Git with a GitHub account that can read the private starter plugin,
+then run:
 
 ```sh
 git clone --recurse-submodules https://github.com/niuzheng168/codey.git
@@ -35,25 +42,67 @@ cd codey
 For an existing clone:
 
 ```sh
+git submodule sync --recursive
 git submodule update --init --recursive
 ```
 
-An anonymous user can read the public parent but cannot clone the private
-submodules. Do not change dependency visibility or redirect a submodule to a
-public fork merely to fix an authentication failure.
+First fetch/pull the intended Codey revision on a clean parent checkout. The
+`sync` command is important for older clones: it replaces cached private-mirror
+URLs with the original fork URLs recorded in the updated `.gitmodules`.
+
+An anonymous user can read the parent and both public forks, but cannot clone the
+private starter plugin. Do not replace that plugin's URL with an unrelated
+account or change its visibility merely to fix an authentication failure.
 
 ## Commit dependency changes before parent changes
 
 Work on a named branch inside the relevant submodule, commit and push that branch
-to its **private** `origin`, then commit the new pointer in its parent. For the
+to its canonical `origin`, then commit the new pointer in its parent. For the
 starter plugin the order is starter → CloudCLI → Codey. For copilot-api the order
 is copilot-api → Codey.
 
 `git submodule update` checks out the parent's pinned commit; it is not a request
 to pull the latest upstream code. Do not run `--remote`, force-push, discard a
 dirty working tree, or update a running service as part of ordinary source sync.
-New repositories have GitHub Actions disabled so inherited upstream release
-workflows cannot publish packages or trigger deployments without review.
+The existing public forks keep their original Actions settings. Their release
+workflows require tags/manual dispatch; ordinary source synchronization does not
+request a deployment. The Codey parent and private backup/plugin repositories
+retain their existing disabled Actions settings.
+
+## Sync upstream while preserving Codey changes
+
+These are manual maintenance steps, not an automation installed by Codey. Start
+with clean working trees and check that `origin` is the owner's original fork and
+`upstream` is the corresponding upstream from the table above.
+
+```sh
+git -C cloudcli fetch upstream
+git -C cloudcli switch main
+git -C cloudcli merge upstream/main
+
+git -C copilot-api fetch upstream
+git -C copilot-api switch dev
+git -C copilot-api merge upstream/dev
+```
+
+If a merge conflicts, stop and resolve it explicitly, preserving Codey's auth,
+node isolation, HTTPS and voice changes. Do not reset to upstream, discard local
+changes, or use a force synchronization that removes custom commits. If upstream
+changes the nested plugin revision, first synchronize that commit into the
+owner's plugin repository and preserve the owner-controlled `.gitmodules` URL.
+
+Validate the merged submodules before publishing, then push children first:
+
+```sh
+git -C cloudcli push origin main
+git -C copilot-api push origin dev
+git add cloudcli copilot-api
+git commit -m "chore: update node dependency revisions"
+git push origin main
+```
+
+Changing a fork or submodule commit is separate from updating a running node.
+Build and deploy a reviewed revision only when explicitly requested.
 
 ## Configuration and validation
 

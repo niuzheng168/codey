@@ -2,6 +2,14 @@
 
 This is a source snapshot and a **frontend-only** rollout, not a backend upgrade.
 
+The initial private-mirror layout described below was subsequently corrected:
+the same local CloudCLI and copilot-api commits were fast-forwarded into
+`niuzheng168/claudecodeui` and `niuzheng168/copilot-api`. The parent now references
+those original public forks. This correction changes repository routing and
+documentation only; it does not change dependency source trees, merge new
+upstream code, redeploy nodes or alter existing fork Actions settings. See the
+[current repository layout](./repository-layout.md).
+
 ## Deployed UI
 
 - Four remote CloudCLI instances received the new composer static assets.
@@ -59,6 +67,6 @@ placeholders. No real credentials were found in the selected publication content
 
 Actual node configuration, deployment certificates, `.env`, account/session data,
 backups, test recordings and generated build artifacts are excluded from Git.
-Private dependency repositories retain their upstream history/licenses and
-GitHub Actions is disabled before the first push. Detailed machine-specific
+The initial private dependency repositories retained upstream history/licenses
+and had GitHub Actions disabled before their first push. Detailed machine-specific
 verification artifacts remain local and are not part of the public repository.
