@@ -1,0 +1,15 @@
+*
+!package.json
+!package-lock.json
+!README.md
+!Dockerfile
+!public/**
+public/downloads/**
+!src/**
+!scripts/build-node-skill.mjs
+!skills/codey-node-onboarding/**
+!config/nodes.aca.json
+!config/session-share.aca.json
+!config/cloudcli-nodes.aca.json
+!config/codey-node-ca.pem
+!config/node-data.aca.json

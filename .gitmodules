@@ -1,0 +1,8 @@
+[submodule "cloudcli"]
+	path = cloudcli
+	url = https://github.com/niuzheng168/codey-cloudcli.git
+	branch = main
+[submodule "copilot-api"]
+	path = copilot-api
+	url = https://github.com/niuzheng168/codey-copilot-api.git
+	branch = dev

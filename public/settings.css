@@ -1,0 +1,42 @@
+:root { color-scheme: dark; font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif; color: #e2e8f0; background: #080d17; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; line-height: 1.6; }
+header { display: flex; justify-content: space-between; align-items: center; max-width: 1160px; margin: auto; padding: 22px 24px; border-bottom: 1px solid #243047; }
+a { color: #67e8f9; text-decoration: none; }
+main { max-width: 1160px; margin: auto; padding: 30px 24px 60px; }
+h1 { margin: 0 0 8px; font-size: 30px; }
+h2 { margin: 0 0 12px; font-size: 20px; }
+h3 { font-size: 16px; }
+.muted { color: #94a3b8; font-size: 14px; }
+section { padding: 24px; margin: 24px 0; background: #101827; border: 1px solid #243047; border-radius: 12px; }
+.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: end; }
+label { display: grid; gap: 6px; color: #cbd5e1; font-size: 14px; }
+input { width: 100%; min-height: 40px; padding: 9px 11px; border: 1px solid #334155; border-radius: 7px; background: #090f1b; color: #e2e8f0; font: inherit; }
+button { min-height: 38px; padding: 8px 13px; border: 1px solid #155e75; border-radius: 7px; background: #143345; color: #a5f3fc; font: inherit; font-size: 13px; cursor: pointer; }
+button:disabled { opacity: .5; cursor: wait; }
+button.danger { color: #fda4af; background: #351c28; border-color: #713247; }
+button:hover:not(:disabled) { filter: brightness(1.2); }
+:focus-visible { outline: 2px solid #22d3ee; outline-offset: 3px; }
+.account-actions, .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.node-card { padding: 18px 0; border-bottom: 1px solid #243047; }
+.node-card:first-child { padding-top: 0; }
+.node-card h3 { margin: 0; }
+.node-id { display: block; color: #94a3b8; font: 12px ui-monospace, monospace; overflow-wrap: anywhere; margin: 6px 0 12px; }
+.actions { grid-column: 1 / -1; }
+.badges { color: #94a3b8; font-size: 12px; }
+.new-node { margin-top: 20px; }
+.node-skill-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; margin: 14px 0 8px; }
+.skill-download { display: inline-flex; align-items: center; min-height: 38px; padding: 6px 12px; border: 1px solid #155e75; border-radius: 7px; background: #143345; font-size: 13px; }
+.skill-download:hover { background: #194459; }
+.skill-checksum { font-size: 12px; color: #94a3b8; }
+.skill-checksum:hover { color: #67e8f9; text-decoration: underline; }
+.skill-install { margin-top: 0; }
+.skill-install code { color: #cbd5e1; overflow-wrap: anywhere; }
+#add-node { scroll-margin-top: 24px; }
+summary { cursor: pointer; color: #67e8f9; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; background: #090f1b; border-radius: 8px; font: 12px/1.7 ui-monospace, monospace; }
+.user-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid #243047; }
+#settings-message { color: #6ee7b7; }
+#settings-message.error { color: #fda4af; }
+@media (max-width: 640px) { main { padding: 20px 14px; } header { padding: 16px 14px; } section { padding: 18px 14px; } .form-grid { grid-template-columns: 1fr; } }

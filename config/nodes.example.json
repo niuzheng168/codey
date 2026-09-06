@@ -1,0 +1,17 @@
+{
+  "requestTimeoutMs": 8000,
+  "cacheSeconds": 10,
+  "refreshSeconds": 60,
+  "eventsPerNode": 12,
+  "maxRecentEvents": 60,
+  "nodes": [
+    {
+      "id": "local",
+      "name": "Local",
+      "region": "Local",
+      "endpoint": "http://127.0.0.1:4141/usage",
+      "apiKeyEnv": "COPILOT_API_KEY_LOCAL",
+      "accent": "#8b5cf6"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+# No local package or API key is required to connect; Codex completes Entra OAuth directly.
+[mcp_servers.session_share]
+url = "https://REPLACE_WITH_APP_FQDN/mcp"
+auth = "oauth"
+default_tools_approval_mode = "prompt"
+tool_timeout_sec = 1800

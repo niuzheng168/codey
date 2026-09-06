@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codex-session-share"
+version = "0.9.0"
+description = "FastMCP service and local bridge for sharing Codex sessions across machines."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "aiohttp>=3.11,<4",
+  "authlib>=1.6.11,<2",
+  "azure-identity>=1.25,<2",
+  "fastmcp==3.4.4",
+  "httpx>=0.28,<1",
+  "starlette>=0.47",
+  "uvicorn==0.51.0",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=9,<10",
+  "pytest-asyncio>=1.2,<2",
+]
+
+[project.scripts]
+codex-session-share = "codex_session_share.cli:main"
+codex-session-share-server = "codex_session_share.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codex_session_share"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

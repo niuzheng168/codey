@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codey 节点接入"
+  short_description: "新增 Codey 节点，配置 HTTPS、VNet 与 Workspace 并验证用户隔离"
+  default_prompt: "使用 $codey-node-onboarding 为我的机器制定并实施 Codey 节点接入与 VNet 配置，先确认账号归属和现有服务，保护正在运行的任务。"

@@ -1,0 +1,9 @@
+{
+  "requestTimeoutMs": 12000,
+  "cacheSeconds": 20,
+  "refreshSeconds": 60,
+  "eventsPerNode": 12,
+  "maxRecentEvents": 60,
+  "clientNodes": [],
+  "nodes": []
+}

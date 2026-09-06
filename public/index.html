@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#080b12" />
+    <meta
+      name="description"
+      content="聚合本机与远程 copilot-api 节点的 Codex token 用量。"
+    />
+    <title>Codey</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+    <script type="module" src="/portal-session.js"></script>
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a class="brand" href="/" aria-label="Codey 首页">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" role="img">
+              <path d="M16 3.5 26.8 9.8v12.4L16 28.5 5.2 22.2V9.8L16 3.5Z" />
+              <path d="m10.4 13.1 5.6-3.2 5.6 3.2v6.2L16 22.5l-5.6-3.2v-6.2Z" />
+            </svg>
+          </span>
+          <span>
+            <strong>Codey</strong>
+            <small>多节点 Codex 中心</small>
+          </span>
+        </a>
+
+        <nav class="topbar-tabs" aria-label="Portal 页面">
+          <button type="button" data-portal-view="usage" aria-pressed="true">Usage</button>
+          <button type="button" data-portal-view="sessions" aria-pressed="false">
+            Session History
+          </button>
+          <button type="button" data-portal-view="workspace" aria-pressed="false">
+            Workspace
+          </button>
+        </nav>
+
+        <div class="topbar-status">
+          <span class="pulse-dot" aria-hidden="true"></span>
+          <span id="connection-label">正在连接节点</span>
+          <button id="local-connect-button" type="button" hidden>重试本机节点</button>
+          <span id="portal-account-name"></span>
+          <a id="portal-settings" href="/settings" hidden>账号与节点</a>
+          <button id="portal-logout" type="button" hidden>退出登录</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="page-shell">
+      <span id="node-connection-help" class="sr-only">默认浏览器直连。勾选后 Usage 和 Session History 通过 ACA / VNet 连接远程节点，不访问本机；Workspace 始终走 VNet。</span>
+      <div id="usage-view">
+        <section class="hero" aria-labelledby="page-heading">
+          <div>
+            <p class="eyebrow">UNIFIED OBSERVABILITY</p>
+            <h1 id="page-heading">一处掌握所有 Codex 用量</h1>
+            <p class="hero-copy">
+              聚合本机与远程 copilot-api 节点，按机器、日期和模型追踪 token、请求与估算成本。
+            </p>
+          </div>
+
+          <div class="hero-meta">
+            <span>最近更新</span>
+            <strong id="last-updated">—</strong>
+            <small id="refresh-countdown">自动刷新准备中</small>
+          </div>
+        </section>
+
+        <section class="control-panel" aria-label="Portal 筛选器">
+          <div class="control-group">
+            <span class="control-label">时间范围</span>
+            <div class="segmented" id="period-switcher">
+              <button type="button" data-period="day">今日</button>
+              <button type="button" data-period="week">近 7 天</button>
+              <button type="button" data-period="month">近 30 天</button>
+            </div>
+          </div>
+
+          <div class="control-group node-control">
+            <span class="control-label">节点</span>
+            <div class="node-filters" id="node-filters" aria-label="选择节点"></div>
+          </div>
+
+          <div class="usage-control-actions">
+            <button class="refresh-button" id="refresh-button" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 11a8.1 8.1 0 1 0-2.4 5.8M20 5v6h-6" />
+              </svg>
+              <span>刷新</span>
+            </button>
+            <label id="node-connection-options" class="node-connection-choice" data-node-connection-option title="默认浏览器直连；勾选后经 ACA / VNet 连接远程节点（不含本机）。Workspace 不受影响。" hidden>
+              <input id="vnet-connection-toggle" type="checkbox" data-vnet-connection-toggle aria-label="通过 ACA / VNet 连接远程节点" aria-describedby="node-connection-help" />
+              <span>VNet</span>
+            </label>
+          </div>
+        </section>
+
+        <div id="status-region" class="status-region" aria-live="polite"></div>
+
+        <section id="loading-state" class="loading-state" aria-label="正在加载">
+          <div class="skeleton skeleton-wide"></div>
+          <div class="skeleton-grid">
+            <div class="skeleton"></div>
+            <div class="skeleton"></div>
+            <div class="skeleton"></div>
+            <div class="skeleton"></div>
+          </div>
+        </section>
+
+        <div id="dashboard" class="dashboard" hidden></div>
+      </div>
+
+      <section id="session-history-view" class="session-history-view" hidden>
+        <div class="history-hero">
+          <div>
+            <p class="eyebrow">SHARED CODEX ARCHIVE</p>
+            <h1>Session History</h1>
+            <p class="hero-copy">
+              搜索、检查和下载共享会话；管理员可以重命名、移入回收站、恢复或永久清除。
+            </p>
+          </div>
+          <span id="history-connection" class="section-badge">尚未连接</span>
+        </div>
+
+        <div
+          id="history-source-tabs"
+          class="history-source-tabs"
+          role="tablist"
+          aria-label="Session history sources"
+        ></div>
+
+        <section class="history-search-panel" aria-labelledby="history-search-title">
+          <div class="history-search-heading">
+            <div>
+              <strong id="history-search-title">Search &amp; filter</strong>
+              <span id="history-search-help">
+                Shared 使用 hybrid vector search；节点匹配名称、标题和 workspace。
+              </span>
+            </div>
+            <button id="history-clear" class="text-button" type="button">
+              清除筛选
+            </button>
+          </div>
+          <form id="history-controls" class="history-controls">
+            <label class="history-control-field history-search">
+              <span>Search sessions</span>
+              <input
+                id="history-query"
+                type="search"
+                maxlength="256"
+                placeholder="输入名称、内容、来源或 workspace"
+                autocomplete="off"
+              />
+            </label>
+            <label class="history-control-field">
+              <span>Status</span>
+              <select id="history-state">
+                <option value="active">Active</option>
+                <option value="trash">Recycle Bin</option>
+                <option value="all">All items</option>
+              </select>
+            </label>
+            <label class="history-control-field">
+              <span>Updated</span>
+              <select id="history-range">
+                <option value="all">All time</option>
+                <option value="day">Last 24 hours</option>
+                <option value="week">Last 7 days</option>
+                <option value="month">Last 30 days</option>
+              </select>
+            </label>
+            <div class="history-control-actions">
+              <button class="refresh-button" type="submit">
+                <span>搜索</span>
+              </button>
+              <button id="history-refresh" class="secondary-button" type="button">
+                刷新
+              </button>
+              <label id="history-node-connection-options" class="node-connection-choice" data-node-connection-option title="默认浏览器直连；勾选后经 ACA / VNet 连接远程节点（不含本机）。Workspace 不受影响。" hidden>
+                <input id="history-vnet-connection-toggle" type="checkbox" data-vnet-connection-toggle aria-label="通过 ACA / VNet 连接远程节点" aria-describedby="node-connection-help" />
+                <span>VNet</span>
+              </label>
+            </div>
+          </form>
+        </section>
+
+        <div id="history-status" class="status-region" aria-live="polite"></div>
+        <div class="history-layout">
+          <aside class="history-list-panel">
+            <div class="history-list-header">
+              <strong id="history-count">0 sessions</strong>
+              <span id="history-page-label"></span>
+            </div>
+            <div id="history-batch-toolbar" class="history-batch-toolbar" hidden></div>
+            <div id="history-list" class="history-list"></div>
+            <div class="history-pagination">
+              <button id="history-previous" class="secondary-button" type="button">
+                上一页
+              </button>
+              <button id="history-next" class="secondary-button" type="button">
+                下一页
+              </button>
+            </div>
+          </aside>
+          <article id="history-detail" class="history-detail">
+            <div class="empty-state">选择一个会话查看 metadata 和 transcript。</div>
+          </article>
+        </div>
+      </section>
+
+      <section id="workspace-view" class="workspace-view" hidden>
+        <div class="workspace-hero">
+          <div>
+            <p class="eyebrow">VNET CLOUDCLI WORKSPACE</p>
+            <h1>CloudCLI</h1>
+            <p class="hero-copy">
+            Codey 完成登录和节点授权，然后通过 Azure VNet 打开节点上运行的
+              CloudCLI。使用当前 Codey 会话，无需再次登录节点。
+            </p>
+          </div>
+          <span id="workspace-connection" class="section-badge">尚未连接</span>
+        </div>
+
+        <div id="workspace-status" class="status-region" aria-live="polite"></div>
+
+        <section class="cloudcli-launcher" aria-label="CloudCLI 节点">
+          <label>
+            <span>节点</span>
+            <select id="cloudcli-node">
+              <option value="">正在读取节点…</option>
+            </select>
+          </label>
+          <div class="cloudcli-actions">
+            <button id="cloudcli-reload" class="secondary-button" type="button">
+              重新加载
+            </button>
+            <a
+              id="cloudcli-open"
+              class="refresh-button"
+              href="#"
+              target="_blank"
+              rel="noopener"
+            >
+              新窗口打开
+            </a>
+          </div>
+          <p>
+            节点验证 Codey 短期签名凭据；文件、会话和配置保留在各节点。退出 Codey 会断开 Workspace 连接。
+          </p>
+        </section>
+
+        <div class="cloudcli-frame-shell">
+          <div id="cloudcli-empty" class="cloudcli-empty">
+            正在准备 CloudCLI…
+          </div>
+          <iframe
+            id="cloudcli-frame"
+            title="CloudCLI node workspace"
+            allow="clipboard-read; clipboard-write; microphone 'self'"
+            referrerpolicy="no-referrer"
+            hidden
+          ></iframe>
+        </div>
+      </section>
+
+      <noscript>
+        <div class="notice notice-error">此 Portal 需要启用 JavaScript。</div>
+      </noscript>
+    </main>
+
+    <dialog id="confirm-dialog" class="portal-dialog" aria-labelledby="confirm-title">
+      <form method="dialog" class="dialog-panel">
+        <div class="dialog-heading">
+          <span class="dialog-kicker">CONFIRM ACTION</span>
+          <h2 id="confirm-title">确认操作</h2>
+          <p id="confirm-message"></p>
+        </div>
+        <div class="dialog-actions">
+          <button type="submit" class="dialog-button secondary" value="cancel">取消</button>
+          <button id="confirm-accept" type="submit" class="dialog-button primary" value="confirm">确认</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="provision-dialog" class="portal-dialog" aria-labelledby="provision-title">
+      <form id="provision-form" class="dialog-panel provision-panel">
+        <div class="dialog-heading">
+          <span class="dialog-kicker">ONE-CLICK DEPLOYMENT</span>
+          <h2 id="provision-title">添加并部署新机器</h2>
+          <p id="provision-description">通过 SSH 安装或注册节点，并完成可管理性验收。</p>
+        </div>
+
+        <div class="provision-grid">
+          <label>
+            <span>节点平台</span>
+            <select name="platform">
+              <option value="linux">Linux（远程安装）</option>
+              <option value="windows">Windows（注册已 bootstrap 工作站）</option>
+              <option value="macos">macOS（下载自解包安装脚本）</option>
+            </select>
+          </label>
+          <label>
+            <span>节点 ID</span>
+            <input name="id" required maxlength="32" pattern="[a-z0-9][a-z0-9_-]{0,31}" placeholder="zhn-a100" autocomplete="off" />
+          </label>
+          <label>
+            <span>显示名称</span>
+            <input name="name" required maxlength="80" placeholder="ZHN A100" autocomplete="off" />
+          </label>
+          <label>
+            <span>区域</span>
+            <input name="region" maxlength="120" placeholder="Azure Japan East" autocomplete="off" />
+          </label>
+          <label>
+            <span>SSH Host</span>
+            <input name="sshHost" required maxlength="254" placeholder="zhn-a100" autocomplete="off" />
+          </label>
+          <label class="provision-wide">
+            <span>用量地址（可留空自动推断）</span>
+            <input name="endpoint" maxlength="1024" placeholder="http://host.example.com:4141/usage" autocomplete="off" />
+          </label>
+          <label data-linux-provision-field>
+            <span>配置模板</span>
+            <select name="templateNodeId"></select>
+          </label>
+          <label>
+            <span>节点颜色</span>
+            <input name="accent" type="color" value="#60a5fa" />
+          </label>
+        </div>
+
+        <div id="provision-error" class="dialog-error" hidden></div>
+        <p class="dialog-note">
+          <span id="provision-note">
+            Linux 目标需 SSH 免交互登录、Node.js 20+、npm 和 systemd user manager。
+          </span>
+        </p>
+        <div class="provision-downloads" aria-label="一键安装脚本">
+          <a
+            id="bootstrap-bundle-download"
+            class="dialog-button secondary"
+            href="/bootstrap/linux"
+            download
+          >下载 Linux 一键安装脚本（含 package）</a>
+        </div>
+        <div class="dialog-actions">
+          <button id="provision-cancel" type="button" class="dialog-button secondary">取消</button>
+          <button id="provision-submit" type="submit" class="dialog-button primary">连接并部署</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="rename-dialog" class="portal-dialog" aria-labelledby="rename-title">
+      <form id="rename-form" class="dialog-panel">
+        <div class="dialog-heading">
+          <span class="dialog-kicker">SESSION ADMIN</span>
+          <h2 id="rename-title">重命名共享会话</h2>
+          <p id="rename-message"></p>
+        </div>
+        <label class="rename-field">
+          <span>新名称</span>
+          <input
+            name="newName"
+            required
+            maxlength="128"
+            pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+            autocomplete="off"
+          />
+        </label>
+        <div id="rename-error" class="dialog-error" hidden></div>
+        <div class="dialog-actions">
+          <button id="rename-cancel" type="button" class="dialog-button secondary">
+            取消
+          </button>
+          <button type="submit" class="dialog-button primary">确认重命名</button>
+        </div>
+      </form>
+    </dialog>
+
+    <footer class="footer">
+      <span>Codey</span>
+      <span>数据由各 copilot-api 节点实时汇总</span>
+    </footer>
+  </body>
+</html>

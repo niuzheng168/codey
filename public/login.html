@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>登录 Codey</title>
+    <link rel="stylesheet" href="/portal-auth/login.css">
+    <script src="/portal-auth/login.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <p class="brand">CODEY</p>
+      <h1>登录你的工作空间</h1>
+      <p class="subtitle">一个账号，安全访问你的节点。</p>
+      <form id="login-form">
+        <label for="username">用户名</label>
+        <input id="username" name="username" autocomplete="username" maxlength="32" required autofocus>
+        <label for="password">密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" maxlength="1024" required>
+        <p id="login-error" role="alert" aria-live="polite"></p>
+        <button id="login-submit" type="submit">登录 Codey</button>
+      </form>
+      <p class="note">登录后直接进入 Workspace，无需再次登录节点。</p>
+    </main>
+  </body>
+</html>

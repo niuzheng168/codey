@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>账号与节点 · Codey</title>
+    <link rel="icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/settings.css" />
+    <script type="module" src="/settings.js"></script>
+    <script type="module" src="/portal-session.js"></script>
+  </head>
+  <body>
+    <header>
+      <a href="/">← Codey</a>
+      <div class="account-actions"><span id="portal-account-name"></span><button id="portal-logout" type="button" hidden>退出登录</button></div>
+    </header>
+    <main>
+      <h1>账号与节点</h1>
+      <p class="muted">节点归属由服务端绑定。这里只显示你的节点，管理员账号也不能借节点名称访问别人的数据。</p>
+      <p id="settings-message" role="status" aria-live="polite"></p>
+
+      <section id="nodes" aria-labelledby="nodes-heading">
+        <h2 id="nodes-heading">我的节点</h2>
+        <p class="muted">名称、地址和区域会保存到你的账号。移除节点不会关机或删除 VM 上的文件。</p>
+        <div id="my-nodes"><p class="muted">正在加载…</p></div>
+        <details id="add-node" class="new-node" open>
+          <summary>添加自己的节点</summary>
+          <div class="node-skill-tools">
+            <a class="skill-download" href="/downloads/codey-node-onboarding.zip" download="codey-node-onboarding.zip">↓ 下载接入 Skill</a>
+            <span class="muted">HTTPS · VNet · Workspace</span>
+            <a class="skill-checksum" href="/downloads/codey-node-onboarding.sha256" download="codey-node-onboarding.sha256" aria-label="下载接入 Skill 的 SHA-256 校验值">SHA-256</a>
+          </div>
+          <p class="muted skill-install">ZIP 内为通用操作说明和离线配置工具，不含账号密钥，也不会自动安装或改网络。解压后把 <code>codey-node-onboarding</code> 文件夹放到用户目录的 <code>.agents/skills/</code>，再在 Codex 输入 <code>$codey-node-onboarding</code>。</p>
+          <p class="muted">新节点会获得服务端生成的唯一 ID 和专属密钥。必须在你自己的机器配置这些凭据，不能填写别人的节点 ID 来获得访问权限。</p>
+          <form id="create-node-form" class="form-grid">
+            <label>名称<input name="name" maxlength="80" required placeholder="我的工作站" /></label>
+            <label>HTTPS 地址<input name="endpoint" type="url" maxlength="2048" required placeholder="https://my-node.example.com:8443/usage" /></label>
+            <label>区域<input name="region" maxlength="120" placeholder="Local / Azure region" /></label>
+            <button type="submit">创建节点</button>
+          </form>
+        </details>
+        <section id="enrollment" hidden aria-label="本节点接入资料">
+          <h3>本节点接入资料</h3>
+          <p class="muted">只复制到你自己的节点，不要分享这些密钥。既有 zhn 节点无需改动；新节点的 Workspace 还需部署 CloudCLI 并由运维配置可信私网网关。</p>
+          <pre id="enrollment-value"></pre>
+          <button id="hide-enrollment" type="button">隐藏接入资料</button>
+        </section>
+      </section>
+
+      <section aria-labelledby="password-heading">
+        <h2 id="password-heading">修改我的密码</h2>
+        <p class="muted">修改后，本账号的所有旧登录会话失效。不会影响其他用户。</p>
+        <form id="password-form" class="form-grid">
+          <label>当前密码<input name="currentPassword" type="password" autocomplete="current-password" maxlength="1024" required /></label>
+          <label>新密码<input name="newPassword" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required /></label>
+          <button type="submit">修改密码并重新登录</button>
+        </form>
+      </section>
+
+      <section id="admin-section" hidden aria-labelledby="users-heading">
+        <h2 id="users-heading">用户管理</h2>
+        <p class="muted">仅管理员可创建和停用账号。新账号没有节点，也不会继承你的节点或未共享的会话。Shared 为已登录用户共用的只读区；管理员可管理 Shared。</p>
+        <form id="create-user-form" class="form-grid">
+          <label>用户名<input name="username" autocomplete="off" minlength="3" maxlength="32" pattern="[a-z][a-z0-9_-]{2,31}" placeholder="alice" required /></label>
+          <label>初始密码<input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required /></label>
+          <button type="submit">创建用户</button>
+        </form>
+        <div id="users-list"></div>
+      </section>
+    </main>
+  </body>
+</html>

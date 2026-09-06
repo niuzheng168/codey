@@ -1,0 +1,9 @@
+{
+  "nodes": [
+    {
+      "id": "example-node",
+      "upstream": "https://10.42.0.4:8443",
+      "tlsServerName": "node.example.test"
+    }
+  ]
+}
