@@ -49,6 +49,36 @@ validation remains unchanged, including rejection of relative key paths.
 The CloudCLI frontend tests and builds were run immediately before this rollout;
 the publication edits do not change that built UI.
 
+## Native Linux development verification
+
+A separate development checkout was subsequently prepared on Linux, without
+changing the running CloudCLI or copilot-api services. Portal-host path fixtures
+now use host-native temporary paths, and the SQLite test fixture selects
+`python3` on POSIX with isolated, no-site startup.
+
+- Portal: **102 passed**.
+- CloudCLI: **412 frontend tests** and **40 focused Codey backend tests passed**;
+  frontend/backend typecheck, the Linux frontend build and native SQLite/PTY
+  smoke checks passed.
+- copilot-api: **18 focused tests** and typecheck passed.
+- MCP: **34 unit tests passed**, excluding the server integration suite.
+- The isolated development portal was started and stopped successfully.
+  Anonymous node access and access after logout returned 401; the independent
+  development login and empty node inventory returned 200.
+
+MCP validation exposed an existing omission in configuration export redaction:
+`API_TOKEN`-style keys were not matched. The shared secret-key matcher now covers
+these keys in TOML and nested app state, with regression tests for underscore,
+hyphen and camel-case variants. Numeric token-limit settings remain intact.
+The automation-restore assertion now checks the parsed `PAUSED` status rather
+than requiring an incidental trailing newline. These are source changes only;
+the running MCP service was not redeployed during development setup.
+
+The full upstream CloudCLI server suite and full MCP integration run exceeded
+their time limits. Their owned test processes were stopped; these full suites
+are **not** reported as passing. The focused/unit results above are separate
+completed runs.
+
 ## Known validation limitations
 
 - CloudCLI's full server suite on native Windows: **402 passed, 8 failed, 1

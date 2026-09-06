@@ -40,7 +40,7 @@ _OPTIONAL_CODEX_DIRECTORIES = {
 }
 _SSH_FILE_NAMES = {"config", "known_hosts", "known_hosts.old"}
 _SECRET_PATTERN = re.compile(
-    r"(?i)(?:access[_-]?token|api[_-]?key|authorization|bearer|credential|password|secret)"
+    r"(?i)(?:access[_-]?token|api[_-]?(?:key|token)|authorization|bearer|credential|password|secret)"
 )
 _TOML_ASSIGNMENT = re.compile(r"^(\s*)([A-Za-z0-9_.\"'-]+)(\s*=\s*)(.*)$")
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -125,7 +126,10 @@ def test_config_bundle_excludes_history_credentials_and_private_keys(
     assert not any("memories/" in value for value in archived_targets)
     assert not any("skills/.system/" in value for value in archived_targets)
     assert "codex:skills/personal/SKILL.md" in archived_targets
-    assert len(manifest["security"]["redactions"]) == 2
+    assert set(manifest["security"]["redactions"]) == {
+        "config.toml:mcp_servers.example.http_headers",
+        "config.toml:mcp_servers.example.env.API_TOKEN",
+    }
 
     sanitized_config = (extracted / "payload" / "codex" / "config.toml").read_text(
         encoding="utf-8"
@@ -167,9 +171,12 @@ def test_config_bundle_excludes_history_credentials_and_private_keys(
 
     assert restored.backup_path is not None
     assert (restored.backup_path / "codex" / "config.toml").is_file()
-    assert (target_codex / "automations" / "daily" / "automation.toml").read_text(
-        encoding="utf-8"
-    ).endswith('status = "PAUSED"\n')
+    restored_automation = tomllib.loads(
+        (target_codex / "automations" / "daily" / "automation.toml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert restored_automation["status"] == "PAUSED"
     restored_config = (target_codex / "config.toml").read_text(encoding="utf-8")
     assert str(target_user) in restored_config
     restored_state = json.loads(
@@ -181,6 +188,60 @@ def test_config_bundle_excludes_history_credentials_and_private_keys(
         restored_state["electron-persisted-atom-state"]["prompt-history"]
     )
     assert restored.applied_app_state is True
+
+
+@pytest.mark.parametrize("key", ["API_TOKEN", "api-token", "apiToken", "GITHUB_API_TOKEN"])
+def test_config_bundle_redacts_api_tokens_without_dropping_token_limits(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    source_user = tmp_path / "source-user"
+    source_codex = source_user / ".codex"
+    source_codex.mkdir(parents=True)
+    (source_codex / "config.toml").write_text(
+        'model_context_window = 872000\n'
+        'model_max_output_tokens = 32000\n'
+        '[mcp_servers.example.env]\n'
+        f'{key} = "do-not-copy"\n'
+        'SAFE_VALUE = "keep"\n',
+        encoding="utf-8",
+    )
+    (source_codex / ".codex-global-state.json").write_text(
+        json.dumps(
+            {
+                "codex-managed-remote-connections": [
+                    {"alias": "test", key: "do-not-copy"}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    archive = tmp_path / "settings.tar.gz"
+    build_config_bundle(
+        "default",
+        archive,
+        codex_home=source_codex,
+        user_home=source_user,
+    )
+    extracted = tmp_path / "extracted"
+    manifest = extract_config_bundle(archive, extracted)
+
+    config = (extracted / "payload" / "codex" / "config.toml").read_text(
+        encoding="utf-8"
+    )
+    state = json.loads(
+        (extracted / "payload" / "app-state.json").read_text(encoding="utf-8")
+    )
+    assert "do-not-copy" not in config
+    assert "model_context_window = 872000" in config
+    assert "model_max_output_tokens = 32000" in config
+    assert 'SAFE_VALUE = "keep"' in config
+    assert state["codex-managed-remote-connections"] == [{"alias": "test"}]
+    assert set(manifest["security"]["redactions"]) == {
+        f"config.toml:mcp_servers.example.env.{key}",
+        f"app-state:codex-managed-remote-connections[0].{key}",
+    }
 
 
 def test_config_store_is_private_per_principal(tmp_path: Path) -> None:
