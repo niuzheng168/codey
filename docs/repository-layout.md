@@ -9,7 +9,6 @@ and deployment sources. They keep both GitHub's fork relationship and local
 | --- | --- | --- | --- | --- |
 | `cloudcli` | `niuzheng168/claudecodeui` | `main` | Public fork | `siteboon/claudecodeui` |
 | `copilot-api` | `niuzheng168/copilot-api` | `dev` | Public fork | `caozhiyuan/copilot-api` |
-| `cloudcli/plugins/starter` | `niuzheng168/codey-cloudcli-plugin-starter` | `main` | Private | `cloudcli-ai/cloudcli-plugin-starter` |
 
 On 2026-09-06, the locally committed Codey customizations were fast-forwarded into
 the two original forks without rewriting their history or changing source trees.
@@ -18,21 +17,23 @@ submodule sources. They have not been deleted; the original working copies retai
 them only as `private-backup` remotes.
 
 Dependencies retain upstream history and licenses. CloudCLI is AGPL-3.0-or-later;
-copilot-api and the starter plugin are MIT.
+copilot-api is MIT.
 This repository does not relicense them. Keep applicable source-offer and
 distribution obligations in mind when sharing modified software.
 
 The parent stores Git submodule commit pointers, **not copies of dependency
-source**. The starter plugin is nested under the CloudCLI submodule, not also
-vendored into the root. The portal, node relay, onboarding skill and
+source**. The unused Project Stats starter template has been removed from the
+CloudCLI checkout and is no longer a submodule. CloudCLI's plugin manager and its
+optional upstream plugin catalog remain available; core Codey features do not
+depend on the template. The portal, node relay, onboarding skill and
 `codex-session-share-mcp` are first-party code maintained in the root repository.
 Normal package-manager dependencies remain in their lockfiles; `node_modules`
 and build artifacts are not committed.
 
 ## Clone
 
-Authenticate Git with a GitHub account that can read the private starter plugin,
-then run:
+The parent and both submodules are public, so read-only cloning does not require
+a GitHub token:
 
 ```sh
 git clone --recurse-submodules https://github.com/niuzheng168/codey.git
@@ -50,23 +51,21 @@ First fetch/pull the intended Codey revision on a clean parent checkout. The
 `sync` command is important for older clones: it replaces cached private-mirror
 URLs with the original fork URLs recorded in the updated `.gitmodules`.
 
-An anonymous user can read the parent and both public forks, but cannot clone the
-private starter plugin. Do not replace that plugin's URL with an unrelated
-account or change its visibility merely to fix an authentication failure.
+Pushing changes still requires write access to the corresponding original fork.
+Do not add unused example repositories as mandatory dependencies.
 
 ## Commit dependency changes before parent changes
 
 Work on a named branch inside the relevant submodule, commit and push that branch
-to its canonical `origin`, then commit the new pointer in its parent. For the
-starter plugin the order is starter → CloudCLI → Codey. For copilot-api the order
-is copilot-api → Codey.
+to its canonical `origin`, then commit the new pointer in Codey. For either
+dependency, the order is submodule commit/push → Codey pointer commit/push.
 
 `git submodule update` checks out the parent's pinned commit; it is not a request
 to pull the latest upstream code. Do not run `--remote`, force-push, discard a
 dirty working tree, or update a running service as part of ordinary source sync.
 The existing public forks keep their original Actions settings. Their release
 workflows require tags/manual dispatch; ordinary source synchronization does not
-request a deployment. The Codey parent and private backup/plugin repositories
+request a deployment. The Codey parent and private backup repositories
 retain their existing disabled Actions settings.
 
 ## Sync upstream while preserving Codey changes
@@ -88,8 +87,8 @@ git -C copilot-api merge upstream/dev
 If a merge conflicts, stop and resolve it explicitly, preserving Codey's auth,
 node isolation, HTTPS and voice changes. Do not reset to upstream, discard local
 changes, or use a force synchronization that removes custom commits. If upstream
-changes the nested plugin revision, first synchronize that commit into the
-owner's plugin repository and preserve the owner-controlled `.gitmodules` URL.
+reintroduces the optional starter-template submodule, preserve its intentional
+removal unless Codey actually adopts that plugin.
 
 Validate the merged submodules before publishing, then push children first:
 

@@ -11,8 +11,8 @@ cd codey
 
 主仓库公开；`cloudcli` 和 `copilot-api` 分别复用原有公开 fork
 `niuzheng168/claudecodeui`、`niuzheng168/copilot-api`，保留 upstream 同步关系。
-嵌套的 starter 插件仍是你账号下的私有仓库，递归 clone 需要该插件的读取权限。
-主仓库只保存 submodule 指针，不重复提交 CloudCLI、copilot-api 或嵌套插件源码。
+不使用的 starter 统计插件示例已移除；现在递归 clone 不需要私有子仓库权限。
+主仓库只保存 submodule 指针，不重复提交 CloudCLI 或 copilot-api 源码。
 仓库结构、上游许可和提交顺序见 [源码仓库说明](./docs/repository-layout.md)。
 
 实际机器配置、`.env`、证书、账号/会话数据及构建产物不在 Git 中。新 clone 先按

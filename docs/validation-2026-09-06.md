@@ -10,6 +10,11 @@ documentation only; it does not change dependency source trees, merge new
 upstream code, redeploy nodes or alter existing fork Actions settings. See the
 [current repository layout](./repository-layout.md).
 
+The unused Project Stats template submodule was subsequently removed at the
+owner's request. This removes a private-clone permission requirement, not
+CloudCLI's plugin system. The template's Git history was backed up locally before
+removal; it contained no Codey feature changes.
+
 ## Deployed UI
 
 - Four remote CloudCLI instances received the new composer static assets.
