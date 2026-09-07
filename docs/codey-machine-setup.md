@@ -102,7 +102,7 @@ python3 test/machine-scripts.py
 文件提取和无密钥机器文件。copilot-api 的 headless 与 fresh-history 测试在子仓库。
 实机证据记录在独立 artifacts；本机、ACA、浏览器和模型推理结果分开报告。
 
-### 2026-09-07 验证记录
+### 2026-09-07 上线前隔离验证
 
 - 个性化轻量包约 4 MB；Ubuntu 24.04 x64 实机完成联网依赖安装、本机 TLS、
   Usage/History、SSO 和匿名拒绝。无 Codex 数据库的场景已覆盖。
@@ -112,8 +112,24 @@ python3 test/machine-scripts.py
 - 门户 141 tests、Python 10 tests、copilot-api 28 tests、语法/typecheck、
   Skill validator 通过；390/1100 宽度 Chromium 布局验证无横向溢出（模拟数据）。
 - 清理 81 个临时传输/隔离验证文件，未删除生产文件；测试机服务和私网资源保留。
-- **未发布生产版本，测试身份未加入生产节点列表；未测试模型账号登录/推理。**
-  正式使用需要发布此功能并以本人生产账号重新预留/绑定，不能导入隔离测试身份。
+- 以上验证完成时尚未发布生产版本；测试身份未加入生产节点列表，
+  也未测试模型账号登录/推理。正式使用须以本人生产账号预留/绑定，
+  不能导入隔离测试身份。
 
 完整非敏感结果摘要位于 Git 忽略的
 `artifacts/machine-onboarding-20260907/verification-summary.json`。
+
+### 2026-09-07 生产发布状态
+
+**门户与个性化轻量 Skill 已上线**，生产下载、同身份重下、取消、文件校验、
+桌面/手机布局，以及从实际 ACA 到独立测试 VM 的 HTTPS、Usage、History、
+Workspace SSO、WebSocket 和匿名拒绝均已验证。
+
+旧四节点的 `copilot-api` 全量升级**尚未完成**：目标版本要求对外监听的模型 API
+配置 API key，而现有四节点未配置；`westus2:4141` 仍有外部连接。
+canary 已回滚到原版本，未关闭安全检查、添加假密钥、擅自关闭外部入口或修改客户端。
+需确认并实施认证迁移后再升级旧节点；新机器安装流程已生成独立 API key，并使用
+本机模型监听，不受这项旧配置阻碍。
+
+源码版本、发布物和验收边界见
+[生产发布与待完成的旧节点迁移](./codey-machine-release-2026-09-07.md)。
