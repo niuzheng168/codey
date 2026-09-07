@@ -1,4 +1,4 @@
-import test from "node:test";
+import test from "./helpers/optional-history.mjs";
 import assert from "node:assert/strict";
 import { SessionHistoryHub } from "../src/session-history-hub.mjs";
 

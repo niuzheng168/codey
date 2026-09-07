@@ -168,7 +168,7 @@ test("all portal data/static/mutation/WS routes require login; SSO has no browse
     config,
   });
   const url = await listen(t, server);
-  for (const pathname of ["/api/nodes", "/api/client-nodes", "/api/cloudcli/nodes", "/api/node-data/node-a/usage", "/api/node-data/node-a/session-history", "/node-transport.js", "/app.js", "/styles.css", "/cloudcli/node-a/", "/cloudcli/node-a/api/projects", "/cloudcli/node-a/api/auth/register", "/cloudcli/node-a/_ui/runtime.js", "/cloudcli/node-a/sw.js", "/cloudcli-ui/ui-one/assets/app.js"]) {
+  for (const pathname of ["/api/nodes", "/api/client-nodes", "/api/cloudcli/nodes", "/api/node-data/node-a/usage", "/api/node-data/node-a/session-history", "/node-transport.js", "/portal-features.js", "/app.js", "/styles.css", "/cloudcli/node-a/", "/cloudcli/node-a/api/projects", "/cloudcli/node-a/api/auth/register", "/cloudcli/node-a/_ui/runtime.js", "/cloudcli/node-a/sw.js", "/cloudcli-ui/ui-one/assets/app.js"]) {
     for (const method of ["GET", "POST"]) {
       const result = await fetch(`${url}${pathname}`, {
         method, redirect: "manual",

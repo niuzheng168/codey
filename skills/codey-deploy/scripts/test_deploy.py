@@ -139,6 +139,38 @@ class DeploymentSafety(unittest.TestCase):
             worker.az(["storage", "account", "keys", "list"])
             self.assertIsNone(run.call_args.kwargs["log"])
 
+    def test_reviewed_snapshot_preserves_real_index_head_and_dirty_files(self):
+        from common import command
+        from deploy import Deploy
+        repository = self.root / "repository"
+        repository.mkdir()
+        command(["git", "init", "--quiet"], cwd=repository)
+        command(["git", "config", "user.name", "Offline release test"], cwd=repository)
+        command(["git", "config", "user.email", "release-test@example.invalid"], cwd=repository)
+        (repository / "public").mkdir()
+        file = repository / "public/app.js"
+        file.write_text("before\n")
+        command(["git", "add", "public/app.js"], cwd=repository)
+        command(["git", "commit", "--quiet", "-m", "Offline test baseline"], cwd=repository)
+        head = command(["git", "rev-parse", "HEAD"], cwd=repository)[0]
+        index = sha(repository / ".git/index")
+        file.write_text("after\n")
+        (repository / "public/portal-features.js").write_text("export const enabled = false;\n")
+        worker = object.__new__(Deploy)
+        worker.root = repository
+        worker.job = self.root / "snapshot-job"
+        worker.job.mkdir()
+        result = worker.freeze_portal()
+        self.assertEqual(result["baseCommit"], head)
+        self.assertFalse(result["commitCreated"])
+        self.assertFalse(result["pushed"])
+        self.assertEqual(index, sha(repository / ".git/index"))
+        self.assertEqual(head, command(["git", "rev-parse", "HEAD"], cwd=repository)[0])
+        self.assertEqual(file.read_text(), "after\n")
+        safe_extract(worker.job / "portal-reviewed.tar.gz", self.root / "snapshot")
+        self.assertEqual((self.root / "snapshot/public/app.js").read_text(), "after\n")
+        self.assertTrue((self.root / "snapshot/public/portal-features.js").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

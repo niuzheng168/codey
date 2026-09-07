@@ -4,6 +4,7 @@ import {
   fetchClientHistoryList,
 } from "./client-history.js";
 import { nodesForConnection, readConnectionMode, saveConnectionMode } from "./node-transport.js";
+import { PORTAL_VIEWS, resolvePortalView } from "./portal-features.js";
 
 const PERIOD_LABELS = Object.freeze({
   day: "今日",
@@ -115,9 +116,7 @@ const requestedView = params.get("view");
 let preferenceStorage;
 try { preferenceStorage = window.localStorage; } catch { /* Direct is the default without storage. */ }
 const state = {
-  activeView: ["sessions", "workspace"].includes(requestedView)
-    ? requestedView
-    : "usage",
+  activeView: resolvePortalView(requestedView),
   clientConfig: null,
   clientTicketExpiresAt: 0,
   // Routing is an explicit, browser-local preference. Never auto-fallback.
@@ -357,6 +356,8 @@ function renderActiveView() {
   elements.sessionHistoryView.hidden = state.activeView !== "sessions";
   elements.workspaceView.hidden = state.activeView !== "workspace";
   for (const button of document.querySelectorAll("[data-portal-view]")) {
+    button.hidden = !PORTAL_VIEWS.includes(button.dataset.portalView);
+    button.disabled = button.hidden;
     button.setAttribute(
       "aria-pressed",
       String(button.dataset.portalView === state.activeView),
@@ -1583,6 +1584,7 @@ async function fetchHistoryDetail(sourceId, historyState, sessionName) {
 }
 
 async function fetchHistoryList({ resetOffset = false, preserveSelection = true } = {}) {
+  if (!PORTAL_VIEWS.includes("sessions")) return;
   const requestId = ++state.history.listRequestId;
   state.history.detailRequestId += 1;
   if (resetOffset) state.history.offset = 0;
@@ -2379,7 +2381,7 @@ for (const button of document.querySelectorAll("[data-portal-view]")) {
   button.addEventListener("click", () => {
     const nextView = button.dataset.portalView;
     if (
-      !["usage", "sessions", "workspace"].includes(nextView) ||
+      !PORTAL_VIEWS.includes(nextView) ||
       state.activeView === nextView
     ) {
       return;

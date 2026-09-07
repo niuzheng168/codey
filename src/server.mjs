@@ -40,6 +40,7 @@ const STATIC_FILES = new Map([
   ["/client-aggregator.js", ["client-aggregator.js", "text/javascript; charset=utf-8"]],
   ["/client-history.js", ["client-history.js", "text/javascript; charset=utf-8"]],
   ["/node-transport.js", ["node-transport.js", "text/javascript; charset=utf-8"]],
+  ["/portal-features.js", ["portal-features.js", "text/javascript; charset=utf-8"]],
   ["/settings", ["settings.html", "text/html; charset=utf-8"]],
   ["/settings.js", ["settings.js", "text/javascript; charset=utf-8"]],
   ["/settings.css", ["settings.css", "text/css; charset=utf-8"]],

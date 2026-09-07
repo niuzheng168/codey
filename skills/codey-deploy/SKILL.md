@@ -13,7 +13,7 @@ description: 快速发布 Codey 的 ACA Portal/MCP、共享 Workspace UI 和 jpe
 - **Windows 本地 copilot-api 受保护**：不安装、更新、停止或重启。发布器前后核对本地 4141 的 PID、进程路径和启动时间。
 - 仅更新四个既有远程节点的 CloudCLI 和 copilot-api 包；保留 Node/Codex 安装、认证、TLS、SSO、systemd 配置和用户数据。不自动升级全局 CLI。
 - 独立模型 API key 必须已迁移完成。缺少 key、调用方未加载 key 或节点正在运行任务时，停止并报告具体前置条件；不取消任务，不放宽鉴权。
-- 拉取 `origin/main`、CloudCLI `origin/main`、copilot-api `origin/dev` 到发布专用 ref，从 Git archive 构建。**不 checkout/reset/stash/clean 开发工作树，不发布未提交改动，不替用户提交或推送。**
+- 默认拉取 `origin/main`、CloudCLI `origin/main`、copilot-api `origin/dev` 到发布专用 ref，从 Git archive 构建。**不 checkout/reset/stash/clean 开发工作树，不替用户提交或推送。** 未提交改动默认不发布；仅下面明确授权的 Portal-only 冻结快照模式允许例外。
 - MCP 测试套件按用户要求**暂时跳过**，不删除测试。MCP 镜像构建、ACA 容器就绪和实际侧车 HTTP 健康探测仍必需。
 
 ## 一条发布命令
@@ -30,6 +30,26 @@ python <skill-dir>/scripts/deploy.py --workspace Q:\codex_manager --apply --targ
 ```
 
 首次使用可通过 `--seed <构建机上已全测通过的发布目录>` 导入**相同 lockfile、Node 24 ABI** 的旧构建依赖缓存。这只复用依赖，不复用测试结论，也不跳过本轮镜像构建或节点切换。后续自动使用 `artifacts/codey-deploy-cache`，不必继续传 seed。不同 lockfile/ABI 走冷安装。
+
+### 只更新 ACA Portal
+
+用户只要求更新门户/ACA 时，**不要运行默认四节点全量模式**：
+
+```powershell
+python <skill-dir>/scripts/deploy.py --scope portal --apply --target-seconds 600
+```
+
+仅更新 Portal 镜像，保留 MCP 镜像、共享 UI、远程节点的包和进程。验证生产静态文件、
+导航开关、Workspace SSO/Usage、实际 MCP 侧车健康，以及本地/远程进程未变。
+该模式不重新执行模型推理；不能把上次模型测试计为本轮测试。
+
+当用户明确要求“修改本地代码并部署”，但未要求 commit/push 时，先审阅全部本地变更；
+仅确认这些改动都属于本次授权范围后，附加 `--reviewed-working-tree`。它使用独立临时
+Git index 生成不可变 tree/archive，不改真实 index、不创建 commit、不 push。
+报告记录 Git 基线、tree SHA、压缩包 SHA-256 和文件清单；远端 main 若已前进则停止。
+不要用这个选项夹带无关的 dirty 文件，也不要把工作树快照描述为已提交的源码。
+已上线的快照尚未提交时，下次常规 origin 发布可能回退这些功能；必须先提醒用户提交/
+推送，或取得明确的回退授权，不能默默覆盖该快照。
 
 ## 固定执行流程
 

@@ -95,7 +95,75 @@ class Deploy:
                 "A target has an active Codey task. Staging is safe; activation must wait for the user.")
         return proof
 
+    def freeze_portal(self):
+        """Use a temporary Git index; never commit, stash or modify the user's index."""
+        base = command(["git", "rev-parse", "HEAD"], cwd=self.root)[0]
+        files = command(["git", "ls-files", "--modified", "--others", "--exclude-standard", "-z"], cwd=self.root)[0]
+        files = sorted(set(name for name in files.split("\0") if name))
+        allowed = ("public/", "src/", "test/", "docs/", "skills/", "scripts/")
+        require(files and all(name.startswith(allowed) or name in {"Dockerfile", "package.json", "package-lock.json"}
+                              for name in files), "Review unexpected source/config changes before snapshotting")
+        require(not command(["git", "ls-files", "--deleted"], cwd=self.root)[0],
+                "Reviewed Portal snapshot must not silently delete code")
+        env = {**os.environ, "GIT_INDEX_FILE": str(self.job / "reviewed.index")}
+        command(["git", "read-tree", "HEAD"], cwd=self.root, env=env)
+        command(["git", "add", "--", *files], cwd=self.root, env=env)
+        tree = command(["git", "write-tree"], cwd=self.root, env=env)[0]
+        archive = self.job / "portal-reviewed.tar.gz"
+        command(["git", "archive", "--format=tar.gz", "--output", archive, tree], cwd=self.root)
+        result = {"kind": "reviewed-working-tree", "baseCommit": base, "tree": tree,
+                  "archiveSha256": sha(archive), "changedFiles": files, "commitCreated": False, "pushed": False}
+        save(self.job / "reviewed-source.json", result)
+        return result
+
+    def node_services(self):
+        def inspect(node):
+            output = self.ssh(node, [
+                "systemctl", "--user", "show", "codey-cloudcli.service", "copilot-api.service",
+                "--property=Id,ActiveState,MainPID,ExecMainStartTimestampMonotonic",
+            ], timeout=20)
+            require(output.count("ActiveState=active") == 2 and "\nMainPID=0" not in output,
+                    "A protected remote service is not active: " + node)
+            return node, output
+        return dict(self.pool.map(inspect, NODES))
+
+    def run_portal(self):
+        self.report["scope"] = "portal-only"
+        try:
+            with phase(self.report, "portal-preflight-and-source-snapshot", self.record):
+                self.report["localBefore"] = self.protected_local()
+                self.report["nodesBefore"] = self.node_services()
+                self.upload(self.args.builder, [str(file) for file in self.scripts.iterdir()
+                                               if file.suffix in {".py", ".mjs"}], self.remote + "/scripts")
+                if self.args.reviewed_working_tree:
+                    self.base["portalSnapshot"] = self.freeze_portal()
+                    self.upload(self.args.builder, [str(self.job / "portal-reviewed.tar.gz")], self.remote)
+                self.report["source"] = self.worker("prepare", timeout=100)
+            with phase(self.report, "portal-checks-and-image-build", self.record):
+                self.manifest = self.worker("build_portal", timeout=260)
+                save(self.job / "manifest.json", self.manifest)
+            with phase(self.report, "portal-aca-revision-rollout", self.record):
+                self.report["aca"] = self.worker("activate", timeout=330)
+            with phase(self.report, "portal-production-acceptance", self.record):
+                mcp = self.pool.submit(self.worker, "mcp_health", timeout=60)
+                self.report["e2e"] = self.worker("verify_portal", script="portal.py", timeout=100)
+                self.report["mcp"] = mcp.result()
+                self.report["nodesAfter"] = self.node_services()
+                self.report["localAfter"] = self.protected_local()
+                require(self.report["nodesAfter"] == self.report["nodesBefore"], "A remote service changed")
+                require(self.report["localAfter"] == self.report["localBefore"], "Protected local gateway changed")
+                self.report["remoteServicesUnchanged"] = True
+            self.report["status"] = "complete"
+        except Exception as error:
+            self.report["status"] = "needs-attention"
+            self.report["error"] = str(error)
+        finally:
+            self.finish()
+        return 0 if self.report["status"] == "complete" and self.report["withinTarget"] else 1
+
     def run(self):
+        if self.args.scope == "portal":
+            return self.run_portal()
         try:
             with phase(self.report, "preflight-source-and-node-snapshots", self.record):
                 self.report["localBefore"] = self.protected_local()
@@ -150,24 +218,27 @@ class Deploy:
             self.report["status"] = "needs-attention"
             self.report["error"] = str(error)
         finally:
-            # Wait for outstanding mutation workers to finish/reconcile before reporting an outcome.
-            self.pool.shutdown(wait=True, cancel_futures=True)
-            try:
-                self.report["releaseLock"] = self.worker("unlock", timeout=30)
-            except Exception as error:
-                self.report["lockCleanupError"] = str(error)
-                self.report["status"] = "needs-attention"
-            if read(self.lock)["release"] == self.release:
-                self.lock.unlink()
-            self.report["finishedAt"] = time.time()
-            self.report["totalSeconds"] = round(time.monotonic() - self.started, 3)
-            self.report["withinTarget"] = self.report["totalSeconds"] < self.args.target_seconds
-            save(self.record, self.report)
-            (self.root / "artifacts/codey-deploy-current.txt").write_text(str(self.job) + "\n", encoding="utf-8")
-            print(json.dumps({"status": self.report["status"], "totalSeconds": self.report["totalSeconds"],
-                              "withinTarget": self.report["withinTarget"], "report": str(self.record),
-                              **({"error": self.report["error"]} if "error" in self.report else {})}), flush=True)
+            self.finish()
         return 0 if self.report["status"] == "complete" and self.report["withinTarget"] else 1
+
+    def finish(self):
+        # Wait for mutation/rollback workers; cleanup time is part of the measurement.
+        self.pool.shutdown(wait=True, cancel_futures=True)
+        try:
+            self.report["releaseLock"] = self.worker("unlock", timeout=30)
+        except Exception as error:
+            self.report["lockCleanupError"] = str(error)
+            self.report["status"] = "needs-attention"
+        if read(self.lock)["release"] == self.release:
+            self.lock.unlink()
+        self.report["finishedAt"] = time.time()
+        self.report["totalSeconds"] = round(time.monotonic() - self.started, 3)
+        self.report["withinTarget"] = self.report["totalSeconds"] < self.args.target_seconds
+        save(self.record, self.report)
+        (self.root / "artifacts/codey-deploy-current.txt").write_text(str(self.job) + "\n", encoding="utf-8")
+        print(json.dumps({"status": self.report["status"], "totalSeconds": self.report["totalSeconds"],
+                          "withinTarget": self.report["withinTarget"], "report": str(self.record),
+                          **({"error": self.report["error"]} if "error" in self.report else {})}), flush=True)
 
 
 def arguments():
@@ -178,6 +249,9 @@ def arguments():
     parser.add_argument("--registry", default="codexshareef492f53f0")
     parser.add_argument("--seed", help="Optional previously validated build cache; not a substitute for this run's tests")
     parser.add_argument("--target-seconds", type=int, default=600)
+    parser.add_argument("--scope", choices=("fleet", "portal"), default="fleet")
+    parser.add_argument("--reviewed-working-tree", action="store_true",
+                        help="Portal only: deploy explicitly reviewed local changes without committing/pushing")
     parser.add_argument("--apply", action="store_true", help="Authorized real ACA and remote-node deployment")
     return parser.parse_args()
 
@@ -185,4 +259,6 @@ def arguments():
 if __name__ == "__main__":
     args = arguments()
     require(args.apply, "Read SKILL.md and obtain release authorization, then pass --apply")
+    require(not args.reviewed_working_tree or args.scope == "portal",
+            "Reviewed working-tree snapshots are limited to Portal-only releases")
     raise SystemExit(Deploy(args).run())

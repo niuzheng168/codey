@@ -36,7 +36,7 @@
 
         <nav class="topbar-tabs" aria-label="Portal 页面">
           <button type="button" data-portal-view="usage" aria-pressed="true">Usage</button>
-          <button type="button" data-portal-view="sessions" aria-pressed="false">
+          <button type="button" data-portal-view="sessions" aria-pressed="false" hidden>
             Session History
           </button>
           <button type="button" data-portal-view="workspace" aria-pressed="false">
@@ -56,7 +56,7 @@
     </header>
 
     <main class="page-shell">
-      <span id="node-connection-help" class="sr-only">默认浏览器直连。勾选后 Usage 和 Session History 通过 ACA / VNet 连接远程节点，不访问本机；Workspace 始终走 VNet。</span>
+      <span id="node-connection-help" class="sr-only">默认浏览器直连。勾选后 Usage 通过 ACA / VNet 连接远程节点，不访问本机；Workspace 始终走 VNet。</span>
       <div id="usage-view">
         <section class="hero" aria-labelledby="page-heading">
           <div>

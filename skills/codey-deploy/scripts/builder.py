@@ -60,7 +60,14 @@ class Builder:
                     cwd=checkout, timeout=45, log=self.job / f"fetch-{name}.log")
             commit, _ = command(["git", "rev-parse", ref], cwd=checkout)
             archive = self.job / f"source-{name}.tar.gz"
-            command(["git", "archive", "--format=tar.gz", "--output", archive, commit], cwd=checkout)
+            reviewed = self.request.get("portalSnapshot") if name == "portal" else None
+            if reviewed:
+                require(commit == reviewed["baseCommit"], "Remote main advanced beyond the reviewed snapshot")
+                archive = self.job / "portal-reviewed.tar.gz"
+                require(sha(archive) == reviewed["archiveSha256"], "Reviewed source transfer checksum mismatch")
+                save(self.job / "reviewed-source.json", reviewed)
+            else:
+                command(["git", "archive", "--format=tar.gz", "--output", archive, commit], cwd=checkout)
             safe_extract(archive, self.source / name, allow_source_symlinks=True)
             return name, commit
 
@@ -101,6 +108,7 @@ class Builder:
                 "fqdn": properties["configuration"]["ingress"]["fqdn"], "previousUi": active["release"],
                 "nodes": {row["id"]: {"tlsServerName": row["tlsServerName"]}
                           for row in read(self.root / "config/cloudcli-nodes.aca.json")["nodes"]},
+                "reviewedSnapshot": self.request.get("portalSnapshot"),
                 "worktreesModified": False, "mcpTests": "skipped-by-user"}
 
     def check(self, name, label, args, env, timeout=100):
@@ -280,6 +288,52 @@ class Builder:
                     return result
             time.sleep(4)
         raise TimeoutError("ACA readiness exceeded 270 seconds; retain the rollback record and reconcile, not re-PATCH")
+
+    def build_portal(self):
+        """Portal-only release: no MCP, Workspace UI or node package build."""
+        with tempfile.TemporaryDirectory(prefix="codey-portal-", dir="/dev/shm") as temporary:
+            env = {
+                "PATH": os.environ["PATH"], "HOME": temporary, "TMPDIR": temporary,
+                "CI": "true", "NODE_ENV": "test", "NO_COLOR": "1",
+                "CODEY_MANAGED": "false", "CODEY_PORTAL_SSO": "false", "DATABASE_PATH": ":memory:",
+            }
+            for label, args in [
+                ("skill", ["npm", "run", "skill:build"]),
+                ("check", ["npm", "run", "check"]),
+                ("tests", ["npm", "test"]),
+            ]:
+                self.check("portal", label, args, env)
+        source = self.source / "portal"
+        self.az(["acr", "build", "-r", self.registry, "-t", "codey:" + self.release,
+                 "--file", str(source / "Dockerfile"), "--no-logs", str(source)], timeout=210)
+        digest = self.az(["acr", "repository", "show", "-n", self.registry,
+                          "--image", "codey:" + self.release, "--query", "digest"])
+        require(isinstance(digest, str) and digest.startswith("sha256:"), "Missing Portal digest")
+        before = read(self.job / "aca-before.private.json")
+        images = {row["name"]: {"image": row["image"], "preserved": True}
+                  for row in before["properties"]["template"]["containers"]}
+        images["portal"] = {"image": f"{self.registry}.azurecr.io/codey@{digest}", "tag": self.release}
+        files = {"/": sha(source / "public/index.html"), "/app.js": sha(source / "public/app.js")}
+        features = {}
+        if (source / "public/portal-features.js").is_file():
+            files["/portal-features.js"] = sha(source / "public/portal-features.js")
+            output, _ = command([
+                "node", "--input-type=module", "-e",
+                "import('./public/portal-features.js').then(m=>console.log(JSON.stringify("
+                "{sessionHistory:m.SESSION_HISTORY_ENABLED,views:m.PORTAL_VIEWS})))",
+            ], cwd=source, timeout=10)
+            features = json.loads(output)
+        result = {
+            "release": self.release, "scope": "portal", "commits": read(self.job / "source.json"),
+            "reviewedSnapshot": self.request.get("portalSnapshot"), "images": images,
+            "sharedUi": read(self.job / "ui-before.json"), "publicSha256": files,
+            "features": features,
+            "nodePackagesChanged": False, "mcpImageChanged": False,
+        }
+        self.report["passed"] = True
+        save(self.job / "validation.json", self.report)
+        save(self.job / "manifest.json", result)
+        return result
 
     def publish_ui(self):
         manifest = read(self.job / "manifest.json")

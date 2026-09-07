@@ -45,6 +45,47 @@ latency guarantee for future releases.
 
 ## Report layout
 
+### Portal-only follow-up: Session History hidden
+
+On September 7, 2026, the first Portal-only attempt
+`fast-20260907-123417-c19c20` took **290.203 seconds but failed production
+acceptance**: `/portal-features.js` was missing from the server's static route
+allowlist, preventing the home-page module from loading.
+
+The previous healthy image was restored in
+`codey--restore-0907-124307`. The static route was added, and an HTTP regression
+now checks every static module imported by `app.js`, including anonymous
+rejection. Do not count the failed attempt as a successful sub-10-minute release.
+
+The successful retry `fast-20260907-124718-53a670` took **174.172 seconds**:
+
+| Phase | Seconds |
+| --- | ---: |
+| Preflight and reviewed source snapshot | 24.079 |
+| Portal checks and image build | 80.000 |
+| ACA revision rollout | 53.171 |
+| Production acceptance | 15.407 |
+
+**Total elapsed time from the first release start through final success was
+955.121 seconds (15m55s), including diagnosis, rollback, and the retry.**
+The whole attempt did not meet the ten-minute target.
+
+Production verified the hidden navigation entry and all three changed public
+files, Workspace SSO and Usage on all four nodes, and actual MCP sidecar health.
+The MCP image, shared UI, remote service PIDs/start times and protected local
+gateway were unchanged. No inference calls were counted in this Portal-only run.
+Eight dedicated History tests are temporarily skipped; authentication/isolation
+tests remain active. The release tool's 17 offline checks passed.
+
+These application changes were deployed from a reviewed immutable Git tree,
+not committed or pushed. The History implementation remains intact. To restore
+the feature deliberately, change `SESSION_HISTORY_ENABLED` in
+`public/portal-features.js` and run the retained suites with
+`CODEY_SESSION_HISTORY_TESTS=1`; update the feature-off expectations accordingly.
+
+Combined report:
+`Q:\codex_manager\artifacts\fast-20260907-124718-53a670\combined-outcome.json`.
+
 The release command writes the authoritative evidence rather than encoding a
 permanent timing promise in the skill:
 

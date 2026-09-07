@@ -150,6 +150,33 @@ class Portal:
         return {"nodes": nodes, "codeyModels": models, "portalHealth": 200,
                 "sharedUiEntryVerified": True, "allPublishedAssetsVerifiedDuringUpload": True}
 
+    def verify_portal(self):
+        manifest = read(self.job / "manifest.json")
+        require(manifest["scope"] == "portal", "Not a Portal-only release")
+        require(read(self.job / "aca-result.json")["ready"], "ACA is not ready")
+        self.http("/api/health", authenticated=False)
+        for pathname, digest in manifest["publicSha256"].items():
+            require(hashlib.sha256(self.http(pathname).content).hexdigest() == digest,
+                    "Production public file differs from the frozen source: " + pathname)
+        history_hidden = manifest.get("features", {}).get("sessionHistory") is False
+        if history_hidden:
+            html = self.http("/?view=sessions").text
+            require(re.search(r'<button[^>]+data-portal-view="sessions"[^>]+\bhidden\b', html),
+                    "Session History navigation is not hidden before hydration")
+        def check(node):
+            prefix = f"/cloudcli/{node}"
+            require(self.http(prefix + "/").headers["x-codey-ui-release"] == manifest["sharedUi"]["release"],
+                    "Portal-only deployment changed shared Workspace UI")
+            require(self.http(prefix + "/api/auth/status").json()["managedAuthentication"], "Workspace SSO failed")
+            self.http(prefix + "/api/auth/status", authenticated=False, expected=401)
+            self.http(f"/api/node-data/{node}/usage")
+            return {"node": node, "workspaceSso": 200, "anonymous": 401, "usage": 200}
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            nodes = list(pool.map(check, NODES))
+        return {"portalHealth": 200, "sessionHistoryHidden": history_hidden,
+                "publicFilesVerified": len(manifest["publicSha256"]), "sharedUiUnchanged": True, "nodes": nodes,
+                "realModelCalls": 0, "acceptanceScope": "Portal navigation, deployed source, Workspace SSO and Usage"}
+
     def run(self):
         try:
             self.session()
@@ -160,6 +187,8 @@ class Portal:
                 self.report["codeyModels"] = self.models(self.request["nodes"])
             elif mode == "verify":
                 self.report.update(self.verify())
+            elif mode == "verify_portal":
+                self.report.update(self.verify_portal())
             else:
                 raise RuntimeError("Unknown Portal operation")
             self.report["passed"] = True

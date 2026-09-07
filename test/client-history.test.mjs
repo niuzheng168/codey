@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test from "./helpers/optional-history.mjs";
 import { fetchClientHistoryList } from "../public/client-history.js";
 
 test("direct copilot-api history receives node source metadata", async () => {
