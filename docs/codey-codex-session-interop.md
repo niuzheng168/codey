@@ -168,7 +168,9 @@ tests, the production build, type checks, and lint passed (existing warnings
 remain). Run the mixed backend suite with a temporary home and inherited
 `CODEX_HOME` unset: the legacy history fixtures override `os.homedir()`, not
 that environment variable. The final isolated run did not use the live daemon.
-No running service was restarted and this correction has not been deployed.
+No running service was restarted during development. The subsequent authorized
+combined rollout, including its self-hosted-node handoff, is recorded in
+`docs/codey-combined-fleet-release-2026-09-07.md`.
 
 ## Authorized fleet rollout: 2026-09-06
 
