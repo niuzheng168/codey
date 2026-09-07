@@ -46,10 +46,12 @@ upgrade, stop, or restart the daemon.
   map its ID before submitting the first turn. On the tested westus2 daemon,
   this creates `source=vscode`, included in the default list, without
   impersonating a desktop client or rewriting metadata. Apply Codey's selected
-  permissions only when creating its own new thread.
+  permissions when creating its own new thread and when starting its turn.
 - **Continuation:** use `thread/resume` and `turn/start` on the existing
-  daemon, preserving the provider thread ID and inherited permission settings.
-  Do not resume by starting a second writer.
+  daemon, preserving the provider thread ID. Attach without permission
+  overrides, check that the thread is idle, then apply the permission mode
+  supplied with the Codey message at `turn/start`. Calls without a selected
+  mode retain inherited settings. Do not resume by starting a second writer.
 - **Events:** forward the Codey-started turn's text, tool progress, and
   completion notifications. Buffer events that precede the start
   acknowledgement; ignore other threads and turns.
@@ -124,6 +126,49 @@ Deploying the source change requires publishing the CloudCLI backend. A
 frontend-only UI publish does not activate this runtime change.
 The development/validation turn did not restart the existing service because
 the current Codey conversation is a child process of that service.
+
+## Permission selection correction: 2026-09-07
+
+The original shared-daemon adapter applied Codey's permission selection only
+to `thread/start`. It omitted both permission fields from every `turn/start`,
+so changing the composer to Full Access on an existing thread did not change
+the permissions under which that thread ran. The composer label was not an
+acknowledgement of the daemon's effective policy.
+
+For the reported command-approval screenshot, the matching turn's local
+`turn_context` records `approval_policy=untrusted` and a `workspace-write`
+sandbox with networking disabled. The global Codex configuration was already
+`approval_policy=never` and `sandbox_mode=danger-full-access`; changing that
+global file would not repair the missing per-turn propagation. The available
+log does not establish when the browser's Full Access selection was made.
+
+The correction sends explicit permission selections on every Codey-started
+turn, including the first:
+
+| Codey mode | `approvalPolicy` | `sandboxPolicy.type` |
+| --- | --- | --- |
+| `default` | `untrusted` | `workspaceWrite` |
+| `acceptEdits` | `never` | `workspaceWrite` |
+| `bypassPermissions` (Full Access) | `never` | `dangerFullAccess` |
+
+These fields are supported by the running daemon's generated 0.147.0 schema.
+They are deliberately not applied to `thread/resume`, which must remain safe
+when the preflight discovers an already-active desktop turn. Omitted modes
+continue to inherit the thread's settings. The daemon can reject a requested
+policy; Codey reports that rejection without an exec fallback or retry.
+
+This is permission propagation, not automatic approval. Outstanding approvals
+and desktop-specific interactions still require the desktop client. Changing
+the composer does not retroactively modify an in-flight turn or answer its
+pending requests. The correction requires a backend deployment to take effect.
+
+Validation: all 26 interop tests passed; the broader Codex/history/session
+suite passed 67 tests with one existing legacy-fork skip. All 489 frontend
+tests, the production build, type checks, and lint passed (existing warnings
+remain). Run the mixed backend suite with a temporary home and inherited
+`CODEX_HOME` unset: the legacy history fixtures override `os.homedir()`, not
+that environment variable. The final isolated run did not use the live daemon.
+No running service was restarted and this correction has not been deployed.
 
 ## Authorized fleet rollout: 2026-09-06
 
