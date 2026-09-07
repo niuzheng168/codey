@@ -25,13 +25,17 @@ ENV NODE_ENV=production \
 # package is published, enable PORTAL_CLOUDCLI_UI_ROOT=/data/cloudcli-ui.
 WORKDIR /app
 
-COPY package.json package-lock.json README.md ./
-COPY public ./public
-COPY --from=node-skill-builder /build/public/downloads ./public/downloads
-COPY src ./src
-COPY config/nodes.aca.json config/session-share.aca.json config/cloudcli-nodes.aca.json config/node-data.aca.json config/codey-node-ca.pem ./config/
+# Preserve private source modes without making the non-root runtime unable to read them.
+COPY --chown=node:node package.json package-lock.json README.md ./
+COPY --chown=node:node public ./public
+COPY --from=node-skill-builder --chown=node:node /build/public/downloads ./public/downloads
+COPY --chown=node:node src ./src
+COPY --chown=node:node config/nodes.aca.json config/session-share.aca.json config/cloudcli-nodes.aca.json config/node-data.aca.json config/codey-node-ca.pem ./config/
 
 USER node
+
+# Fail the build, rather than the production revision, if any runtime input is unreadable.
+RUN node -e "const fs=require('node:fs'); const check=p=>{if(fs.statSync(p).isDirectory()){for(const name of fs.readdirSync(p))check(p+'/'+name)}else fs.accessSync(p,fs.constants.R_OK)}; for(const p of ['package.json','src','public','config'])check(p)"
 
 EXPOSE 8080
 

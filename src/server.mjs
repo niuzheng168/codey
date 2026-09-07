@@ -24,6 +24,8 @@ import { SettingsApi } from "./settings-api.mjs";
 import { VoiceService, resolveVoiceServiceConfig } from "./voice-service.mjs";
 import { VoiceGateway } from "./voice-gateway.mjs";
 import { VoiceRewriteService, resolveVoiceRewriteConfig } from "./voice-rewrite-service.mjs";
+import { ComposerCompletionService, resolveComposerCompletionConfig } from "./composer-completion-service.mjs";
+import { ComposerCompletionGateway } from "./composer-completion-gateway.mjs";
 import { CloudCliUi } from "./cloudcli-ui.mjs";
 import {
   createCloudCliGateway,
@@ -273,6 +275,7 @@ export function createPortalServer(options) {
   const cloudCliUi = options.cloudCliUi ?? null;
   const nodeDataGateway = options.nodeDataGateway ?? null;
   const voiceGateway = options.voiceGateway ?? null;
+  const composerCompletionGateway = options.composerCompletionGateway ?? null;
   const nodePolicy = options.nodePolicy ?? null;
   const artifactCatalog =
     options.artifactCatalog ??
@@ -373,6 +376,10 @@ export function createPortalServer(options) {
         });
         return;
       }
+      if (
+        composerCompletionGateway &&
+        await composerCompletionGateway.handle(req, res, cloudCliGateway?.publicNodes(cloudCliNodeIds).map((node) => node.id) ?? [])
+      ) return;
       if (
         voiceGateway &&
         await voiceGateway.handle(req, res, cloudCliGateway?.publicNodes(cloudCliNodeIds).map((node) => node.id) ?? [])
@@ -1062,6 +1069,10 @@ async function main() {
       rewriteService: new VoiceRewriteService(resolveVoiceRewriteConfig(process.env)),
     },
   ) : null;
+  const composerCompletionGateway = passwordAuthenticator ? new ComposerCompletionGateway(
+    new ComposerCompletionService(resolveComposerCompletionConfig(process.env)),
+    { authenticator: passwordAuthenticator, nodePolicy },
+  ) : null;
   const settingsApi = accountStore ? new SettingsApi({
     accounts: accountStore, nodePolicy, authenticator: passwordAuthenticator, cloudCliGateway, nodeDataGateway,
   }) : null;
@@ -1084,6 +1095,7 @@ async function main() {
     cloudCliUi,
     nodeDataGateway,
     voiceGateway,
+    composerCompletionGateway,
     passwordAuthenticator,
     nodePolicy,
     settingsApi,
