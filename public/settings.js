@@ -4,6 +4,7 @@ const usersRoot = document.querySelector("#users-list");
 const adminSection = document.querySelector("#admin-section");
 const enrollment = document.querySelector("#enrollment");
 const enrollmentValue = document.querySelector("#enrollment-value");
+const pendingMachinesRoot = document.querySelector("#pending-machines");
 
 function notice(text, error = false) {
   message.textContent = text;
@@ -53,10 +54,11 @@ function renderNodes(nodes) {
   for (const node of nodes) {
     const card = element("article", null, "node-card");
     card.append(element("h3", node.name), element("code", node.id, "node-id"));
-    card.append(element("p", `${node.vnetAvailable ? "VNet 已配置" : "浏览器直连"} · ${node.workspaceAvailable ? "Workspace 已配置" : "Workspace 网关尚未配置"}`, "badges"));
+    card.append(element("p", `${node.vnetOnly ? "VNet 专用（无需浏览器证书）" : node.vnetAvailable ? "VNet 已配置" : "浏览器直连"} · ${node.workspaceAvailable ? "Workspace 已配置" : "Workspace 网关尚未配置"}`, "badges"));
     const form = element("form", null, "form-grid");
     form.append(field("名称", "name", node.name), field("HTTPS 地址", "endpoint", node.endpoint, "url"),
       field("区域", "region", node.region), field("颜色", "accent", node.accent, "color"));
+    if (node.vnetOnly) form.querySelector('[name="endpoint"]').readOnly = true;
     const actions = element("div", null, "actions");
     const save = element("button", "保存设置");
     save.type = "submit";
@@ -126,9 +128,68 @@ async function renderUsers() {
 async function load() {
   const result = await api("/api/settings");
   renderNodes(result.nodes);
+  const setup = result.machineSetup;
+  document.querySelector("#download-machine-skill").disabled = !setup?.enabled;
+  document.querySelector("#machine-package-status").textContent = setup?.enabled
+    ? `Linux x64 轻量包约 ${Math.ceil(setup.bytes / 1024 / 1024)} MB · 自动安装 Node ${setup.node} · CloudCLI ${setup.cloudcli} · copilot-api ${setup.copilotApi}。每次下载预留一个七天有效的身份，尚不加入节点列表。`
+    : setup?.reason || "完整机器配置包尚未发布；旧版说明 ZIP 不能替代依赖包。";
+  pendingMachinesRoot.textContent = "";
+  for (const pending of result.pendingMachines ?? []) {
+    const row = element("div", null, "user-row pending-machine");
+    row.append(element("span", `${pending.id} · ${pending.expired ? "已过期" : "待配置，尚未添加"}`, "muted"));
+    const retryForm = element("form");
+    retryForm.action = `/api/settings/machines/${pending.id}/skill`;
+    retryForm.method = "post";
+    const retry = element("button", "重新下载此身份的 Skill");
+    retry.type = "submit";
+    retry.disabled = pending.expired || !setup?.enabled;
+    retryForm.append(retry);
+    row.append(retryForm);
+    const cancel = element("button", "取消此配置包", "danger");
+    cancel.type = "button";
+    cancel.addEventListener("click", () => {
+      if (!window.confirm("取消后，此配置包和已生成的机器文件将无法添加。不会停止目标机上的服务。")) return;
+      void operation(cancel, async () => {
+        await api(`/api/settings/machines/${pending.id}`, "DELETE");
+        await load();
+        notice("已取消待配置身份。");
+      });
+    });
+    row.append(cancel);
+    pendingMachinesRoot.append(row);
+  }
   adminSection.hidden = result.user.role !== "admin";
   if (!adminSection.hidden) await renderUsers();
 }
+
+document.querySelector("#machine-skill-form").addEventListener("submit", () => {
+  notice("正在下载完整配置包。包内含你本次机器的专属密钥，请妥善保管，不要分享。");
+  // Native form download streams the archive without buffering a Blob in
+  // browser memory. The form has no identity/owner fields.
+  window.setTimeout(() => { void load().catch((error) => notice(error.message, true)); }, 2000);
+});
+
+document.querySelector("#add-prepared-machine-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  void operation(form.querySelector("button"), async () => {
+    const file = document.querySelector("#prepared-machine-file").files?.[0];
+    if (!file || file.size > 16384) throw new Error("请选择 Skill 生成的 codey-machine.json（不超过 16 KB）");
+    let machine;
+    try { machine = JSON.parse(await file.text()); }
+    catch { throw new Error("机器文件不是有效 JSON"); }
+    if (machine?.schema !== 1 || !/^n-[a-f0-9]{24}$/.test(machine.nodeId ?? "") ||
+        typeof machine.tlsCertificate !== "string" || typeof machine.privateIp !== "string" ||
+        Object.hasOwn(machine, "clientSigningKey") || Object.hasOwn(machine, "workspaceSsoKey")) {
+      throw new Error("请选择配置完成的机器文件，不是 enrollment 或校验值");
+    }
+    notice("正在从门户验证 VNet、HTTPS、Usage/History、Workspace SSO 和 WebSocket…");
+    const { node } = await api(`/api/settings/machines/${machine.nodeId}/activate`, "POST", machine);
+    form.reset();
+    await load();
+    notice(`机器已验通并添加：${node.name}。现在可以使用 VNet 用量、History 和 Workspace。模型尚未登录时，请完成本人的 provider 授权。`);
+  });
+});
 
 document.querySelector("#create-node-form").addEventListener("submit", (event) => {
   event.preventDefault();

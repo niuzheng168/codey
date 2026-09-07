@@ -213,6 +213,7 @@ function renderConnectionOptions() {
   }
   for (const toggle of elements.vnetToggles) {
     toggle.checked = state.connectionMode === "vnet";
+    toggle.disabled = available && !state.clientConfig.connectionModes.includes("direct");
   }
 }
 
@@ -232,6 +233,7 @@ async function refreshClientNodes(force = false) {
   state.clientConfig = config;
   state.directMode = Boolean(config.directMode);
   if (!config.connectionModes?.includes("vnet")) state.connectionMode = "direct";
+  else if (!config.connectionModes.includes("direct")) state.connectionMode = "vnet";
   state.nodes = config.nodes ?? [];
   state.refreshSeconds = config.refreshSeconds ?? 60;
   state.clientTicketExpiresAt = state.nodes.length
@@ -772,7 +774,7 @@ function renderNodes(data) {
               data-open-provision
               ${state.provisioning ? "disabled" : ""}
             >${state.provisioning ? "部署中…" : "添加机器"}</button>
-            <a class="node-skill-download" href="/downloads/codey-node-onboarding.zip" download="codey-node-onboarding.zip" title="节点注册、HTTPS、VNet 和 Workspace 的配置与验收步骤">↓ 下载接入 Skill</a>
+            <a class="node-skill-download" href="/settings#add-node" title="下载包含依赖和本人机器身份的完整 Skill，配置服务与 VNet 后再添加">↓ 完整机器配置 Skill</a>
           </div>
         </div>
         <div class="node-grid">
@@ -2226,7 +2228,7 @@ async function fetchOverview(forceRefresh, { interactiveLocal = false, connectio
     setLoading(false);
     elements.loadingState.hidden = true;
     elements.dashboard.hidden = false;
-    elements.dashboard.innerHTML = '<section class="empty-state">你还没有可访问的节点。<a href="/settings#add-node">添加并配置自己的节点</a> · <a href="/downloads/codey-node-onboarding.zip" download="codey-node-onboarding.zip">下载接入 Skill</a></section>';
+    elements.dashboard.innerHTML = '<section class="empty-state">你还没有可访问的节点。<a href="/settings#add-node">下载完整机器配置 Skill → 配置机器与 VNet → 验通后添加</a></section>';
     setConnectionLabel("暂无节点");
     return;
   }

@@ -12,6 +12,8 @@
     "dev": "node --watch src/server.mjs",
     "skill:build": "node scripts/build-node-skill.mjs",
     "skill:check": "node scripts/build-node-skill.mjs --check",
+    "machine:build": "python3 scripts/build-machine-bundle.py",
+    "machine:check": "node --check src/machine-identity.mjs && node --check src/machine-setup.mjs && node --check src/machine-verification.mjs && node --check src/zip-stream.mjs",
     "workspace:build": "node scripts/build-cloudcli-ui.mjs",
     "workspace:publish": "node scripts/publish-cloudcli-ui.mjs",
     "check:workspace": "node --check src/cloudcli-ui.mjs && node --check src/cloudcli-ui-package.mjs && node --check scripts/build-cloudcli-ui.mjs && node --check scripts/publish-cloudcli-ui.mjs && node --check cloudcli/public/sw.js",

@@ -3,6 +3,7 @@ import { isIP } from "node:net";
 import { validateConfig } from "./config.mjs";
 import { SignedStore, requestError } from "./signed-store.mjs";
 import { workspaceNodeKey } from "./workspace-sso.mjs";
+import { machineServerName } from "./machine-identity.mjs";
 
 const NODE_ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const allowedFields = new Set(["name", "region", "endpoint", "accent"]);
@@ -35,7 +36,7 @@ function nodeSettings(body, previous = {}) {
 
 function publicNode(record) {
   const { id, name, region, endpoint, accent } = record;
-  return { id, name, region, endpoint, accent };
+  return { id, name, region, endpoint, accent, ...(record.machine ? { vnetOnly: true } : {}) };
 }
 
 export class NodePolicy {
@@ -147,11 +148,81 @@ export class NodePolicy {
     });
   }
 
+  async reserveMachine(principalId, now = Date.now()) {
+    return this.store.mutate((data) => {
+      const own = data.nodes.filter((node) => node.ownerId === principalId);
+      const pending = own.filter((node) => node.setup?.status === "reserved" && node.setup.expiresAt > now);
+      if (pending.length >= 4 || own.filter((node) => node.enabled).length + pending.length >= 32 ||
+          own.length >= 256 || data.nodes.length >= 8192 || data.nodes.filter((node) => node.setup).length >= 2048) {
+        throw requestError("待配置机器或节点数量已达上限，请先取消不用的配置包", 409);
+      }
+      let id;
+      do { id = `n-${randomBytes(12).toString("hex")}`; } while (data.nodes.some((node) => node.id === id));
+      const node = {
+        id, ownerId: principalId, name: "待配置机器", region: "",
+        endpoint: `https://${machineServerName(id)}:8443/usage`, accent: "#60a5fa",
+        enabled: false, keyMode: "isolated", serverNode: null,
+        createdAt: new Date(now).toISOString(),
+        setup: { status: "reserved", expiresAt: now + 7 * 86400000 },
+      };
+      data.nodes.push(node);
+      return node;
+    });
+  }
+
+  async reservedMachine(principalId, nodeId, now = Date.now()) {
+    const node = (await this.records()).data.nodes.find(
+      (item) => item.id === nodeId && item.ownerId === principalId &&
+        !item.enabled && item.setup?.status === "reserved",
+    );
+    if (!node) throw requestError("待配置机器不存在或无权添加", 404);
+    if (node.setup.expiresAt <= now) throw requestError("配置包已过期，请重新下载；不要复用旧机器身份", 410);
+    return node;
+  }
+
+  async pendingMachines(principalId, now = Date.now()) {
+    return (await this.records()).data.nodes
+      .filter((node) => node.ownerId === principalId && node.setup?.status === "reserved")
+      .map((node) => ({ id: node.id, createdAt: node.createdAt, expiresAt: node.setup.expiresAt, expired: node.setup.expiresAt <= now }));
+  }
+
+  async cancelMachine(principalId, nodeId) {
+    return this.store.mutate((data) => {
+      const node = data.nodes.find((item) => item.id === nodeId && item.ownerId === principalId && item.setup?.status === "reserved");
+      if (!node) throw requestError("待配置机器不存在或无权访问", 404);
+      node.setup.status = "cancelled";
+    });
+  }
+
+  async activateMachine(principalId, machine, now = Date.now()) {
+    return this.store.mutate((data) => {
+      const node = data.nodes.find((item) => item.id === machine.id && item.ownerId === principalId &&
+        !item.enabled && item.setup?.status === "reserved");
+      if (!node) throw requestError("机器配置已添加、取消或无权访问", 409);
+      if (node.setup.expiresAt <= now) throw requestError("配置包已过期", 410);
+      if (data.nodes.filter((item) => item.ownerId === principalId && item.enabled).length >= 32) {
+        throw requestError("节点数量已达上限", 409);
+      }
+      // The TLS-verified endpoint is authoritative. vmResourceId is descriptive
+      // client metadata: using it as a global claim would let one user squat
+      // another user's Azure resource ID without controlling that VM.
+      if (data.nodes.some((item) => item.enabled && item.machine?.privateIp === machine.privateIp)) {
+        throw requestError("此私网服务入口已添加为节点，不能再次认领", 409);
+      }
+      Object.assign(node, {
+        name: machine.name, region: machine.region, machine, enabled: true,
+        setup: { ...node.setup, status: "activated", verifiedAt: new Date(now).toISOString() },
+      });
+      return publicNode(node);
+    });
+  }
+
   async update(principalId, nodeId, body) {
     return this.store.mutate((data) => {
       const node = data.nodes.find((item) => item.id === nodeId && item.ownerId === principalId && item.enabled);
       if (!node) throw requestError("节点不存在或无权访问", 404);
       Object.assign(node, nodeSettings(body, publicNode(node)));
+      if (node.machine) node.endpoint = `https://${machineServerName(node.id)}:8443/usage`;
       return publicNode(node);
     });
   }
@@ -169,6 +240,10 @@ export class NodePolicy {
   async enrollment(principal, nodeId, origin) {
     const node = await this.owned(principal.id, nodeId);
     if (node.keyMode !== "isolated") throw requestError("既有节点的部署密钥不通过网页提供", 403);
+    return this.enrollmentValues(principal, nodeId, origin);
+  }
+
+  enrollmentValues(principal, nodeId, origin) {
     return {
       nodeId, portalOrigin: origin, principalId: principal.id, username: principal.name,
       clientSigningKey: this.isolatedKey(nodeId),

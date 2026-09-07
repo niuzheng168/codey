@@ -7,6 +7,11 @@ metadata:
 
 # Codey Node Onboarding
 
+这是旧的**手动接入说明**，不是完整安装包。新用户需要“先配置机器，再回页面添加”时，
+使用 Codey 页面提供的 **Config new Codey machine 自动配置 Skill**：包含本人预留身份、
+改版源码及锁定版本，自动安装 Node/CloudCLI/copilot-api 依赖、准备 TLS 和 VNet，最后导入机器文件。
+不要仅凭本说明 ZIP / SHA-256 要求用户自己收集全部安装材料。
+
 把一台**属于当前用户**的机器接入 Codey，保留正在运行的任务。使用当前项目的
 Codey 改版 copilot-api 和 CloudCLI fork，不把上游原版当成已具备这些接口。
 

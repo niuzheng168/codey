@@ -132,6 +132,7 @@ function validateClientNode(node, seenIds = new Set()) {
     region,
     endpoint: endpoint.toString(),
     accent: accent.toLowerCase(),
+    ...(node.vnetOnly === true ? { vnetOnly: true } : {}),
   });
 }
 

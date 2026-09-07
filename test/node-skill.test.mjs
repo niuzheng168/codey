@@ -240,8 +240,10 @@ test("add-machine and empty-node entry points link to the authenticated skill pa
   assert.ok(settings.indexOf(download) < settings.indexOf('id="create-node-form"'));
   assert.ok(settings.includes(`href="${sumPath}"`));
   assert.ok(app.includes('window.location.assign("/settings#add-node")'));
-  assert.ok(app.match(/node-onboarding-actions[\s\S]*?<\/div>/)?.[0].includes(download));
-  assert.ok(app.match(/elements\.dashboard\.innerHTML = '<section class="empty-state">[^\n]+/)?.[0].includes(download));
+  assert.ok(app.match(/node-onboarding-actions[\s\S]*?<\/div>/)?.[0].includes('href="/settings#add-node"'));
+  assert.ok(app.match(/elements\.dashboard\.innerHTML = '<section class="empty-state">[^\n]+/)?.[0].includes("完整机器配置 Skill"));
+  assert.ok(settings.includes('action="/api/settings/machines/skill" method="post"'));
+  assert.ok(settings.indexOf('id="machine-skill-form"') < settings.indexOf('id="add-prepared-machine-form"'));
 });
 
 test("add-node navigation waits for async node rendering and does not scroll ordinary settings visits", async () => {

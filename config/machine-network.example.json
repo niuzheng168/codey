@@ -1,0 +1,4 @@
+{
+  "portalSubnetId": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/codey/providers/Microsoft.Network/virtualNetworks/portal/subnets/aca-infrastructure",
+  "privateEndpointSubnetId": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/codey/providers/Microsoft.Network/virtualNetworks/portal/subnets/private-endpoints"
+}

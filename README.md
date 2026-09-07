@@ -29,6 +29,7 @@ npm test
 
 ## 设计文档
 
+- [新机器自动配置 Skill：轻量依赖安装 → VNet → 页面验通后添加](./docs/codey-machine-setup.md)
 - [Codey 当前架构](./docs/codey-current-architecture.md)
 - [Codey VNet + CloudCLI 目标架构](./docs/codey-vnet-cloudcli-design.md)
 - [用户名密码与 Workspace SSO](./docs/codey-password-sso-design.md)

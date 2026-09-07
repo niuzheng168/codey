@@ -30,6 +30,10 @@ COPY --chown=node:node package.json package-lock.json README.md ./
 COPY --chown=node:node public ./public
 COPY --from=node-skill-builder --chown=node:node /build/public/downloads ./public/downloads
 COPY --chown=node:node src ./src
+COPY --chown=node:node skills/config-new-codey-machine/SKILL.md skills/config-new-codey-machine/dependencies.json ./skills/config-new-codey-machine/
+COPY --chown=node:node skills/config-new-codey-machine/agents/openai.yaml ./skills/config-new-codey-machine/agents/
+COPY --chown=node:node skills/config-new-codey-machine/scripts/configure-machine.py skills/config-new-codey-machine/scripts/azure-vnet.py ./skills/config-new-codey-machine/scripts/
+COPY --chown=node:node skills/config-new-codey-machine/references/verification.md ./skills/config-new-codey-machine/references/
 COPY --chown=node:node config/nodes.aca.json config/session-share.aca.json config/cloudcli-nodes.aca.json config/node-data.aca.json config/codey-node-ca.pem ./config/
 
 USER node

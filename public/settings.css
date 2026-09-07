@@ -33,10 +33,16 @@ button:hover:not(:disabled) { filter: brightness(1.2); }
 .skill-checksum:hover { color: #67e8f9; text-decoration: underline; }
 .skill-install { margin-top: 0; }
 .skill-install code { color: #cbd5e1; overflow-wrap: anywhere; }
+.machine-setup-flow { padding: 4px 0 20px; }
+.machine-setup-flow h3 { margin: 22px 0 8px; }
+.machine-setup-flow code, #pending-machines { overflow-wrap: anywhere; }
+.manual-node-setup { padding-top: 18px; border-top: 1px solid #243047; }
 #add-node { scroll-margin-top: 24px; }
 summary { cursor: pointer; color: #67e8f9; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; background: #090f1b; border-radius: 8px; font: 12px/1.7 ui-monospace, monospace; }
 .user-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid #243047; }
+.pending-machine { flex-wrap: wrap; }
+.pending-machine > span { flex-basis: 100%; }
 #settings-message { color: #6ee7b7; }
 #settings-message.error { color: #fda4af; }
 @media (max-width: 640px) { main { padding: 20px 14px; } header { padding: 16px 14px; } section { padding: 18px 14px; } .form-grid { grid-template-columns: 1fr; } }

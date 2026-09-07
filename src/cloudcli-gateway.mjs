@@ -3,6 +3,7 @@ import http from "node:http";
 import https from "node:https";
 import path from "node:path";
 import { issueWorkspaceAssertion } from "./workspace-sso.mjs";
+import { nodeTlsOptions } from "./machine-identity.mjs";
 
 const NODE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const HOP_BY_HOP_HEADERS = new Set([
@@ -206,14 +207,25 @@ export class CloudCliGateway {
     this.nodePolicy = nodePolicy;
     this.accessLeaseMs = accessLeaseMs;
     this.ui = ui;
+    this.machineNodes = [];
     if (config.ssoMaster && !sessionAuthenticator) {
       throw new Error("Workspace SSO requires revocable portal authentication");
     }
   }
 
+  setMachineNodes(nodes) {
+    const staticIds = new Set(this.config.nodes.map((node) => node.id));
+    if (nodes.some((node) => staticIds.has(node.id))) throw new Error("Prepared machine conflicts with a static Workspace");
+    this.machineNodes = nodes;
+  }
+
+  allNodes() {
+    return [...this.config.nodes, ...this.machineNodes];
+  }
+
   publicNodes(allowedNodeIds) {
     const allowed = new Set(allowedNodeIds);
-    return this.config.nodes
+    return this.allNodes()
       .filter((node) => allowed.has(node.id))
       .map((node) => ({
         id: node.id,
@@ -225,7 +237,7 @@ export class CloudCliGateway {
 
   match(pathname) {
     return (
-      this.config.nodes.find(
+      this.allNodes().find(
         (node) =>
           pathname === node.basePath || pathname.startsWith(`${node.basePath}/`),
       ) ?? null
@@ -255,6 +267,7 @@ export class CloudCliGateway {
   }
 
   async proxyHttp(req, res, allowedNodeIds) {
+    await this.refreshMachines?.();
     const requestUrl = new URL(req.url ?? "/", "http://codey.local");
     const node = this.match(requestUrl.pathname);
     if (!node) return false;
@@ -289,9 +302,7 @@ export class CloudCliGateway {
         {
           headers: forwardedRequestHeaders(req, node, { ssoMaster: this.config.ssoMaster, target }),
           method: req.method,
-          ca: this.config.ca,
-          servername: node.tlsServerName || undefined,
-          rejectUnauthorized: true,
+          ...nodeTlsOptions(node, this.config.ca),
         },
         (upstreamResponse) => {
           res.writeHead(
@@ -334,6 +345,7 @@ export class CloudCliGateway {
       }
       let requestUrl;
       try {
+        await this.refreshMachines?.();
         requestUrl = new URL(req.url ?? "/", "http://codey.local");
       } catch {
         closeUpgradeSocket(socket, 400, "Bad Request");
@@ -361,9 +373,7 @@ export class CloudCliGateway {
       const upstreamRequest = requestTransport(target).request(target, {
         headers: forwardedRequestHeaders(req, node, { websocket: true, ssoMaster: this.config.ssoMaster, target }),
         method: req.method,
-        ca: this.config.ca,
-        servername: node.tlsServerName || undefined,
-        rejectUnauthorized: true,
+        ...nodeTlsOptions(node, this.config.ca),
       });
 
       let peer;

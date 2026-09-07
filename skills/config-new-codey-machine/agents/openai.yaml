@@ -1,0 +1,4 @@
+interface:
+  display_name: "Config new Codey machine"
+  short_description: "完整依赖配置新机器与 Azure 私网，验收后回 Codey 页面添加"
+  default_prompt: "使用 $config-new-codey-machine 和下载包中的本人接入身份配置我的目标机器，先检查已有服务和 Azure 网络计划，保留当前任务，完成后生成可在 Codey 页面添加的机器文件。"

@@ -28,7 +28,9 @@ export function isLoopback(url) {
 export async function fetchNodeJson(node, url, {
   connectionMode = "direct", timeoutMs = 15000, fetchImpl = fetch,
 } = {}) {
-  const vnet = connectionMode === "vnet";
+  // Prepared machines use a node-pinned private certificate. They deliberately
+  // have no browser-direct endpoint; this is a declared route, not a fallback.
+  const vnet = node.vnetOnly === true || connectionMode === "vnet";
   const directUrl = new URL(url);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);

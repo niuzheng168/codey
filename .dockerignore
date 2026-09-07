@@ -8,6 +8,9 @@ public/downloads/**
 !src/**
 !scripts/build-node-skill.mjs
 !skills/codey-node-onboarding/**
+!skills/config-new-codey-machine/**
+skills/config-new-codey-machine/assets/**
+skills/config-new-codey-machine/**/__pycache__/**
 !config/nodes.aca.json
 !config/session-share.aca.json
 !config/cloudcli-nodes.aca.json

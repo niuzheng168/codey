@@ -21,6 +21,7 @@ import { NodeDataGateway, resolveNodeDataGatewayConfig } from "./node-data-gatew
 import { AccountStore } from "./account-store.mjs";
 import { NodePolicy } from "./node-policy.mjs";
 import { SettingsApi } from "./settings-api.mjs";
+import { MachineSetup } from "./machine-setup.mjs";
 import { VoiceService, resolveVoiceServiceConfig } from "./voice-service.mjs";
 import { VoiceGateway } from "./voice-gateway.mjs";
 import { VoiceRewriteService, resolveVoiceRewriteConfig } from "./voice-rewrite-service.mjs";
@@ -684,7 +685,9 @@ export function createPortalServer(options) {
         }));
         sendJson(res, 200, {
           directMode: clientOnly,
-          connectionModes: nodeDataGateway && (!nodePolicy || nodes.some((node) => node.proxyEndpoint)) ? ["direct", "vnet"] : ["direct"],
+          connectionModes: nodeDataGateway && (!nodePolicy || nodes.some((node) => node.proxyEndpoint))
+            ? nodes.length && nodes.every((node) => node.vnetOnly) ? ["vnet"] : ["direct", "vnet"]
+            : ["direct"],
           managedAccounts: Boolean(nodePolicy),
           userId: nodePolicy ? clientPrincipalId : undefined,
           nodes,
@@ -956,6 +959,7 @@ export function createMultiUserPortalServer(options) {
       return;
     }
     req.codeyPrincipal = principal;
+    await options.machineSetup?.refreshGateways();
     if (options.settingsApi && await options.settingsApi.handle(req, res)) return;
     const loaded = await (options.nodePolicy || options.userConfigStore).load(principalId);
     const contextRevision = `${principal.role || ""}:${loaded.revision || JSON.stringify(loaded.config)}`;
@@ -1076,6 +1080,14 @@ async function main() {
   const settingsApi = accountStore ? new SettingsApi({
     accounts: accountStore, nodePolicy, authenticator: passwordAuthenticator, cloudCliGateway, nodeDataGateway,
   }) : null;
+  const machineSetup = accountStore ? new MachineSetup({
+    nodePolicy, accounts: accountStore, authenticator: passwordAuthenticator, origin: publicBaseUrl,
+    bundleRoot: process.env.PORTAL_MACHINE_BUNDLE_ROOT,
+    network: process.env.PORTAL_MACHINE_NETWORK_CONFIG
+      ? JSON.parse(await readFile(process.env.PORTAL_MACHINE_NETWORK_CONFIG, "utf8")) : null,
+    cloudCliGateway, nodeDataGateway, cloudCliUi,
+  }) : null;
+  if (settingsApi) settingsApi.machineSetup = machineSetup;
   const commonOptions = {
     config,
     configPath,
@@ -1099,6 +1111,7 @@ async function main() {
     passwordAuthenticator,
     nodePolicy,
     settingsApi,
+    machineSetup,
   };
   const server = userDataDir
     ? createMultiUserPortalServer({

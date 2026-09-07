@@ -26,8 +26,27 @@
         <div id="my-nodes"><p class="muted">正在加载…</p></div>
         <details id="add-node" class="new-node" open>
           <summary>添加自己的节点</summary>
+          <div class="machine-setup-flow">
+            <h3>1. 下载机器自动配置 Skill</h3>
+            <p class="muted">先配置机器，最后再添加。轻量包包含你的临时机器身份、Codey 改版 CloudCLI / copilot-api 源码与安装脚本。Node 和软件依赖由命令自动下载、校验并安装，不再单独收集安装包或证书。</p>
+            <form id="machine-skill-form" action="/api/settings/machines/skill" method="post">
+              <button id="download-machine-skill" type="submit" disabled>↓ 下载 Config new Codey machine</button>
+            </form>
+            <p id="machine-package-status" class="muted">正在检查完整依赖包…</p>
+            <h3>2. 在 Codex 中配置目标机器</h3>
+            <p class="muted">解压后让 Codex 使用 <code>config-new-codey-machine/SKILL.md</code>。当前面向 Azure Linux x64，需要联网安装依赖；Windows Codex 可作为控制端。Skill 配置服务、HTTPS、SSO 与 VNet；Azure 权限和模型登录仍需本人授权。包内含本次专属密钥，请勿分享。</p>
+            <h3>3. 配置完成后，验通并添加机器</h3>
+            <p class="muted">选择 Skill 生成的 <code>codey-machine.json</code>（不是 ZIP、SHA-256 或 enrollment）。门户实际验证私网与 Workspace 后才将机器加入列表。</p>
+            <form id="add-prepared-machine-form" class="form-grid">
+              <label>配置完成的机器文件<input id="prepared-machine-file" type="file" accept=".json,application/json" required /></label>
+              <button type="submit">验通并添加机器</button>
+            </form>
+            <div id="pending-machines"></div>
+          </div>
+          <details class="manual-node-setup">
+          <summary>高级：手动注册与接入说明</summary>
           <div class="node-skill-tools">
-            <a class="skill-download" href="/downloads/codey-node-onboarding.zip" download="codey-node-onboarding.zip">↓ 下载接入 Skill</a>
+            <a class="skill-download" href="/downloads/codey-node-onboarding.zip" download="codey-node-onboarding.zip">↓ 下载旧版手动说明（不含依赖）</a>
             <span class="muted">HTTPS · VNet · Workspace</span>
             <a class="skill-checksum" href="/downloads/codey-node-onboarding.sha256" download="codey-node-onboarding.sha256" aria-label="下载接入 Skill 的 SHA-256 校验值">SHA-256</a>
           </div>
@@ -39,6 +58,7 @@
             <label>区域<input name="region" maxlength="120" placeholder="Local / Azure region" /></label>
             <button type="submit">创建节点</button>
           </form>
+          </details>
         </details>
         <section id="enrollment" hidden aria-label="本节点接入资料">
           <h3>本节点接入资料</h3>

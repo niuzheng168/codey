@@ -3,6 +3,7 @@ import https from "node:https";
 import { isIP } from "node:net";
 import path from "node:path";
 import { issueClientTicket } from "./client-ticket.mjs";
+import { nodeTlsOptions } from "./machine-identity.mjs";
 
 const NODE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const USAGE_PATHS = new Set([
@@ -111,6 +112,15 @@ export class NodeDataGateway {
     this.nodePolicy = nodePolicy;
   }
 
+  setMachineNodes(nodes) {
+    const result = new Map(this.config.nodes.map((node) => [node.id, node]));
+    for (const node of nodes) {
+      if (result.has(node.id)) throw new Error("Prepared machine conflicts with a static gateway");
+      result.set(node.id, node);
+    }
+    this.nodes = result;
+  }
+
   endpoint(nodeId, allowedIds) {
     return this.nodes.has(nodeId) && allowedIds.includes(nodeId)
       ? `/api/node-data/${nodeId}/usage`
@@ -198,9 +208,7 @@ export class NodeDataGateway {
       try {
         request = this.requestImpl(target, {
           method: "GET",
-          ca: this.config.ca,
-          servername: node.tlsServerName,
-          rejectUnauthorized: true,
+          ...nodeTlsOptions(node, this.config.ca),
           headers: { accept: "application/json", authorization: `Bearer ${ticket}` },
         }, (response) => {
           response.on("error", finish);
