@@ -16,6 +16,9 @@
    移除后不能用旧机器文件重新认领；需新的预留身份与明确的机器重配。
 7. 如果用户要模型推理，另验证本人 provider 登录与一次真实请求。
    无 provider 认证不能标“全部就绪”；只读服务和网络通过可单独交付。
+8. `codey-node-updater.service` active/enabled；加机完成后设置页显示升级器在线，
+   owner/ID 和组件/Node 版本正确。私有升级凭据不能登录门户或调用模型，其他账号
+   无法排队升级。后续通过页面确认更新，不借首次安装器重装或改变 enrollment。
 
 ## 故障定位
 
@@ -34,7 +37,8 @@
   包有签名 key，应从 Downloads/临时传输位置移入 owner 受保护目录或删除多余副本。
 - 已添加的机器：本人在页面移除；撤销门户访问，但不关 VM、不删项目/会话。
 - 本次首次安装：只 disable/stop `codey-copilot-api.service` 和
-  `codey-cloudcli.service`；保留 `.codex`、业务数据、证书与诊断，别清理用户目录。
+  `codey-cloudcli.service`、`codey-node-updater.service`；仅在它们确属本次新建时操作。
+  保留 `.codex`、业务数据、证书与诊断，别清理用户目录。
 - Azure：依据对应 `.azure-state.json` 逐项审核本次新建资源。先移除本次 NSG rules，
   PE → PLS → 本次 NIC backend association → LB → 专属 /28；不要删 NIC 或原 subnet。
   删除前核实 node-specific name/ownership tags 与当前引用，避免删除后来已复用的资源。

@@ -127,6 +127,14 @@ class DeploymentSafety(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             command([sys.executable, str(Path(__file__).with_name("deploy.py"))], timeout=5)
 
+    def test_explicit_target_subset_is_preserved_and_defaults_to_all_existing_nodes(self):
+        import sys
+        from deploy import arguments
+        with patch.object(sys, "argv", ["deploy.py", "--nodes", "zhn-a100", "jpe3", "westus2"]):
+            self.assertEqual(arguments().nodes, ["zhn-a100", "jpe3", "westus2"])
+        with patch.object(sys, "argv", ["deploy.py"]):
+            self.assertEqual(len(arguments().nodes), 4)
+
     def test_azure_secret_reads_are_not_logged(self):
         from builder import Builder
         worker = object.__new__(Builder)

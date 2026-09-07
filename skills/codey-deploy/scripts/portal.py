@@ -137,15 +137,17 @@ class Portal:
             self.http(prefix + "/api/auth/status", origin="https://untrusted.invalid", method="POST", expected=403)
             return {"node": node, "ui": active["release"], "sso": 200, "usage": 200,
                     "anonymous": 401, "foreignOrigin": 403, "entry": entry}
+        targets = self.request.get("nodes", list(NODES))
+        require(targets and set(targets).issubset(NODES), "Unexpected verification targets")
         with ThreadPoolExecutor(max_workers=4) as pool:
-            nodes = list(pool.map(check, NODES))
+            nodes = list(pool.map(check, targets))
         entries = {row["entry"] for row in nodes}
         require(len(entries) == 1, "Nodes are serving different shared UI assets")
         entry = next(iter(entries))
         name = entry[len(ui_manifest["assetBase"]):]
         require(hashlib.sha256(self.http(entry).content).hexdigest() == ui_manifest["files"][name]["sha256"],
                 "Served UI entry checksum mismatch")
-        model_nodes = self.request.get("modelNodes", list(NODES))
+        model_nodes = self.request.get("modelNodes", targets)
         models = self.models(model_nodes) if model_nodes else {"passed": True, "nodes": []}
         return {"nodes": nodes, "codeyModels": models, "portalHealth": 200,
                 "sharedUiEntryVerified": True, "allPublishedAssetsVerifiedDuringUpload": True}

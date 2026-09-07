@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile, mkdir, symlink } from "node:fs/promises";
 import os from "node:os";
@@ -19,6 +19,7 @@ import { NodeDataGateway } from "../src/node-data-gateway.mjs";
 import { CloudCliGateway } from "../src/cloudcli-gateway.mjs";
 import { crc32, zipStream } from "../src/zip-stream.mjs";
 import { fetchNodeJson } from "../public/node-transport.js";
+import { MachineUpdates } from "../src/machine-updates.mjs";
 
 const run = promisify(execFile);
 const origin = "https://codey.example.test";
@@ -119,9 +120,13 @@ async function fixture(t) {
   const data = new NodeDataGateway({ nodes: [], signingKey: ticketMaster, ca: "legacy-test-ca" }, { nodePolicy: policy });
   const workspace = new CloudCliGateway({ nodes: [], ssoMaster: master, ca: "legacy-test-ca" }, { sessionAuthenticator: auth, nodePolicy: policy });
   const probes = [];
+  const updates = new MachineUpdates({ root, master, nodePolicy: policy, accounts, authenticator: auth,
+    sourceRoot: path.resolve("node-updater"), catalogRoot: path.join(root, "node-updates"),
+    publicKey: generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }) });
+  await updates.initialize();
   const machineSetup = new MachineSetup({
     nodePolicy: policy, accounts, authenticator: auth, origin, bundleRoot, network, cloudCliGateway: workspace,
-    nodeDataGateway: data, cloudCliUi: {}, verify: async (machine, options) => {
+    nodeDataGateway: data, cloudCliUi: {}, machineUpdates: updates, verify: async (machine, options) => {
       probes.push({ machine, options });
       return { https: true, usage: true, history: true, workspaceSso: true, websocket: true, anonymousDenied: true };
     },
@@ -160,6 +165,15 @@ test("complete skill download reserves only this user's identity, includes depen
     assert.equal(createHash("sha256").update(artifact).digest("hex"), item.sha256);
   }
   const enrollment = JSON.parse(entries.get("config-new-codey-machine/assets/enrollment.json"));
+  const updater = JSON.parse(entries.get("config-new-codey-machine/assets/codey-updater/config.json"));
+  assert.equal(updater.nodeId, enrollment.nodeId);
+  assert.equal(updater.ownerId, enrollment.principalId);
+  assert.equal(updater.protocol, 1);
+  assert.notEqual(updater.credential, enrollment.clientSigningKey);
+  assert.notEqual(updater.credential, enrollment.workspaceSsoKey);
+  for (const name of ["install.py", "updater.py", "engine.py", "probe.mjs", "UPGRADE.md"]) {
+    assert.ok(entries.has("config-new-codey-machine/assets/codey-updater/" + name));
+  }
   assert.equal(enrollment.principalId, f.member.id);
   assert.equal(enrollment.username, "member");
   assert.equal(enrollment.portalOrigin, origin);
@@ -182,7 +196,9 @@ test("complete skill download reserves only this user's identity, includes depen
   assert.ok(!JSON.stringify(status).includes(enrollment.clientSigningKey));
   const repeat = await f.request(`/api/settings/machines/${enrollment.nodeId}/skill`, { method: "POST" });
   assert.equal(repeat.status, 200);
-  const again = JSON.parse(unzip(Buffer.from(await repeat.arrayBuffer())).get("config-new-codey-machine/assets/enrollment.json"));
+  const repeatedEntries = unzip(Buffer.from(await repeat.arrayBuffer()));
+  const again = JSON.parse(repeatedEntries.get("config-new-codey-machine/assets/enrollment.json"));
+  assert.equal(JSON.parse(repeatedEntries.get("config-new-codey-machine/assets/codey-updater/config.json")).credential, updater.credential);
   assert.equal(again.nodeId, enrollment.nodeId);
   assert.equal(again.clientSigningKey, enrollment.clientSigningKey);
   assert.equal(again.expiresAt, enrollment.expiresAt);

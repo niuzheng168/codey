@@ -6,6 +6,8 @@
 !public/**
 public/downloads/**
 !src/**
+!node-updater/**
+node-updater/**/__pycache__/**
 !scripts/build-node-skill.mjs
 !skills/codey-node-onboarding/**
 !skills/config-new-codey-machine/**

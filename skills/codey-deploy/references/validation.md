@@ -116,3 +116,45 @@ timed release. Each VM avoids a repeat compiler/test cycle; existing native
 dependencies remain on their original Node runtime. The first changed-lockfile
 release, Azure scheduling, active user tasks or rollback can exceed the target;
 the measured report must show this rather than weakening acceptance.
+
+## Signed updater E2E — 2026-09-07 UTC release
+
+`fast-20260907-155055-8c3549` completed in **392.516 seconds** (6m32s),
+including clean-source preparation, one full component validation/build, signed feed
+publication, ACA/MCP and shared UI, updater implementation refresh, canary/batch
+activation and final acceptance. The explicit targets were `zhn-a100`, `jpe3`,
+`westus2`; **jpe2 was skipped at the user's request because of a long-running job**.
+
+- ACA: `codey--f-20260907-155055-8c3549`; both containers ready and MCP actually probed.
+- Portal: 174 tests, 166 passed, 8 retained History tests skipped; Linux updater
+  transaction suite: 14 passed. The release-tool suite passed 18 checks.
+- Three real Codey responses and three real ephemeral Codex CLI responses passed.
+  Identical application packages were not restarted; their PIDs and the protected
+  Windows copilot-api PID/start time remained unchanged.
+- Production settings/module hashes matched the frozen source. A real personalized
+  new-machine ZIP contained the current updater and its separate owner/node-bound
+  credential. Its pending identity could not claim updates and was cancelled after
+  this check. No new VM or Windows tunnel was activated.
+
+This successful run is **not the duration of the whole development/recovery task**.
+The preceding release/recovery window totaled 3265.011 seconds (54m25s) from the
+first release attempt to this successful run's completion. Retain the failures:
+
+- `fast-20260907-150303-e124c1`: coordinated interruption for a concurrent worktree
+  writer, Windows PowerShell module-autoload failure during private-file ACL setup,
+  then a false configuration-drift result caused by Codex registering the synthetic
+  probe directory. Native ACL tooling, isolated Python imports, and narrowly scoped
+  TOML comparison now have regression coverage. Its failed model-check job is not
+  counted as a successful upgrade.
+- `fast-20260907-154415-95e71e`: 105.172 seconds, failed before deployment because
+  newly added Portal SDK dependencies were not installed for its tests. Portal
+  dependencies now use a lock/ABI-matched cache, installed with lifecycle scripts disabled.
+- During earlier diagnostics, a HOME `copy.py` shadowed the standard library on
+  A100 and triggered copying to `/data/g`. The three identified diagnostic processes
+  were stopped; destination files were not deleted or restored. Details and the
+  known uncertainty are retained in `artifacts/node-updater-validation-20260907/probe-shadowing-incident.json`.
+  Executable updater entrypoints now self-isolate, and orchestration uses `-I`.
+
+Evidence: the successful run's `report.json`, builder `validation.json`,
+`node-update-progress.json`, and `final-updater-acceptance.json`. The extra
+personalized-ZIP check performed no additional model calls.

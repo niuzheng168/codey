@@ -8,6 +8,7 @@
     <link rel="icon" href="/favicon.svg" />
     <link rel="stylesheet" href="/settings.css" />
     <script type="module" src="/settings.js"></script>
+    <script type="module" src="/machine-updates.js"></script>
     <script type="module" src="/portal-session.js"></script>
   </head>
   <body>
@@ -52,6 +53,32 @@
           <button id="hide-enrollment" type="button">隐藏接入资料</button>
         </section>
       </section>
+
+      <section id="machine-updates" aria-labelledby="machine-updates-heading">
+        <h2 id="machine-updates-heading">机器软件更新</h2>
+        <p class="muted">仅操作你拥有并已接入升级器的机器。先预览再确认；批量先灰度一台，成功后最多并行三台。本机保护节点不参与。</p>
+        <div class="update-controls">
+          <label>目标发行版<select id="node-update-release" disabled aria-label="目标节点发行版"></select></label>
+          <button id="node-update-refresh" type="button">刷新状态</button>
+          <button id="node-update-selected" type="button" disabled>更新选中机器</button>
+          <button id="node-update-all" type="button" disabled>更新全部可升级机器</button>
+        </div>
+        <p id="node-update-message" role="status" aria-live="polite" class="muted">正在读取升级状态…</p>
+        <div id="node-update-list"></div>
+        <div id="node-update-jobs" aria-label="机器升级任务"></div>
+      </section>
+
+      <dialog id="node-update-confirm" aria-labelledby="node-update-confirm-title">
+        <h2 id="node-update-confirm-title">确认机器升级计划</h2>
+        <p id="node-update-plan-note"></p>
+        <div id="node-update-plan-targets"></div>
+        <p class="muted">升级会短暂停止受影响的服务，并验证 Codey/Codex 模型调用（可能产生少量用量）。请先结束原生 Codex 任务。离线/忙碌机器会等待；未知迁移不会被强行执行。</p>
+        <p id="node-update-plan-error" role="status" aria-live="polite"></p>
+        <div class="update-controls">
+          <button id="node-update-cancel" type="button">取消</button>
+          <button id="node-update-apply" type="button">确认升级</button>
+        </div>
+      </dialog>
 
       <section aria-labelledby="password-heading">
         <h2 id="password-heading">修改我的密码</h2>

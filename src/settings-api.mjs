@@ -31,8 +31,8 @@ function send(res, status, value, headers = {}) {
 }
 
 export class SettingsApi {
-  constructor({ accounts, nodePolicy, authenticator, cloudCliGateway, nodeDataGateway, machineSetup }) {
-    Object.assign(this, { accounts, nodePolicy, authenticator, cloudCliGateway, nodeDataGateway, machineSetup });
+  constructor({ accounts, nodePolicy, authenticator, cloudCliGateway, nodeDataGateway, machineSetup, machineUpdates }) {
+    Object.assign(this, { accounts, nodePolicy, authenticator, cloudCliGateway, nodeDataGateway, machineSetup, machineUpdates });
   }
 
   async handle(req, res) {
@@ -41,6 +41,7 @@ export class SettingsApi {
     try {
       const principal = req.codeyPrincipal;
       if (!principal) throw requestError("需要登录", 401);
+      if (this.machineUpdates && await this.machineUpdates.handleOwner(req, res)) return true;
       if (this.machineSetup && await this.machineSetup.handle(req, res)) return true;
       if (pathname.startsWith("/api/admin/") && principal.role !== "admin") {
         throw requestError("只有管理员可以管理账号", 403);

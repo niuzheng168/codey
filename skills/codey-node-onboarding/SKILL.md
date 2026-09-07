@@ -44,6 +44,12 @@ VM 重启、网卡/IP/路由修改须单独确认，不视为“添加节点”�
    分清同 VNet、非重叠 peering、重叠地址的 Private Link；最后配置 ACA allowlist。
 4. **交付前**：读 [验收与回退](references/verification.md)。验证正向连接和
    未登录/其他用户被拒绝，不能仅凭“端口可达”宣称完成。
+5. **所有新增的 Linux x64 机器都接入升级器**：优先使用本人从设置页下载的
+   `config-new-codey-machine` 完整个性化包；它自动安装独立的
+   `codey-node-updater.service`。不要只装两个应用而遗漏后续升级能力。
+   已手工接入的机器，在“机器软件更新”下载本机的私密升级器包，先检查计划，再用
+   OS Python 3.12+ 运行包内 `install.py --apply`；只安装升级器，不重启应用。
+   加机后确认 owner/ID 匹配且升级器连接成功。Windows/macOS 不冒充 Linux 支持。
 
 仓库可用时先定位 `src/node-policy.mjs`、`src/settings-api.mjs`、
 `copilot-api/src/lib/codey-https-config.ts`、`cloudcli/` 和 `config/`，
@@ -58,6 +64,9 @@ VM 重启、网卡/IP/路由修改须单独确认，不视为“添加节点”�
   `workspaceSsoKey` 仅用于本节点 Workspace。不要混用或自行生成替代它们。
 - 门户密码、会话 Cookie、ACA master、CA 私钥不分发给节点或写入报告。
   本下载包是通用操作说明，**不包含任何真实接入密钥或机器清单**。
+- 升级器使用另一份仅有本机拉取权限的凭据及固定发行版公钥，不能复用模型 key
+  或 SSO key。只有 owner 明确确认后才升级；密钥/配置迁移先检查，不盲目覆盖调用方。
+  私钥只在发布端。升级器只出站 HTTPS，无需新增入站端口或 Azure 网络资源。
 - 私网 upstream 由运维审核后在服务端配置，不能从用户填写的 HTTPS 地址推导。
   不编辑签名的 `accounts.json` / `node-registry.json`，不重置认证 root。
 - 一个节点绑定一个 owner；同一 OS 用户下的工作目录不是不互信用户之间的沙箱。

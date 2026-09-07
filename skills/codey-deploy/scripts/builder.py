@@ -139,6 +139,8 @@ class Builder:
             else:
                 args = [*self.bun, "install", "--frozen-lockfile"] if name == "copilot-api" else [
                     "npm", "ci", "--no-audit", "--no-fund"]
+                if name == "portal":
+                    args.append("--ignore-scripts")
                 command(args, cwd=cache, env=env, timeout=180, log=self.job / f"{name}-install.log")
                 mode = "cold-install"
             save(cache / "ready.json", {"lockSha256": sha(source / lock), "mode": mode,
@@ -171,8 +173,12 @@ class Builder:
                 return name, {"image": f"{self.registry}.azurecr.io/{repository}@{digest}", "tag": tag}
 
             def portal():
+                if read(self.source / "portal/package.json").get("dependencies"):
+                    self.report["portalDependencyCache"] = self.dependency_cache("portal", env)
                 for label, args in [
                     ("skill", ["npm", "run", "skill:build"]), ("check", ["npm", "run", "check"]),
+                    ("updater-check", ["npm", "run", "updates:check"]),
+                    ("updater-transactions", ["/usr/bin/python3", "-m", "unittest", "discover", "-s", "test", "-p", "test_node_updater.py"]),
                     ("tests", ["npm", "test"]),
                 ]:
                     self.check("portal", label, args, env)
@@ -256,6 +262,16 @@ class Builder:
         revision = "codey--" + suffix
         for row in template["containers"]:
             row["image"] = manifest["images"][row["name"]]["image"]
+            if row["name"] == "portal" and self.request.get("enableNodeUpdates"):
+                require(any(item.get("mountPath") == "/data" for item in row.get("volumeMounts", [])),
+                        "Node updates require the existing /data share; no volume/resource is created")
+                store = self.publisher().AzureStore({**self.config, "directory": "node-updates"})
+                require(store.read("release-public.pem", 8192) and store.read("catalog.json", 4 * 1024 * 1024),
+                        "Publish the signed node feed before enabling the Portal")
+                values = {"PORTAL_NODE_UPDATE_ROOT": "/data/node-updates",
+                          "PORTAL_NODE_UPDATE_PUBLIC_KEY_FILE": "/data/node-updates/release-public.pem"}
+                row["env"] = [item for item in row.get("env", []) if item["name"] not in values]
+                row["env"].extend({"name": name, "value": value} for name, value in values.items())
         patch = self.job / "aca-patch.private.json"
         save(patch, {"properties": {"template": canonical(template)}})
         save(self.job / "aca-rollback.json", {"expectedRevision": revision,
@@ -297,9 +313,13 @@ class Builder:
                 "CI": "true", "NODE_ENV": "test", "NO_COLOR": "1",
                 "CODEY_MANAGED": "false", "CODEY_PORTAL_SSO": "false", "DATABASE_PATH": ":memory:",
             }
+            if read(self.source / "portal/package.json").get("dependencies"):
+                self.report["portalDependencyCache"] = self.dependency_cache("portal", env)
             for label, args in [
                 ("skill", ["npm", "run", "skill:build"]),
                 ("check", ["npm", "run", "check"]),
+                ("updater-check", ["npm", "run", "updates:check"]),
+                ("updater-transactions", ["/usr/bin/python3", "-m", "unittest", "discover", "-s", "test", "-p", "test_node_updater.py"]),
                 ("tests", ["npm", "test"]),
             ]:
                 self.check("portal", label, args, env)
@@ -314,6 +334,9 @@ class Builder:
                   for row in before["properties"]["template"]["containers"]}
         images["portal"] = {"image": f"{self.registry}.azurecr.io/codey@{digest}", "tag": self.release}
         files = {"/": sha(source / "public/index.html"), "/app.js": sha(source / "public/app.js")}
+        files["/settings"] = sha(source / "public/settings.html")
+        for name in ["settings.css", "machine-updates.js"]:
+            files["/" + name] = sha(source / "public" / name)
         features = {}
         if (source / "public/portal-features.js").is_file():
             files["/portal-features.js"] = sha(source / "public/portal-features.js")

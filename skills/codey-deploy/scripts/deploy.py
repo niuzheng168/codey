@@ -23,6 +23,8 @@ class Deploy:
         self.job = self.root / "artifacts" / self.release
         self.job.mkdir(mode=0o700, parents=True)
         self.scripts = Path(__file__).resolve().parent
+        self.nodes = tuple(args.nodes)
+        require(self.nodes and len(set(self.nodes)) == len(self.nodes), "Choose distinct target nodes")
         self.remote = args.remote_root + "/artifacts/" + self.release
         self.node_job = "/home/zhn/.local/share/codey-deploy/" + self.release
         self.report = {"release": self.release, "startedAt": time.time(), "targetSeconds": args.target_seconds,
@@ -32,7 +34,11 @@ class Deploy:
         self.lock = self.root / "artifacts/.codey-deploy-controller.lock"
         with self.lock.open("x", encoding="utf-8") as output:
             json.dump({"release": self.release, "pid": os.getpid()}, output)
-        self.base = {"root": args.remote_root, "registry": args.registry}
+        self.base = {"root": args.remote_root, "registry": args.registry, "nodes": list(self.nodes)}
+        self.report["selectedNodes"] = list(self.nodes)
+        self.report["skippedNodes"] = [node for node in NODES if node not in self.nodes]
+        if args.node_transport == "updater" and args.scope == "fleet":
+            self.base["enableNodeUpdates"] = True
         if args.seed:
             self.base["seed"] = args.seed
         self.manifest = None
@@ -49,7 +55,9 @@ class Deploy:
         command(["scp", "-q", *files, f"{host}:{destination}/"], timeout=90)
 
     def worker(self, mode, *, script="builder.py", extra=None, timeout=330):
-        output = self.ssh(self.args.builder, ["/opt/az/bin/python3", self.remote + "/scripts/" + script],
+        entry = self.remote + "/scripts/" + script
+        bootstrap = "import sys,runpy;sys.path.insert(0," + json.dumps(self.remote + "/scripts") + ");runpy.run_path(" + json.dumps(entry) + ",run_name='__main__')"
+        output = self.ssh(self.args.builder, ["/opt/az/bin/python3", "-I", "-c", bootstrap],
                           input=json.dumps({**self.base, "mode": mode, **(extra or {})}), timeout=timeout,
                           log=self.job / f"{script}-{mode}.log")
         result = json.loads(output.splitlines()[-1])
@@ -85,6 +93,9 @@ class Deploy:
         return json.loads(output)
 
     def prepare_node(self, node):
+        existing = self.ssh(node, ["systemctl", "--user", "show", "codey-node-updater.service",
+                                   "--property=ActiveState", "--value"], timeout=20)
+        require(existing.strip() != "active", "This node uses the independent updater; do not run the legacy SSH activator")
         self.upload(node, [str(self.scripts / name) for name in ("common.py", "node.py")], self.node_job)
         return self.node(node, "preflight")
 
@@ -100,8 +111,8 @@ class Deploy:
         base = command(["git", "rev-parse", "HEAD"], cwd=self.root)[0]
         files = command(["git", "ls-files", "--modified", "--others", "--exclude-standard", "-z"], cwd=self.root)[0]
         files = sorted(set(name for name in files.split("\0") if name))
-        allowed = ("public/", "src/", "test/", "docs/", "skills/", "scripts/")
-        require(files and all(name.startswith(allowed) or name in {"Dockerfile", "package.json", "package-lock.json"}
+        allowed = ("public/", "src/", "test/", "docs/", "skills/", "scripts/", "node-updater/")
+        require(files and all(name.startswith(allowed) or name in {"Dockerfile", ".dockerignore", ".env.example", "package.json", "package-lock.json"}
                               for name in files), "Review unexpected source/config changes before snapshotting")
         require(not command(["git", "ls-files", "--deleted"], cwd=self.root)[0],
                 "Reviewed Portal snapshot must not silently delete code")
@@ -125,7 +136,7 @@ class Deploy:
             require(output.count("ActiveState=active") == 2 and "\nMainPID=0" not in output,
                     "A protected remote service is not active: " + node)
             return node, output
-        return dict(self.pool.map(inspect, NODES))
+        return dict(self.pool.map(inspect, getattr(self, "nodes", NODES)))
 
     def run_portal(self):
         self.report["scope"] = "portal-only"
@@ -164,27 +175,29 @@ class Deploy:
     def run(self):
         if self.args.scope == "portal":
             return self.run_portal()
+        if self.args.node_transport == "updater":
+            return self.run_updater_fleet()
         try:
             with phase(self.report, "preflight-source-and-node-snapshots", self.record):
                 self.report["localBefore"] = self.protected_local()
                 self.report["worktreeBefore"] = command(["git", "status", "--short"], cwd=self.root)[0]
                 self.upload(self.args.builder, [str(file) for file in self.scripts.iterdir()
                                                if file.suffix in {".py", ".mjs"}], self.remote + "/scripts")
-                nodes = {node: self.pool.submit(self.prepare_node, node) for node in NODES}
+                nodes = {node: self.pool.submit(self.prepare_node, node) for node in self.nodes}
                 prepared = self.worker("prepare", timeout=100)
                 self.topology = prepared["nodes"]
                 self.report["source"] = prepared
                 self.report["nodesBefore"] = {node: future.result() for node, future in nodes.items()}
-                self.idle(NODES)
+                self.idle(self.nodes)
             with phase(self.report, "build-and-test-once-images-in-parallel", self.record):
                 self.manifest = self.worker("build", timeout=300)
                 save(self.job / "manifest.json", self.manifest)
             with phase(self.report, "download-and-parallel-stage", self.record):
                 command(["scp", "-q", *[f"{self.args.builder}:{self.remote}/{name}" for name in
                                        ("cloudcli.tar.gz", "gateway.tar.gz", "ca.pem")], str(self.job)], timeout=90)
-                self.report["staging"] = list(self.pool.map(lambda node: self.node(node, "stage"), NODES))
+                self.report["staging"] = list(self.pool.map(lambda node: self.node(node, "stage"), self.nodes))
             with phase(self.report, "canary-activate-and-two-real-model-calls", self.record):
-                canary = NODES[0]
+                canary = self.nodes[0]
                 proofs = self.idle([canary])
                 self.report["canary"] = self.node(canary, "activate", {"idle": proofs[canary]})
                 cli = self.pool.submit(self.node, canary, "model")
@@ -193,7 +206,7 @@ class Deploy:
                 self.report["canaryCodex"] = cli.result()
                 self.report["canaryCodey"] = codey.result()
             with phase(self.report, "aca-ui-and-remaining-nodes-in-parallel", self.record):
-                remaining = NODES[1:]
+                remaining = self.nodes[1:]
                 proofs = self.idle(remaining)
                 aca = self.pool.submit(self.worker, "activate", timeout=330)
                 ui = self.pool.submit(self.worker, "publish_ui", timeout=200)
@@ -207,12 +220,127 @@ class Deploy:
             with phase(self.report, "final-codey-models-and-fleet-acceptance", self.record):
                 mcp = self.pool.submit(self.worker, "mcp_health", timeout=60)
                 self.report["e2e"] = self.worker("verify", script="portal.py",
-                                                 extra={"modelNodes": list(NODES[1:])}, timeout=150)
+                                                 extra={"modelNodes": list(self.nodes[1:])}, timeout=150)
                 self.report["mcp"] = mcp.result()
                 self.report["localAfter"] = self.protected_local()
                 require(self.report["localBefore"] == self.report["localAfter"], "Protected local gateway changed")
                 self.report["worktreeAfter"] = command(["git", "status", "--short"], cwd=self.root)[0]
-                self.report["realModelCalls"] = {"codey": 4, "codex": 4, "total": 8}
+                self.report["realModelCalls"] = {"codey": len(self.nodes), "codex": len(self.nodes), "total": 2 * len(self.nodes)}
+            self.report["status"] = "complete"
+        except Exception as error:
+            self.report["status"] = "needs-attention"
+            self.report["error"] = str(error)
+        finally:
+            self.finish()
+        return 0 if self.report["status"] == "complete" and self.report["withinTarget"] else 1
+
+    def install_updater(self, row):
+        if row.get("alreadyEnrolled") and not row.get("file"):
+            return row
+        node = row["node"]
+        require(node in NODES, "Unexpected bootstrap node")
+        local = self.job / (node + "-updater-private.zip")
+        command(["scp", "-q", f"{self.args.builder}:{row['file']}", str(local)], timeout=30)
+        # ZIP contains only this node's updater credential. Restrict its Windows ACL.
+        sid = command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                       "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"], timeout=10)[0]
+        require(sid.startswith("S-1-") and all(char in "S-0123456789" for char in sid), "Invalid Windows owner SID")
+        # PS7 may export an incompatible PSModulePath to Windows PowerShell 5.
+        # Use the native ACL utility and .NET readback, not Get-Acl module autoload.
+        command(["icacls.exe", str(local), "/inheritance:r", "/grant:r", "*" + sid + ":(F)"], timeout=15)
+        check = ("$ErrorActionPreference='Stop';$a=[System.IO.File]::GetAccessControl('" +
+                 str(local).replace("'", "''") + "');foreach($r in $a.GetAccessRules($true,$true," +
+                 "[System.Security.Principal.SecurityIdentifier])){if($r.AccessControlType -eq 'Allow' -and " +
+                 "$r.IdentityReference.Value -ne '" + sid + "'){throw 'Private bootstrap ACL is not owner-only'}}")
+        command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", check], timeout=15)
+        require(sha(local) == row["sha256"], "Private bootstrap transfer checksum differs")
+        destination = self.node_job + "/updater-bootstrap"
+        self.upload(node, [str(local)], destination)
+        script = """import sys,os,zipfile,subprocess,json,shutil,hashlib
+from pathlib import Path
+root=Path(sys.argv[1]); archive=root/sys.argv[2]
+existing=sys.argv[3]=='1'; expected_node=sys.argv[4]
+def ensure(value,message):
+ if not value: raise RuntimeError(message)
+with zipfile.ZipFile(archive) as source:
+ names=source.namelist()
+ wanted=['install.py','updater.py','engine.py','probe.mjs','UPGRADE.md']+([] if existing else ['config.json'])
+ ensure(len(names)==len(wanted) and len(set(names))==len(wanted),'Invalid bootstrap entries')
+ ensure(set(names)=={'codey-updater/'+name for name in wanted},'Unrecognized bootstrap paths')
+ ensure(sum(row.file_size for row in source.infolist())<1024*1024,'Oversized bootstrap')
+ source.extractall(root)
+config=Path.home()/'.config/codey-updater/config.json' if existing else root/'codey-updater/config.json'
+ensure(config.is_file(),'An enrolled node lacks its local credential; explicit re-pairing is required')
+ensure(json.loads(config.read_text())['nodeId']==expected_node,'Bootstrap belongs to another node')
+config.chmod(0o600)
+installed=Path.home()/'.local/share/codey-updater/agent-v1'
+def digest(file): return hashlib.sha256(file.read_bytes()).hexdigest()
+same=existing and all((installed/name).is_file() and digest(installed/name)==digest(root/'codey-updater'/name) for name in ['updater.py','engine.py','probe.mjs'])
+if same:
+ print(json.dumps({'node':expected_node,'updaterUnchanged':True,'nodeServicesRestarted':False}));sys.exit(0)
+ensure(not (Path.home()/'.config/codey-updater/pending.json').exists(),'Finish the current updater transaction before replacing its implementation')
+python=None
+for name in [sys.executable,'python3.12','python3.13','/opt/az/bin/python3']:
+ candidate=shutil.which(name)
+ if not candidate: continue
+ try:
+  check=subprocess.run([candidate,'-I','-S','-c','import sys,shutil,ssl,sqlite3,tomllib; sys.exit(0 if sys.version_info>=(3,12) else 1)'],capture_output=True,timeout=10)
+  if check.returncode==0: python=candidate;break
+ except subprocess.TimeoutExpired: pass
+ensure(python,'No healthy independent Python 3.12+ interpreter; do not modify global runtimes')
+result=subprocess.run([python,'-I','-S',str(root/'codey-updater/install.py'),'--config',str(config),'--apply'],capture_output=True,text=True,timeout=180)
+(root/'install.private.log').write_text(result.stdout+result.stderr)
+ensure(result.returncode==0,'Updater-only installation failed; inspect the private install log')
+print(json.dumps({'node':json.loads(config.read_text())['nodeId'],'updaterInstalled':True,'nodeServicesRestarted':False}))
+"""
+        output = self.ssh(node, ["python3", "-I", "-S", "-", destination, local.name,
+                                "1" if row.get("useExistingConfig") else "0", node], input=script, timeout=200,
+                          log=self.job / (node + "-updater-install.log"))
+        # Remove only this credential-bearing temporary file, not an artifact directory.
+        require(local.resolve().parent == self.job.resolve(), "Unexpected credential temporary path")
+        local.unlink()
+        return json.loads(output)
+
+    def run_updater_fleet(self):
+        self.report["scope"] = "fleet-updater"
+        self.report["forceActualRollout"] = False
+        try:
+            with phase(self.report, "preflight-and-reviewed-source", self.record):
+                self.report["localBefore"] = self.protected_local()
+                self.report["nodesBefore"] = self.node_services()
+                self.upload(self.args.builder, [str(file) for file in self.scripts.iterdir()
+                                               if file.suffix in {".py", ".mjs"}], self.remote + "/scripts")
+                if self.args.reviewed_working_tree:
+                    self.base["portalSnapshot"] = self.freeze_portal()
+                    self.upload(self.args.builder, [str(self.job / "portal-reviewed.tar.gz")], self.remote)
+                self.report["source"] = self.worker("prepare", timeout=100)
+                self.idle(self.nodes)
+            with phase(self.report, "build-and-test-once", self.record):
+                self.manifest = self.worker("build", timeout=380)
+                save(self.job / "manifest.json", self.manifest)
+            with phase(self.report, "sign-and-publish-node-feed", self.record):
+                self.report["nodeRelease"] = self.worker("publish", script="updates.py", timeout=160)
+            with phase(self.report, "aca-and-shared-ui", self.record):
+                aca = self.pool.submit(self.worker, "activate", timeout=330)
+                ui = self.pool.submit(self.worker, "publish_ui", timeout=200)
+                self.report["aca"] = aca.result()
+                self.report["ui"] = ui.result()
+            with phase(self.report, "bootstrap-independent-updaters-if-needed", self.record):
+                rows = self.worker("bootstrap", script="updates.py", timeout=100)["nodes"]
+                self.report["updaterInstallation"] = list(self.pool.map(self.install_updater, rows))
+                require(self.node_services() == self.report["nodesBefore"], "Updater bootstrap changed an application service")
+            with phase(self.report, "owner-confirmed-canary-and-batch-model-e2e", self.record):
+                self.report["nodeUpdates"] = self.worker("rollout", script="updates.py", timeout=510)
+            with phase(self.report, "final-aca-fleet-and-local-acceptance", self.record):
+                mcp = self.pool.submit(self.worker, "mcp_health", timeout=60)
+                self.report["e2e"] = self.worker("verify", script="portal.py", extra={"modelNodes": []}, timeout=100)
+                self.report["mcp"] = mcp.result()
+                self.report["nodesAfter"] = self.node_services()
+                self.report["localAfter"] = self.protected_local()
+                require(self.report["localAfter"] == self.report["localBefore"], "Protected local gateway changed")
+                nodes = self.report["nodeUpdates"]
+                self.report["realModelCalls"] = {"codey": nodes.get("codeyModelCalls", 0),
+                                                "codex": nodes.get("codexModelCalls", 0)}
             self.report["status"] = "complete"
         except Exception as error:
             self.report["status"] = "needs-attention"
@@ -250,8 +378,12 @@ def arguments():
     parser.add_argument("--seed", help="Optional previously validated build cache; not a substitute for this run's tests")
     parser.add_argument("--target-seconds", type=int, default=600)
     parser.add_argument("--scope", choices=("fleet", "portal"), default="fleet")
+    parser.add_argument("--node-transport", choices=("updater", "ssh"), default="updater",
+                        help="Default: signed owner-confirmed pull updates. SSH is legacy-only before updater adoption.")
+    parser.add_argument("--nodes", nargs="+", choices=NODES, default=list(NODES),
+                        help="Explicit subset, e.g. skip a machine with a long-running user job")
     parser.add_argument("--reviewed-working-tree", action="store_true",
-                        help="Portal only: deploy explicitly reviewed local changes without committing/pushing")
+                        help="Deploy explicitly reviewed root-repository changes without committing/pushing")
     parser.add_argument("--apply", action="store_true", help="Authorized real ACA and remote-node deployment")
     return parser.parse_args()
 
@@ -259,6 +391,6 @@ def arguments():
 if __name__ == "__main__":
     args = arguments()
     require(args.apply, "Read SKILL.md and obtain release authorization, then pass --apply")
-    require(not args.reviewed_working_tree or args.scope == "portal",
-            "Reviewed working-tree snapshots are limited to Portal-only releases")
+    require(not args.reviewed_working_tree or args.scope == "portal" or args.node_transport == "updater",
+            "Reviewed source is supported by Portal-only and independent-updater releases, not legacy SSH")
     raise SystemExit(Deploy(args).run())

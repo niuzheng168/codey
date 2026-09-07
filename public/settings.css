@@ -38,4 +38,15 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; background:
 #settings-message, #machine-download-message { color: #6ee7b7; }
 #settings-message.error, #machine-download-message.error { color: #fda4af; }
 #machine-download-message { overflow-wrap: anywhere; }
+.update-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+.update-controls label { display: grid; gap: 6px; max-width: 100%; }
+.update-controls select { max-width: min(100%, 580px); }
+.node-update-row { display: grid; gap: 10px; padding: 16px 0; border-bottom: 1px solid #243047; }
+.node-update-select { display: flex; align-items: center; gap: 10px; }
+.node-update-select input { width: auto; }
+.update-badge { color: #67e8f9; }
+.update-warning, #node-update-message.error, #node-update-plan-error { color: #fda4af; }
+#node-update-list, #node-update-jobs, #node-update-plan-targets { overflow-wrap: anywhere; }
+#node-update-confirm { max-width: min(720px, calc(100vw - 32px)); max-height: 85vh; overflow: auto; color: #e2e8f0; background: #101827; border: 1px solid #334155; border-radius: 12px; padding: 24px; }
+#node-update-confirm::backdrop { background: #000a; }
 @media (max-width: 640px) { main { padding: 20px 14px; } header { padding: 16px 14px; } section { padding: 18px 14px; } .form-grid { grid-template-columns: 1fr; } }

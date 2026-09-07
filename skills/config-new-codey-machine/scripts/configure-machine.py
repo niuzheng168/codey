@@ -16,6 +16,7 @@ import shutil
 import socket
 import ssl
 import subprocess
+import sys
 import tarfile
 import time
 import urllib.request
@@ -294,6 +295,18 @@ def configure(args):
     os.umask(0o077)
     enrollment_file = Path(args.enrollment).resolve()
     enrollment = json.loads(enrollment_file.read_text())
+    updater = SKILL / "assets/codey-updater"
+    updater_config = json.loads((updater / "config.json").read_text())
+    if (updater_config.get("nodeId") != enrollment.get("nodeId")
+            or updater_config.get("ownerId") != enrollment.get("principalId")
+            or updater_config.get("username") != enrollment.get("username")
+            or updater_config.get("portalOrigin") != enrollment.get("portalOrigin")
+            or updater_config.get("protocol") != 1
+            or not re.fullmatch(r"[A-Za-z0-9_-]{43}", updater_config.get("credential", ""))):
+        raise SetupError("The updater bootstrap must belong to this same reserved machine and owner")
+    for name in ["install.py", "updater.py", "engine.py", "probe.mjs", "UPGRADE.md"]:
+        if not (updater / name).is_file():
+            raise SetupError("Download a complete machine Skill with its independent updater")
     manifest = json.loads((SKILL / "assets/manifest.json").read_text())
     network = json.loads(Path(args.network_file).read_text())
     artifacts = validate_inputs(enrollment, manifest, network)
@@ -314,7 +327,7 @@ def configure(args):
     if not state:
         if config.exists() and any(config.iterdir()):
             raise SetupError("An unrecognized Codey configuration exists; review instead of overwriting")
-        for name in SERVICES + ["copilot-api.service"]:
+        for name in SERVICES + ["copilot-api.service", "codey-node-updater.service"]:
             existing = run(["systemctl", "--user", "show", name, "-p", "FragmentPath", "--value"], check=False)
             if existing.stdout.strip():
                 raise SetupError(f"An existing {name} must be reviewed before any takeover")
@@ -326,7 +339,7 @@ def configure(args):
                 raise SetupError(f"Required listener {host}:{port} is occupied or not local; no process was stopped")
     summary = {
         "nodeId": enrollment["nodeId"], "releaseId": manifest["releaseId"],
-        "services": SERVICES, "listenIp": network["listenIp"], "modelApi": "127.0.0.1:4141",
+        "services": SERVICES + ["codey-node-updater.service"], "listenIp": network["listenIp"], "modelApi": "127.0.0.1:4141",
         "installationRoot": str(root), "configRoot": str(config),
         "enableLinger": args.enable_linger, "existingCodexConfig": "preserved",
         "dependencyInstallation": f"Download verified Node {manifest['node']}; install locked npm/Bun dependencies and build in a separate release",
@@ -473,6 +486,11 @@ def configure(args):
                 time.sleep(2)
         if error:
             raise SetupError(f"Local TLS/authentication verification failed ({error}); no machine import file was produced")
+        # Register a separate pull agent only after both newly-created services are healthy.
+        # Pending nodes cannot claim jobs until the owner completes Portal activation.
+        (updater / "config.json").chmod(0o600)
+        started.append("codey-node-updater.service")
+        run([sys.executable, updater / "install.py", "--config", updater / "config.json", "--apply"])
         output = Path(args.out).resolve()
         state["ready"] = True
         state["machineFile"] = str(output)

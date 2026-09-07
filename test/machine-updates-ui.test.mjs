@@ -1,0 +1,148 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+import { runInNewContext } from "node:vm";
+
+const source = await readFile(new URL("../public/machine-updates.js", import.meta.url), "utf8");
+const tick = () => new Promise(setImmediate);
+
+function data() {
+  const target = { id: "release-one", sequence: 1, platform: "linux-x64", migrations: ["gateway-api-key-v1"],
+    notes: "<img src=x onerror=evil()>", components: {
+      cloudcli: { version: "1.37.2", commit: "b".repeat(40), entrySha256: "b".repeat(64), nodeMajors: [24] },
+      copilotApi: { version: "2.5.1", commit: "b".repeat(40), entrySha256: "b".repeat(64), nodeMajors: [24] },
+    } };
+  const report = { platform: "linux-x64", layout: "legacy", highestSequence: 0, readyMigrations: ["gateway-api-key-v1"],
+    components: Object.fromEntries(["cloudcli", "copilotApi"].map((name) => [name, {
+      version: "1.0.0", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24,
+    }])) };
+  return { enabled: true, reason: null, releases: [target], jobs: [], nodes: [
+    { id: "alpha", name: "Alpha", enrolled: true, connected: true, report, eligible: true },
+    { id: "beta", name: "Beta", enrolled: true, connected: false, report, eligible: true },
+    { id: "new-node", name: "Unpaired", enrolled: false, connected: false, report: null, reason: "needs_setup" },
+    { id: "local", name: "Protected local", protected: true, enrolled: false, report: null, reason: "protected_local" },
+  ] };
+}
+
+async function page({ failPlan = false, pendingPlan = null } = {}) {
+  const elements = new Map();
+  const requests = [];
+  const timers = [];
+  const redirects = [];
+  const status = data();
+  function node(tag = "div", text = "") {
+    return {
+      tag, textContent: text, children: [], listeners: new Map(), value: "", disabled: false, open: false,
+      classList: { toggle() {} }, attributes: {},
+      append(...children) {
+        this.children.push(...children);
+        if (this.tag === "select" && !this.value && children[0]) this.value = children[0].value;
+      },
+      replaceChildren(...children) { this.children = []; if (this.tag === "select") this.value = ""; this.append(...children); },
+      addEventListener(name, listener) { this.listeners.set(name, listener); },
+      setAttribute(name, value) { this.attributes[name] = value; },
+      showModal() { this.open = true; }, close() { this.open = false; },
+      remove() {}, click() { return this.listeners.get("click")?.(); },
+      set innerHTML(_) { throw new Error("Untrusted update data must not be inserted as HTML"); },
+    };
+  }
+  const document = {
+    body: node("body"), hidden: false, createElement: node, addEventListener() {},
+    querySelector(selector) {
+      if (!elements.has(selector)) elements.set(selector, node(selector.endsWith("-release") ? "select" : "div"));
+      return elements.get(selector);
+    },
+  };
+  runInNewContext(source, {
+    document, clearTimeout() {},
+    window: { confirm: () => true, location: { replace: (url) => redirects.push(url) },
+      setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; } },
+    URL: { createObjectURL: () => "blob:fixture", revokeObjectURL() {} },
+    fetch: async (url, options) => {
+      const body = options.body && JSON.parse(options.body);
+      requests.push({ url, options, body });
+      if (url === "/api/settings/updates") return { ok: true, status: 200, json: async () => status };
+      if (url.endsWith("/plans")) {
+        if (pendingPlan) await pendingPlan;
+        if (failPlan) return { ok: false, status: 403, json: async () => ({ error: "Owner mismatch" }) };
+        return { ok: true, status: 200, json: async () => ({
+          id: "plan-one", releaseId: "release-one", notes: status.releases[0].notes, warning: "Review this plan",
+          targets: body.nodeIds.map((id) => ({ nodeId: id, name: id, eligible: true, changed: ["cloudcli"], deferred: id === "beta" })),
+        }) };
+      }
+      if (url.endsWith("/jobs")) {
+        status.jobs = [{ id: "job-one", nodeId: "alpha", releaseId: "release-one", state: "queued" }];
+        return { ok: true, status: 202, json: async () => ({ jobs: status.jobs }) };
+      }
+      throw new Error("Unexpected request " + url);
+    },
+  });
+  await tick(); await tick();
+  return { elements, requests, timers, redirects, status,
+    get: (suffix) => document.querySelector("#node-update-" + suffix) };
+}
+
+test("machine update controls include single-node, selected/all batch, setup and protected-local states", async () => {
+  const p = await page();
+  const rows = p.get("list").children;
+  assert.equal(rows.length, 4);
+  assert.equal(rows[0].children[0].children[0].disabled, false);
+  assert.equal(rows[2].children[0].children[0].disabled, true);
+  assert.equal(rows[3].children[0].children[0].disabled, true);
+  assert.ok(rows[0].children.at(-1).children.some((button) => button.textContent === "更新此机器"));
+  assert.ok(rows[2].children.at(-1).children.some((button) => button.textContent === "接入升级器"));
+  assert.ok(!rows[3].children.at(-1).children.some((button) => button.textContent === "接入升级器"));
+  assert.equal(p.get("all").disabled, false);
+  assert.equal(p.get("selected").disabled, true);
+});
+
+test("single-machine action only previews its node; no job is sent until explicit confirmation", async () => {
+  const p = await page();
+  await p.get("list").children[0].children.at(-1).children.find((button) => button.textContent === "更新此机器").click();
+  assert.equal(p.get("confirm").open, true);
+  assert.deepEqual(p.requests.filter((row) => row.url.endsWith("/plans"))[0].body.nodeIds, ["alpha"]);
+  assert.equal(p.requests.filter((row) => row.url.endsWith("/jobs")).length, 0);
+  assert.ok(p.get("plan-note").textContent.includes("<img src=x onerror=evil()>"));
+  await p.get("apply").click();
+  const jobs = p.requests.filter((row) => row.url.endsWith("/jobs"));
+  assert.equal(jobs.length, 1);
+  assert.deepEqual(jobs[0].body, { planId: "plan-one", confirmation: "update-reviewed-machines" });
+  assert.equal(p.get("confirm").open, false);
+  assert.ok(p.get("message").textContent.includes("不代表升级已完成"));
+  assert.ok(p.timers.some((timer) => timer.delay === 5000));
+});
+
+test("batch all excludes unpaired/protected nodes, selected batch contains only checked nodes, cancel is non-mutating", async () => {
+  const p = await page();
+  await p.get("all").click();
+  assert.deepEqual(p.requests.at(-1).body.nodeIds, ["alpha", "beta"]);
+  await p.get("cancel").click();
+  assert.equal(p.requests.filter((row) => row.url.endsWith("/jobs")).length, 0);
+  const beta = p.get("list").children[1].children[0].children[0];
+  beta.checked = true; beta.listeners.get("change")();
+  assert.equal(p.get("selected").disabled, false);
+  await p.get("selected").click();
+  assert.deepEqual(p.requests.at(-1).body.nodeIds, ["beta"]);
+});
+
+test("in-flight previews are deduplicated and authorization failures never become successful jobs", async () => {
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const p = await page({ pendingPlan: pending, failPlan: true });
+  const first = p.get("all").click();
+  const second = p.get("all").click();
+  assert.equal(p.requests.filter((row) => row.url.endsWith("/plans")).length, 1);
+  release();
+  await Promise.all([first, second]);
+  assert.equal(p.get("confirm").open, false);
+  assert.equal(p.requests.filter((row) => row.url.endsWith("/jobs")).length, 0);
+  assert.equal(p.get("message").textContent, "Owner mismatch");
+});
+
+test("the settings HTML loads the updater module and provides accessible confirmation/status controls", async () => {
+  const html = await readFile(new URL("../public/settings.html", import.meta.url), "utf8");
+  assert.match(html, /<script type="module" src="\/machine-updates\.js"><\/script>/);
+  assert.match(html, /id="node-update-message"[^>]*role="status"[^>]*aria-live="polite"/);
+  assert.match(html, /<dialog id="node-update-confirm"[^>]*aria-labelledby="node-update-confirm-title"/);
+  for (const id of ["selected", "all", "release", "cancel", "apply"]) assert.ok(html.includes(`id="node-update-${id}"`));
+});

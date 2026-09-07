@@ -15,6 +15,8 @@ description: "配置一台新的 Codey 机器：使用登录用户下载的接�
 - `assets/enrollment.json`：本次预留 ID、owner、两个独立节点 key、门户网络信息。
 - `assets/manifest.json`：审查过的准确 commit/version、平台、各文件 SHA-256。
 - 两份 `*-source.tar.gz`：对应 fork 源码及许可证，包含此发行版的本地补丁。
+- `assets/codey-updater/`：独立升级器、仅绑定本机 owner/ID 的升级凭据和发行版公钥。
+  重下载同一待配置身份不会轮换这份凭据；它不能调用模型或登录门户。
 - 两个脚本：自动下载校验 Node、安装锁定的 Bun/npm 依赖、构建应用、配置 Azure 网络
   与目标机服务。TLS leaf/key 在目标机本地生成。
 
@@ -94,6 +96,8 @@ Azure Run Command 默认 root：只在 root 层完成经授权的 linger，再�
 - `codey-copilot-api.service`：模型 API 只监听 `127.0.0.1:4141`；
   节点私网 HTTPS `8443` 提供 ticket 认证的 Usage / History。
 - `codey-cloudcli.service`：私网 HTTPS `3001`，只接受绑定本次 owner/node 的 SSO。
+- `codey-node-updater.service`：使用 OS Python 3.12+，仅出站 HTTPS 拉取本人确认的
+  签名发行包；不依赖正在升级的 Node、CloudCLI 或 copilot-api，也不开放管理端口。
 - 每节点非 CA 自签名 leaf，只包含服务端预留的 DNS SAN；门户只信任这片 leaf。
   不需分发 CA 私钥、申请公共 FQDN 或安装全局信任链；此节点默认 **VNet 专用**。
 - 重跑同一成功配置只验收，不重启/重写服务。失败只停止本次新启动的服务，保留诊断。
@@ -116,6 +120,15 @@ Azure Run Command 默认 root：只在 root 层完成经授权的 linger，再�
 匿名拒绝与 WebSocket；失败保持未添加，成功才启用节点和两个动态私网网关，
 **无需每加一台机器重建/发布门户镜像**。其他用户，包括管理员，不能认领此 ID。
 新节点的 Usage/History 固定走 VNet，Workspace 使用门户统一托管的前端。
+
+添加后在“设置 → 机器软件更新”刷新，确认升级器已连接、ID/owner 与当前机器一致。
+以后在这里单机或批量预览、确认升级，不重新运行首次安装器、不重建机器身份。
+批量先灰度一台，再最多三台并发；忙碌机器等待，不中断已有任务。升级后必须通过
+Codey 和 Codex 真模型调用，否则回退本次代码，不回退用户数据库或凭据。
+遇到 API key 或其他配置迁移提示先完成调用方迁移；不要跳过门禁或重新生成不兼容的 key。
+只有节点启用后才有升级权限；待配置期间服务收到拒绝并重试属预期，不要放宽鉴权。
+详见个性化包中的 `assets/codey-updater/UPGRADE.md`；升级器凭据丢失时由 owner 在
+页面明确确认重新接入，不能让别的账号或全局 deploy 脚本接管。
 
 按 [验收与回退](references/verification.md) 交付：准确区分本机测试、ACA 测试、
 浏览器测试和模型登录；只输出非敏感摘要、文件路径和本次回退范围。

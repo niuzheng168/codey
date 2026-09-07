@@ -4,6 +4,7 @@ import https from "node:https";
 import path from "node:path";
 import { issueWorkspaceAssertion } from "./workspace-sso.mjs";
 import { nodeTlsOptions } from "./machine-identity.mjs";
+import { DevTunnelTransport, normalizeDevTunnel } from "./devtunnel-transport.mjs";
 
 const NODE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const HOP_BY_HOP_HEADERS = new Set([
@@ -159,6 +160,11 @@ function normalizeNode(raw, seen) {
   if (tlsServerName && !/^(?=.{1,253}$)[a-z0-9.-]+$/i.test(tlsServerName)) {
     throw new Error(`Invalid TLS server name for node ${id}`);
   }
+  const fingerprint = String(raw?.fingerprint ?? "").trim().toUpperCase();
+  if (fingerprint && !/^(?:[A-F0-9]{2}:){31}[A-F0-9]{2}$/.test(fingerprint)) {
+    throw new Error(`Invalid TLS certificate fingerprint for node ${id}`);
+  }
+  const devTunnel = normalizeDevTunnel(raw?.devTunnel, { upstream, tlsServerName, fingerprint });
 
   return Object.freeze({
     basePath: `/cloudcli/${id}`,
@@ -167,6 +173,8 @@ function normalizeNode(raw, seen) {
     region: String(raw?.region ?? "Private VNet").trim().slice(0, 80),
     upstream,
     tlsServerName,
+    fingerprint,
+    devTunnel,
   });
 }
 
@@ -191,6 +199,9 @@ export function resolveCloudCliGatewayConfig(
   if (ssoMaster && nodes.some((node) => node.upstream.protocol !== "https:")) {
     throw new Error("Password-authenticated Workspaces require HTTPS upstreams");
   }
+  if (!ssoMaster && nodes.some(node => node.devTunnel)) {
+    throw new Error("Dev Tunnel Workspaces require node-bound portal SSO");
+  }
   const ca = nodes.some((node) => node.tlsServerName)
     ? readFileImpl(environment.PORTAL_CLOUDCLI_CA_FILE || path.join(path.dirname(configPath), "codey-node-ca.pem"), "utf8")
     : undefined;
@@ -201,13 +212,17 @@ export function resolveCloudCliGatewayConfig(
 }
 
 export class CloudCliGateway {
-  constructor(config, { sessionAuthenticator, nodePolicy, accessLeaseMs = 5000, ui } = {}) {
+  constructor(config, { sessionAuthenticator, nodePolicy, accessLeaseMs = 5000, ui,
+    tunnelTransportFactory = (node, ca) => new DevTunnelTransport(node.devTunnel, nodeTlsOptions(node, ca)),
+  } = {}) {
     this.config = config;
     this.sessionAuthenticator = sessionAuthenticator;
     this.nodePolicy = nodePolicy;
     this.accessLeaseMs = accessLeaseMs;
     this.ui = ui;
     this.machineNodes = [];
+    this.tunnelTransports = new Map();
+    this.tunnelTransportFactory = tunnelTransportFactory;
     if (config.ssoMaster && !sessionAuthenticator) {
       throw new Error("Workspace SSO requires revocable portal authentication");
     }
@@ -221,6 +236,22 @@ export class CloudCliGateway {
 
   allNodes() {
     return [...this.config.nodes, ...this.machineNodes];
+  }
+
+  upstreamOptions(node) {
+    const options = nodeTlsOptions(node, this.config.ca);
+    if (node.devTunnel) {
+      if (!this.tunnelTransports.has(node.id)) {
+        this.tunnelTransports.set(node.id, this.tunnelTransportFactory(node, this.config.ca));
+      }
+      options.agent = this.tunnelTransports.get(node.id).agent;
+    }
+    return options;
+  }
+
+  async close() {
+    await Promise.allSettled([...this.tunnelTransports.values()].map(transport => transport.dispose()));
+    this.tunnelTransports.clear();
   }
 
   publicNodes(allowedNodeIds) {
@@ -302,7 +333,7 @@ export class CloudCliGateway {
         {
           headers: forwardedRequestHeaders(req, node, { ssoMaster: this.config.ssoMaster, target }),
           method: req.method,
-          ...nodeTlsOptions(node, this.config.ca),
+          ...this.upstreamOptions(node),
         },
         (upstreamResponse) => {
           res.writeHead(
@@ -325,7 +356,9 @@ export class CloudCliGateway {
       });
       upstreamRequest.once("error", (error) => {
         cleanup();
-        sendProxyError(res, 502, `CloudCLI node ${node.id} is unavailable: ${error.message}`);
+        sendProxyError(res, 502, node.devTunnel
+          ? `CloudCLI node ${node.id} is unavailable; check the tunnel host and connect-token expiry`
+          : `CloudCLI node ${node.id} is unavailable: ${error.message}`);
         resolve();
       });
       req.pipe(upstreamRequest);
@@ -334,6 +367,7 @@ export class CloudCliGateway {
   }
 
   attach(server, authorizeNode) {
+    server.once("close", () => { void this.close(); });
     server.on("upgrade", async (req, socket, head) => {
       if (this.sessionAuthenticator) {
         try {
@@ -373,7 +407,7 @@ export class CloudCliGateway {
       const upstreamRequest = requestTransport(target).request(target, {
         headers: forwardedRequestHeaders(req, node, { websocket: true, ssoMaster: this.config.ssoMaster, target }),
         method: req.method,
-        ...nodeTlsOptions(node, this.config.ca),
+        ...this.upstreamOptions(node),
       });
 
       let peer;

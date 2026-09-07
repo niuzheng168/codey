@@ -42,6 +42,11 @@ node --test --test-concurrency=2 "test/*.test.mjs"
 
 ## 常见故障分层
 
+- **升级器离线/未接入**：确认使用本人完整机器 Skill 且
+  `codey-node-updater.service` 已启动，目标有健康 Python 3.12+ 与出站 HTTPS。
+  首次 Portal 激活前被拒绝是预期；启用后检查绑定 ID/owner，不通过复制另一节点
+  token、放开入站端口或重启模型 API 绕过。密钥迁移提示需先验收所有模型调用方。
+
 - **页面没有节点**：当前账号、signed owner registry、tombstone、是否只在另一个
   账号创建；不是网卡问题。admin 不自动拥有所有节点。
 - **能看到节点但 VNet 未配置**：generated ID 是否已加入服务端 allowlist、

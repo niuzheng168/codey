@@ -104,8 +104,9 @@ export function machineNetworkConfig(raw) {
 
 export class MachineSetup {
   constructor({ nodePolicy, accounts, authenticator, origin, bundleRoot, network, cloudCliGateway, nodeDataGateway, cloudCliUi,
-    skillRoot = defaultSkillRoot, verify = verifyMachine }) {
+    machineUpdates, skillRoot = defaultSkillRoot, verify = verifyMachine }) {
     Object.assign(this, { nodePolicy, accounts, authenticator, origin, bundleRoot, cloudCliGateway, nodeDataGateway, cloudCliUi, skillRoot, verify });
+    this.machineUpdates = machineUpdates;
     this.network = network ? machineNetworkConfig(network) : null;
     this.verifying = 0;
     this.downloading = 0;
@@ -116,6 +117,9 @@ export class MachineSetup {
   async availability() {
     if (!this.bundleRoot || !this.network || !this.cloudCliGateway || !this.nodeDataGateway || !this.cloudCliUi) {
       return { enabled: false, reason: "运维尚未发布完整机器配置包或启用共享 Workspace UI / 私网配置" };
+    }
+    if (this.machineUpdates && !this.machineUpdates.catalog.configured) {
+      return { enabled: false, reason: "请先配置节点升级器签名公钥，确保新机器可持续更新" };
     }
     try {
       const { manifest, files } = await loadMachineBundle(this.bundleRoot);
@@ -164,6 +168,10 @@ export class MachineSetup {
       schema: 1, ...this.nodePolicy.enrollmentValues(req.codeyPrincipal, node.id, this.origin),
       expiresAt: node.setup.expiresAt, releaseId: manifest.releaseId, network: this.network,
     };
+    if (this.machineUpdates) {
+      entries.push(...(await this.machineUpdates.newMachineEntries(req.codeyPrincipal.id, node.id))
+        .map((entry) => ({ ...entry, name: `${MACHINE_SKILL}/assets/${entry.name}` })));
+    }
     entries.push(
       { name: `${MACHINE_SKILL}/assets/enrollment.json`, data: JSON.stringify(enrollment, null, 2) + "\n" },
       { name: `${MACHINE_SKILL}/assets/manifest.json`, data: JSON.stringify(manifest, null, 2) + "\n" },
