@@ -232,13 +232,17 @@ test("skill downloads require valid portal login, support members/HEAD, reject w
   }
 });
 
-test("add-machine and empty-node entry points link to the authenticated skill package and open add-node form", async () => {
+test("add-machine and empty-node entry points only expose the verified automatic setup flow", async () => {
   const settings = await readFile(path.resolve("public/settings.html"), "utf8");
+  const script = await readFile(path.resolve("public/settings.js"), "utf8");
+  const styles = await readFile(path.resolve("public/settings.css"), "utf8");
   const app = await readFile(path.resolve("public/app.js"), "utf8");
   assert.match(settings, /<details id="add-node"[^>]* open>/);
-  assert.ok(settings.indexOf(download) > settings.indexOf('id="add-node"'));
-  assert.ok(settings.indexOf(download) < settings.indexOf('id="create-node-form"'));
-  assert.ok(settings.includes(`href="${sumPath}"`));
+  assert.doesNotMatch(settings, /高级：手动注册与接入说明|manual-node-setup|create-node-form/);
+  assert.ok(!settings.includes(download));
+  assert.ok(!settings.includes(sumPath));
+  assert.doesNotMatch(script, /create-node-form/);
+  assert.doesNotMatch(styles, /manual-node-setup|node-skill-tools|\.skill-download|\.skill-checksum|\.skill-install/);
   assert.ok(app.includes('window.location.assign("/settings#add-node")'));
   assert.ok(app.match(/node-onboarding-actions[\s\S]*?<\/div>/)?.[0].includes('href="/settings#add-node"'));
   assert.ok(app.match(/elements\.dashboard\.innerHTML = '<section class="empty-state">[^\n]+/)?.[0].includes("完整机器配置 Skill"));
@@ -261,6 +265,8 @@ test("add-node navigation waits for async node rendering and does not scroll ord
     const document = {
       createElement: element,
       querySelector(selector) {
+        // The removed legacy form must not be needed to bootstrap settings.
+        if (selector === "#create-node-form") return null;
         if (!nodes.has(selector)) nodes.set(selector, element());
         return nodes.get(selector);
       },

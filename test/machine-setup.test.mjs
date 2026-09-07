@@ -195,7 +195,11 @@ test("machine downloads reject anonymous/forged/cross-origin requests, caller id
   for (const user of ["", "__Host-codey_session=forged"]) {
     assert.equal((await f.request("/api/settings/machines/skill", { method: "POST", user, headers: { "x-ms-client-principal-id": f.member.id } })).status, 401);
   }
-  assert.equal((await f.request("/api/settings/machines/skill", { method: "POST", headers: { origin: "https://evil.example" } })).status, 403);
+  for (const deniedOrigin of ["https://evil.example", "null", ""]) {
+    assert.equal((await f.request("/api/settings/machines/skill", {
+      method: "POST", headers: { origin: deniedOrigin },
+    })).status, 403);
+  }
   for (const method of ["GET", "HEAD", "DELETE", "PUT"]) {
     assert.equal((await f.request("/api/settings/machines/skill", { method })).status, 405);
   }

@@ -32,6 +32,7 @@
             <form id="machine-skill-form" action="/api/settings/machines/skill" method="post">
               <button id="download-machine-skill" type="submit" disabled>↓ 下载 Config new Codey machine</button>
             </form>
+            <p id="machine-download-message" role="status" aria-live="polite"></p>
             <p id="machine-package-status" class="muted">正在检查完整依赖包…</p>
             <h3>2. 在 Codex 中配置目标机器</h3>
             <p class="muted">解压后让 Codex 使用 <code>config-new-codey-machine/SKILL.md</code>。当前面向 Azure Linux x64，需要联网安装依赖；Windows Codex 可作为控制端。Skill 配置服务、HTTPS、SSO 与 VNet；Azure 权限和模型登录仍需本人授权。包内含本次专属密钥，请勿分享。</p>
@@ -43,22 +44,6 @@
             </form>
             <div id="pending-machines"></div>
           </div>
-          <details class="manual-node-setup">
-          <summary>高级：手动注册与接入说明</summary>
-          <div class="node-skill-tools">
-            <a class="skill-download" href="/downloads/codey-node-onboarding.zip" download="codey-node-onboarding.zip">↓ 下载旧版手动说明（不含依赖）</a>
-            <span class="muted">HTTPS · VNet · Workspace</span>
-            <a class="skill-checksum" href="/downloads/codey-node-onboarding.sha256" download="codey-node-onboarding.sha256" aria-label="下载接入 Skill 的 SHA-256 校验值">SHA-256</a>
-          </div>
-          <p class="muted skill-install">ZIP 内为通用操作说明和离线配置工具，不含账号密钥，也不会自动安装或改网络。解压后把 <code>codey-node-onboarding</code> 文件夹放到用户目录的 <code>.agents/skills/</code>，再在 Codex 输入 <code>$codey-node-onboarding</code>。</p>
-          <p class="muted">新节点会获得服务端生成的唯一 ID 和专属密钥。必须在你自己的机器配置这些凭据，不能填写别人的节点 ID 来获得访问权限。</p>
-          <form id="create-node-form" class="form-grid">
-            <label>名称<input name="name" maxlength="80" required placeholder="我的工作站" /></label>
-            <label>HTTPS 地址<input name="endpoint" type="url" maxlength="2048" required placeholder="https://my-node.example.com:8443/usage" /></label>
-            <label>区域<input name="region" maxlength="120" placeholder="Local / Azure region" /></label>
-            <button type="submit">创建节点</button>
-          </form>
-          </details>
         </details>
         <section id="enrollment" hidden aria-label="本节点接入资料">
           <h3>本节点接入资料</h3>

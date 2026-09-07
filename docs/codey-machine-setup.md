@@ -1,7 +1,7 @@
 # 先配置机器，再在页面添加
 
 新流程使用 `config-new-codey-machine`，不是原来只有说明的
-`codey-node-onboarding`。旧的手动注册保留在设置页的“高级”折叠区域。
+`codey-node-onboarding`。设置页只展示自动配置和验通后添加流程，不再提供旧版手动注册入口。
 
 ## 用户流程
 
@@ -73,6 +73,10 @@ Portal 固定文件名、限制大小、拒绝 symlink/path traversal，下载�
 个性化 enrollment 只在响应内生成，不落盘到公共下载区。
 下载必须是已登录同源 POST，响应 `private, no-store`、`Vary: Cookie`、
 `Content-Disposition: attachment`；无匿名 bootstrap 认证豁免。
+页面通过同源 Fetch 获取轻量 ZIP，再交给浏览器保存；不再用会离开设置页的原生
+表单 POST。下载请求明确使用 `referrerPolicy: "same-origin"`，保留可校验的 Origin，
+不放宽服务端对跨源、空值或 `Origin: null` 的拒绝。首次下载与同身份重下共用处理，
+下载中禁用重复提交，失败在按钮旁显示错误并刷新待配置身份，避免反复占用预留名额。
 
 另在运维保护的位置保存 `config/machine-network.example.json` 对应的真实两个
 subnet ID。PE subnet 必须与 ACA infrastructure subnet 不同且在同一个 Portal VNet。

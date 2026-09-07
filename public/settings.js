@@ -5,10 +5,24 @@ const adminSection = document.querySelector("#admin-section");
 const enrollment = document.querySelector("#enrollment");
 const enrollmentValue = document.querySelector("#enrollment-value");
 const pendingMachinesRoot = document.querySelector("#pending-machines");
+const machineDownloadMessage = document.querySelector("#machine-download-message");
+const machineSkillButtons = new Map();
+let machineSkillDownloading = false;
 
 function notice(text, error = false) {
   message.textContent = text;
   message.classList.toggle("error", error);
+}
+
+function machineDownloadNotice(text, error = false) {
+  machineDownloadMessage.textContent = text;
+  machineDownloadMessage.classList.toggle("error", error);
+}
+
+function updateMachineSkillButtons() {
+  for (const [button, available] of machineSkillButtons) {
+    button.disabled = machineSkillDownloading || !available;
+  }
 }
 
 async function api(url, method = "GET", data) {
@@ -129,7 +143,8 @@ async function load() {
   const result = await api("/api/settings");
   renderNodes(result.nodes);
   const setup = result.machineSetup;
-  document.querySelector("#download-machine-skill").disabled = !setup?.enabled;
+  machineSkillButtons.clear();
+  machineSkillButtons.set(document.querySelector("#download-machine-skill"), Boolean(setup?.enabled));
   document.querySelector("#machine-package-status").textContent = setup?.enabled
     ? `Linux x64 轻量包约 ${Math.ceil(setup.bytes / 1024 / 1024)} MB · 自动安装 Node ${setup.node} · CloudCLI ${setup.cloudcli} · copilot-api ${setup.copilotApi}。每次下载预留一个七天有效的身份，尚不加入节点列表。`
     : setup?.reason || "完整机器配置包尚未发布；旧版说明 ZIP 不能替代依赖包。";
@@ -142,8 +157,9 @@ async function load() {
     retryForm.method = "post";
     const retry = element("button", "重新下载此身份的 Skill");
     retry.type = "submit";
-    retry.disabled = pending.expired || !setup?.enabled;
+    machineSkillButtons.set(retry, !pending.expired && Boolean(setup?.enabled));
     retryForm.append(retry);
+    retryForm.addEventListener("submit", downloadMachineSkill);
     row.append(retryForm);
     const cancel = element("button", "取消此配置包", "danger");
     cancel.type = "button";
@@ -158,16 +174,74 @@ async function load() {
     row.append(cancel);
     pendingMachinesRoot.append(row);
   }
+  updateMachineSkillButtons();
   adminSection.hidden = result.user.role !== "admin";
   if (!adminSection.hidden) await renderUsers();
 }
 
-document.querySelector("#machine-skill-form").addEventListener("submit", () => {
-  notice("正在下载完整配置包。包内含你本次机器的专属密钥，请妥善保管，不要分享。");
-  // Native form download streams the archive without buffering a Blob in
-  // browser memory. The form has no identity/owner fields.
-  window.setTimeout(() => { void load().catch((error) => notice(error.message, true)); }, 2000);
-});
+async function downloadMachineSkill(event) {
+  event.preventDefault();
+  if (machineSkillDownloading) return;
+  const form = event.currentTarget;
+  machineSkillDownloading = true;
+  updateMachineSkillButtons();
+  machineDownloadNotice("正在下载完整配置包，请稍候。包内含本次机器的专属密钥，请勿分享。");
+  let refreshPending = true;
+  try {
+    // Native POST navigation under no-referrer can have an opaque Origin.
+    // Keep strict server-side CSRF checks and limit this request to our origin.
+    const response = await fetch(form.action, {
+      method: "POST", mode: "same-origin", credentials: "same-origin", cache: "no-store",
+      redirect: "error", referrerPolicy: "same-origin", headers: { accept: "application/zip" },
+    });
+    if (response.status === 401) {
+      refreshPending = false;
+      window.location.replace("/portal-auth/login");
+      throw new Error("请重新登录后下载");
+    }
+    if (!response.ok) {
+      const result = await response.json().catch(() => null);
+      throw new Error(result?.error || `HTTP ${response.status}`);
+    }
+    const filename = response.headers.get("content-disposition")
+      ?.match(/^attachment;\s*filename="(config-new-codey-machine-n-[a-f0-9]{24}\.zip)"$/i)?.[1];
+    if (response.headers.get("content-type")?.split(";")[0].trim() !== "application/zip" || !filename) {
+      throw new Error("服务器未返回有效的 ZIP 配置包，请刷新页面后重试");
+    }
+    const blob = await response.blob();
+    const length = response.headers.get("content-length");
+    if (!blob.size || (length !== null && Number(length) !== blob.size)) {
+      throw new Error("配置包下载不完整，请重新下载此身份的 Skill");
+    }
+    const url = URL.createObjectURL(blob);
+    const link = element("a");
+    link.href = url;
+    link.download = filename;
+    try {
+      document.body.append(link);
+      link.click();
+    } finally {
+      link.remove();
+      // Give the browser time to consume the Blob before releasing its memory.
+      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+    machineDownloadNotice(`已准备好 ${filename}，请在浏览器的下载列表中查看。包内含专属密钥，请勿分享。`);
+  } catch (error) {
+    machineDownloadNotice(`下载失败：${error.message}。若下方已有待配置身份，请使用“重新下载此身份的 Skill”重试。`, true);
+  } finally {
+    machineSkillDownloading = false;
+    updateMachineSkillButtons();
+    // Even an interrupted transfer may have reserved an identity. Show it so
+    // retrying does not silently consume another one of the user's four slots.
+    if (refreshPending) {
+      await load().catch((error) => machineDownloadNotice(
+        `${machineDownloadMessage.textContent} 待配置身份刷新失败：${error.message}，请刷新页面。`, true,
+      ));
+    }
+  }
+}
+
+document.querySelector("#machine-skill-form").addEventListener("submit", downloadMachineSkill);
 
 document.querySelector("#add-prepared-machine-form").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -188,17 +262,6 @@ document.querySelector("#add-prepared-machine-form").addEventListener("submit", 
     form.reset();
     await load();
     notice(`机器已验通并添加：${node.name}。现在可以使用 VNet 用量、History 和 Workspace。模型尚未登录时，请完成本人的 provider 授权。`);
-  });
-});
-
-document.querySelector("#create-node-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  void operation(form.querySelector("button"), async () => {
-    const { node } = await api("/api/settings/nodes", "POST", Object.fromEntries(new FormData(form)));
-    form.reset();
-    notice(`节点已保存：${node.name}。请展开它的接入资料，在你自己的机器上配置。`);
-    await load();
   });
 });
 
