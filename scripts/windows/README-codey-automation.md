@@ -15,6 +15,10 @@ network/firewall rules, grant tunnel access, or change Windows power policies.
   entry point/tunnel ID, and owner SID. They do not restart an existing process.
   On exit they use the existing pinned launchers, with hidden windows and
   bounded 10–300-second crash backoff (5 seconds after a stable run).
+- Process inventory queries only the matching executable. Transient WMI/query
+  failures retry with bounded 5–60-second backoff instead of ending the watchdog.
+  Unknown inventory never triggers a new service; wrong-owner/duplicate-process
+  findings still fail closed. A manual replacement is adopted, not duplicated.
 - Windows must remain logged in and the Dev Box must remain running. This does
   not prevent sleep, shutdown, sign-out, or Azure Dev Box automatic stop.
 

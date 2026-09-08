@@ -328,6 +328,28 @@ class ProcessTests(unittest.TestCase):
         with self.assertRaisesRegex(worker.SafeError, "duplicate_component_processes"):
             self.inventory([row, {**row, "pid": 2}])
 
+    def test_queries_only_the_component_and_pinned_executable(self):
+        result = subprocess.CompletedProcess([], 0, "[]", "")
+        config = {**CONFIG, "powershellExe": "powershell.exe"}
+        with patch.object(worker.subprocess, "run", return_value=result) as run:
+            worker.matching_processes(config, RUNTIME, "tunnel")
+        self.assertEqual(run.call_args.kwargs["env"]["CODEY_WATCH_PROCESS_NAME"], "devtunnel.exe")
+        self.assertEqual(run.call_args.kwargs["env"]["CODEY_WATCH_EXECUTABLE"], RUNTIME["devtunnelExe"])
+        script = run.call_args.args[0][-1]
+        self.assertIn("-OperationTimeoutSec 8", script)
+        self.assertLess(script.index("Where-Object"), script.index("GetOwnerSid"))
+
+    def test_timeout_and_empty_or_partial_output_are_not_process_absence(self):
+        config = {**CONFIG, "powershellExe": "powershell.exe"}
+        with patch.object(worker.subprocess, "run", side_effect=subprocess.TimeoutExpired("private command", 30)):
+            with self.assertRaisesRegex(worker.InventoryUnavailable, "^process_inventory_timeout$"):
+                worker.matching_processes(config, RUNTIME, "workspace")
+        for output in ["", "{partial", "null", "{}", "[null]"]:
+            result = subprocess.CompletedProcess([], 0, output, "")
+            with self.subTest(output=output), patch.object(worker.subprocess, "run", return_value=result):
+                with self.assertRaisesRegex(worker.InventoryUnavailable, "^invalid_process_inventory$"):
+                    worker.matching_processes(config, RUNTIME, "workspace")
+
 
 class InstallerTests(unittest.TestCase):
     def test_consoleless_python_supplies_only_null_streams(self):
@@ -388,7 +410,7 @@ class SupervisorTests(unittest.TestCase):
     def test_manual_process_is_adopted_until_it_exits(self):
         config = {**CONFIG, "powershellExe": "powershell.exe", "workspaceLauncher": r"C:\launch\workspace.ps1",
                   "runtimeConfig": r"C:\private\runtime.json"}
-        with patch.object(worker, "matching_processes", return_value=[123]), \
+        with patch.object(worker, "matching_processes", side_effect=[[123], [123], []]), \
              patch.object(worker, "process_alive", side_effect=[True, False]), \
              patch.object(worker, "windows_context", return_value={}), patch.object(worker, "status") as status, \
              patch.object(worker.time, "sleep") as sleep, \
@@ -399,6 +421,44 @@ class SupervisorTests(unittest.TestCase):
         status.assert_any_call(config, "workspace", "restart_pending")
         sleep.assert_called_once_with(15)
         popen.assert_called_once()
+
+    def test_transient_inventory_failure_keeps_observing_without_starting_a_service(self):
+        config = {**CONFIG}
+        with patch.object(worker, "matching_processes", side_effect=[
+            worker.InventoryUnavailable("process_inventory_timeout"), [123],
+        ]), patch.object(worker, "status") as status, patch.object(worker.time, "sleep") as sleep, \
+             patch.object(worker.subprocess, "Popen") as popen:
+            self.assertEqual(worker.inventory_with_retry(config, RUNTIME, "workspace", 123), [123])
+        popen.assert_not_called()
+        sleep.assert_called_once_with(5)
+        status.assert_called_once_with(config, "workspace", "inventory_retry", code="process_inventory_timeout",
+                                       retryInSeconds=5, lastKnownPid=123, serviceProcessesChanged=False)
+
+    def test_inventory_backoff_is_bounded_and_recovers(self):
+        with patch.object(worker, "matching_processes", side_effect=[
+            *[worker.InventoryUnavailable("process_inventory_timeout") for _ in range(7)], [],
+        ]), patch.object(worker, "status"), patch.object(worker.time, "sleep") as sleep:
+            self.assertEqual(worker.inventory_with_retry(CONFIG, RUNTIME, "tunnel"), [])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 10, 20, 40, 60, 60, 60])
+
+    def test_security_failures_are_not_treated_as_transient(self):
+        for code in ["component_has_different_owner", "duplicate_component_processes"]:
+            with patch.object(worker, "matching_processes", side_effect=worker.SafeError(code)), \
+                 patch.object(worker.time, "sleep") as sleep:
+                with self.assertRaisesRegex(worker.SafeError, code):
+                    worker.inventory_with_retry(CONFIG, RUNTIME, "workspace")
+            sleep.assert_not_called()
+
+    def test_a_manual_replacement_is_adopted_instead_of_starting_a_duplicate(self):
+        with patch.object(worker, "matching_processes", side_effect=[[123], [456], [456]]), \
+             patch.object(worker, "process_alive", side_effect=[False, True]), \
+             patch.object(worker, "windows_context", return_value={}), patch.object(worker, "status") as status, \
+             patch.object(worker.time, "sleep", side_effect=self.Finished()), \
+             patch.object(worker.subprocess, "Popen") as popen:
+            with self.assertRaises(self.Finished):
+                worker.supervise(CONFIG, RUNTIME, "tunnel")
+        status.assert_any_call(CONFIG, "tunnel", "adopted", pid=456, context={})
+        popen.assert_not_called()
 
 
 if __name__ == "__main__":

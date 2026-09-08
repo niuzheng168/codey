@@ -12,6 +12,7 @@ import tempfile
 import time
 
 from common import archive_tree, canonical, command, read, release_name, require, safe_extract, save, sha
+from gateway_routes import freeze as freeze_gateway_routes, verify_frozen as verify_gateway_routes
 
 
 class Builder:
@@ -92,6 +93,7 @@ class Builder:
         for name in ("nodes.aca.json", "session-share.aca.json", "cloudcli-nodes.aca.json",
                      "node-data.aca.json", "codey-node-ca.pem"):
             shutil.copy2(self.root / "config" / name, self.source / "portal/config" / name)
+        gateway_routes = freeze_gateway_routes(self.root, self.job, before)
         for name in ("cloudcli", "copilot-api"):
             link = self.source / "portal" / name
             if link.is_dir():
@@ -109,6 +111,7 @@ class Builder:
                 "nodes": {row["id"]: {"tlsServerName": row["tlsServerName"]}
                           for row in read(self.root / "config/cloudcli-nodes.aca.json")["nodes"]},
                 "reviewedSnapshot": self.request.get("portalSnapshot"),
+                "gatewayRoutes": gateway_routes,
                 "worktreesModified": False, "mcpTests": "skipped-by-user"}
 
     def check(self, name, label, args, env, timeout=100):
@@ -250,6 +253,7 @@ class Builder:
     def activate(self):
         before = read(self.job / "aca-before.private.json")
         manifest = read(self.job / "manifest.json")
+        verify_gateway_routes(self.root, self.job, before)
         require(read(self.job / "validation.json")["passed"], "Source validation did not pass")
         current = self.app()
         for field in ("configuration", "template"):

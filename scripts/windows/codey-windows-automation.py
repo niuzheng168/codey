@@ -32,6 +32,10 @@ class SafeError(Exception):
     """Only fixed, credential-free codes may cross the worker boundary."""
 
 
+class InventoryUnavailable(SafeError):
+    """A transient observation failure is not evidence that a service exited."""
+
+
 def require(value, code):
     if not value:
         raise SafeError(code)
@@ -495,19 +499,35 @@ def matching_processes(config, runtime, component):
     script = r"""
       $ErrorActionPreference='Stop'
       [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false
-      $rows = @(Get-CimInstance Win32_Process | Where-Object {$_.Name -in @('node.exe','devtunnel.exe')} |
+      $query="Name='$($env:CODEY_WATCH_PROCESS_NAME)'"
+      $rows = @(Get-CimInstance Win32_Process -Filter $query -OperationTimeoutSec 8 |
+        Where-Object {$_.ExecutablePath -ieq $env:CODEY_WATCH_EXECUTABLE} |
         ForEach-Object {
-          $owner=Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction SilentlyContinue
+          $owner=Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -OperationTimeoutSec 8 -ErrorAction Stop
+          if($owner.ReturnValue -ne 0 -or -not $owner.Sid){throw 'Owner inventory unavailable'}
           @{pid=$_.ProcessId;exe=$_.ExecutablePath;cmd=$_.CommandLine;sid=$owner.Sid}
         })
       ConvertTo-Json -InputObject $rows -Compress
     """
-    completed = subprocess.run([config["powershellExe"], "-NoProfile", "-NonInteractive", "-Command", script],
-                               capture_output=True, text=True, encoding="utf-8", errors="replace",
-                               timeout=30, creationflags=CREATE_NO_WINDOW)
-    require(completed.returncode == 0, "process_inventory_failed")
-    rows = json.loads(completed.stdout or "[]")
-    require(isinstance(rows, list), "invalid_process_inventory")
+    env = {**os.environ,
+           "CODEY_WATCH_PROCESS_NAME": "devtunnel.exe" if component == "tunnel" else "node.exe",
+           "CODEY_WATCH_EXECUTABLE": runtime["devtunnelExe" if component == "tunnel" else "nodeExe"]}
+    try:
+        completed = subprocess.run([config["powershellExe"], "-NoProfile", "-NonInteractive", "-Command", script],
+                                   capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                   timeout=30, creationflags=CREATE_NO_WINDOW, env=env)
+    except subprocess.TimeoutExpired:
+        raise InventoryUnavailable("process_inventory_timeout") from None
+    except OSError:
+        raise InventoryUnavailable("process_inventory_unavailable") from None
+    if completed.returncode != 0:
+        raise InventoryUnavailable("process_inventory_failed")
+    try:
+        rows = json.loads(completed.stdout)
+    except (ValueError, TypeError):
+        raise InventoryUnavailable("invalid_process_inventory") from None
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise InventoryUnavailable("invalid_process_inventory")
     found = []
     for row in rows:
         exe, command = (row.get("exe") or "").lower(), row.get("cmd") or ""
@@ -525,17 +545,34 @@ def matching_processes(config, runtime, component):
     return found
 
 
+def inventory_with_retry(config, runtime, component, last_known_pid=None):
+    delay = 5
+    while True:
+        try:
+            return matching_processes(config, runtime, component)
+        except InventoryUnavailable as error:
+            # Keep the watchdog alive, but do not start/stop anything while the
+            # inventory is unknown. Wrong-owner/duplicate-process errors remain fatal.
+            status(config, component, "inventory_retry", code=str(error), retryInSeconds=delay,
+                   lastKnownPid=last_known_pid, serviceProcessesChanged=False)
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
+
+
 def supervise(config, runtime, component):
     delay = 5
     while True:
-        found = matching_processes(config, runtime, component)
+        found = inventory_with_retry(config, runtime, component)
         if found:
             pid = found[0]
             status(config, component, "adopted", pid=pid, context=windows_context())
-            while process_alive(pid) and matching_processes(config, runtime, component) == [pid]:
+            while process_alive(pid) and inventory_with_retry(config, runtime, component, pid) == [pid]:
                 time.sleep(15)
                 status(config, component, "adopted", pid=pid, context=windows_context())
             status(config, component, "restart_pending")
+            # A user may already have replaced the exited manual process.
+            # Reconcile a fresh inventory before starting a new host.
+            continue
         launcher = config["workspaceLauncher" if component == "workspace" else "tunnelLauncher"]
         # The existing launchers enforce SID, loopback binding, hashes, and port ownership.
         # Raw child output is deliberately discarded, not persisted as potentially sensitive logs.

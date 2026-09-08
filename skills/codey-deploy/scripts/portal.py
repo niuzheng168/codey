@@ -18,6 +18,7 @@ from azure.storage.fileshare import ShareFileClient
 
 from builder import Builder
 from common import NODES, command, read, require, save
+from gateway_routes import PROOF_FILE, verify_published as verify_published_gateway
 
 logging.disable(logging.CRITICAL)
 
@@ -120,6 +121,7 @@ class Portal:
 
     def verify(self):
         require(read(self.job / "aca-result.json")["ready"], "ACA rollout has not completed")
+        self.report["gatewayRoutes"] = verify_published_gateway(self.http, read(self.job / PROOF_FILE))
         active = read(self.job / "ui-result.json")["active"]
         self.http("/api/health", authenticated=False)
         manifest = read(self.job / "manifest.json")
@@ -156,6 +158,7 @@ class Portal:
         manifest = read(self.job / "manifest.json")
         require(manifest["scope"] == "portal", "Not a Portal-only release")
         require(read(self.job / "aca-result.json")["ready"], "ACA is not ready")
+        self.report["gatewayRoutes"] = verify_published_gateway(self.http, read(self.job / PROOF_FILE))
         self.http("/api/health", authenticated=False)
         for pathname, digest in manifest["publicSha256"].items():
             require(hashlib.sha256(self.http(pathname).content).hexdigest() == digest,
