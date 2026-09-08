@@ -14,6 +14,7 @@ const statusLabels = {
   online: "心跳在线", stale: "心跳超时", not_enrolled: "未接入升级器",
   unreported: "等待首次心跳", revoked: "升级器已停用", owner_disabled: "账号已停用",
   unavailable: "上报服务未配置", unknown: "状态未知",
+  workspace_online: "Workspace 在线", workspace_unreachable: "Workspace 暂未连通",
 };
 let snapshot = null;
 let page = 1;
@@ -23,7 +24,8 @@ let requestId = 0;
 
 const permitted = () => !adminTab.hidden && !denied;
 const visible = () => permitted() && !document.hidden && !adminPanel.hidden && !panel.hidden;
-const statusGroup = (status) => ["online", "stale"].includes(status) ? status : "unknown";
+const statusGroup = (status) => status === "workspace_online" ? "online"
+  : ["online", "stale"].includes(status) ? status : "unknown";
 
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -98,7 +100,9 @@ function versionCell(component, node) {
   cell.title = [
     component.commit && `Commit: ${component.commit}`,
     node.releaseId && `节点发行版：${node.releaseId}`,
-    `最近上报：${date(node.lastSeen)}`,
+    component.source === "workspace_health"
+      ? `来源：Workspace 健康检查 · ${date(node.workspaceHealth?.checkedAt)}`
+      : `最近上报：${date(node.lastSeen)}`,
   ].filter(Boolean).join("\n");
   return cell;
 }
@@ -108,14 +112,20 @@ function renderRow(node) {
   row.dataset.nodeId = node.id;
   const identity = element("td");
   identity.title = [node.name, node.id, node.region].filter(Boolean).join("\n");
-  identity.append(element("strong", node.name, "inventory-ellipsis"), element("code", node.id, "inventory-ellipsis"));
+  identity.append(element("strong", node.name, "inventory-ellipsis"),
+    element("code", node.id === "local" ? `兼容 ID: ${node.id}` : node.id, "inventory-ellipsis"));
   const owner = element("td");
   owner.append(element("strong", node.owner.username || node.owner.id));
   if (!node.owner.username) owner.append(element("span", "归属账号不可用", "muted"));
   else if (!node.owner.enabled) owner.append(element("span", "账号已停用", "muted"));
   const state = element("td");
   state.append(element("span", statusLabels[node.status] || statusLabels.unknown, `inventory-status ${statusGroup(node.status)}`));
-  state.append(element("span", node.lastSeen ? date(node.lastSeen) : "尚无心跳记录", "muted"));
+  if (node.workspaceHealth) {
+    state.append(element("span", `健康检查 ${date(node.workspaceHealth.checkedAt)}`, "muted"));
+    state.append(element("span", statusLabels[node.updaterStatus] || "升级器状态未知", "muted"));
+  } else {
+    state.append(element("span", node.lastSeen ? date(node.lastSeen) : "尚无心跳记录", "muted"));
+  }
   row.append(identity, owner, state,
     versionCell(node.components.cloudcli, node), versionCell(node.components.copilotApi, node));
   return row;
@@ -177,7 +187,8 @@ async function refresh() {
     for (const control of [search, ownerFilter, statusFilter]) control.disabled = false;
     notice(`快照 ${date(snapshot.generatedAt)} · ${snapshot.telemetryAvailable
       ? `心跳超时阈值 ${snapshot.heartbeatTimeoutMs / 1000} 秒 · 本页可见时每 30 秒刷新`
-      : "门户尚未配置上报服务，节点状态与版本未知"}`);
+      : "门户尚未配置上报服务"}${snapshot.workspaceHealthAvailable
+      ? " · 无升级器的已配置节点另做 Workspace 健康检查" : ""}`);
   } catch (error) {
     if (current !== requestId || !permitted()) return;
     if (!snapshot) empty("无法读取节点总览，请点击刷新重试。");

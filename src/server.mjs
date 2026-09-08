@@ -20,6 +20,7 @@ import { issueClientTicket } from "./client-ticket.mjs";
 import { NodeDataGateway, resolveNodeDataGatewayConfig } from "./node-data-gateway.mjs";
 import { AccountStore } from "./account-store.mjs";
 import { NodePolicy } from "./node-policy.mjs";
+import { browserDataNode } from "./node-display.mjs";
 import { SettingsApi } from "./settings-api.mjs";
 import { MachineSetup } from "./machine-setup.mjs";
 import { MachineUpdates } from "./machine-updates.mjs";
@@ -681,7 +682,7 @@ export function createPortalServer(options) {
             ttlSeconds: clientTicketTtlSeconds,
           });
           return {
-            ...node,
+            ...browserDataNode(node),
             proxyEndpoint: nodeDataGateway?.endpoint(node.id, dataNodeIds) ?? null,
             ticket: ticket.token,
             ticketExpiresAt: ticket.expiresAt,
@@ -705,7 +706,7 @@ export function createPortalServer(options) {
 
       if (url.pathname === "/api/nodes") {
         sendJson(res, 200, {
-          nodes: clientOnly ? activeConfig.clientNodes : aggregator.publicNodes(),
+          nodes: clientOnly ? activeConfig.clientNodes.map(browserDataNode) : aggregator.publicNodes(),
           refreshSeconds: activeConfig.refreshSeconds,
         });
         return;

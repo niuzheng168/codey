@@ -35,13 +35,14 @@ COPY --chown=node:node node-updater ./node-updater
 COPY --chown=node:node skills/config-new-codey-machine/SKILL.md skills/config-new-codey-machine/dependencies.json ./skills/config-new-codey-machine/
 COPY --chown=node:node skills/config-new-codey-machine/agents/openai.yaml ./skills/config-new-codey-machine/agents/
 COPY --chown=node:node skills/config-new-codey-machine/scripts/configure-machine.py skills/config-new-codey-machine/scripts/azure-vnet.py ./skills/config-new-codey-machine/scripts/
+COPY --chown=node:node skills/config-new-codey-machine/scripts/setup-linux.sh skills/config-new-codey-machine/scripts/setup-windows.ps1 skills/config-new-codey-machine/scripts/configure-windows.py skills/config-new-codey-machine/scripts/windows-service.py skills/config-new-codey-machine/scripts/windows-tasks.ps1 ./skills/config-new-codey-machine/scripts/
 COPY --chown=node:node skills/config-new-codey-machine/references/verification.md ./skills/config-new-codey-machine/references/
 COPY --chown=node:node config/nodes.aca.json config/session-share.aca.json config/cloudcli-nodes.aca.json config/node-data.aca.json config/codey-node-ca.pem ./config/
 
 USER node
 
 # Fail the build, rather than the production revision, if any runtime input is unreadable.
-RUN node -e "const fs=require('node:fs'); const check=p=>{if(fs.statSync(p).isDirectory()){for(const name of fs.readdirSync(p))check(p+'/'+name)}else fs.accessSync(p,fs.constants.R_OK)}; for(const p of ['package.json','src','public','config','node-updater'])check(p)"
+RUN node -e "const fs=require('node:fs'); const check=p=>{if(fs.statSync(p).isDirectory()){for(const name of fs.readdirSync(p))check(p+'/'+name)}else fs.accessSync(p,fs.constants.R_OK)}; for(const p of ['package.json','src','public','config','node-updater','skills/config-new-codey-machine'])check(p)"
 
 EXPOSE 8080
 

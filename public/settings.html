@@ -48,7 +48,7 @@
         <div class="panel-heading">
           <div>
             <h2 id="machine-updates-heading">机器软件更新</h2>
-            <p class="muted">先预览，再确认。仅更新你拥有的机器，本机保护节点不参与。</p>
+            <p class="muted">先预览，再确认。仅更新你拥有的机器，受保护节点不参与。</p>
           </div>
           <button id="node-update-refresh" class="quiet" type="button">刷新状态</button>
         </div>
@@ -98,16 +98,16 @@
           <div class="inventory-summary" role="group" aria-label="全局节点统计">
             <span><strong id="admin-node-total">—</strong> 台节点</span>
             <span><strong id="admin-node-owners">—</strong> 位所属用户</span>
-            <span><strong id="admin-node-online">—</strong> 心跳在线</span>
+            <span><strong id="admin-node-online">—</strong> 节点在线</span>
             <span><strong id="admin-node-stale">—</strong> 心跳超时</span>
             <span><strong id="admin-node-unknown">—</strong> 状态未知</span>
           </div>
           <div class="inventory-filters">
             <label class="inventory-search">搜索<input id="admin-node-search" type="search" maxlength="120" placeholder="名称、ID、用户或版本" disabled /></label>
             <label>所属用户<select id="admin-node-owner" disabled><option value="">全部用户</option></select></label>
-            <label>上报状态<select id="admin-node-status" disabled>
+            <label>节点状态<select id="admin-node-status" disabled>
               <option value="">全部状态</option>
-              <option value="online">心跳在线</option>
+              <option value="online">在线（心跳或 Workspace）</option>
               <option value="stale">心跳超时</option>
               <option value="unknown">状态未知</option>
             </select></label>
@@ -116,9 +116,9 @@
           <p class="inventory-scroll-hint muted" aria-hidden="true">左右滑动查看状态与版本 →</p>
           <div class="inventory-scroll" tabindex="0" role="region" aria-label="全局节点版本表，可横向滚动" aria-describedby="admin-node-help">
             <table class="inventory-table">
-              <caption>所属用户、升级器心跳与最近上报的节点软件版本</caption>
+              <caption>所属用户、节点在线依据与实际观测的软件版本</caption>
               <thead><tr>
-                <th scope="col">节点</th><th scope="col">所属用户</th><th scope="col">上报状态</th>
+                <th scope="col">节点</th><th scope="col">所属用户</th><th scope="col">节点状态</th>
                 <th scope="col">CloudCLI <span class="muted">节点端</span></th><th scope="col">copilot-api</th>
               </tr></thead>
               <tbody id="admin-node-list"></tbody>
@@ -132,7 +132,7 @@
               <button id="admin-node-next" class="quiet" type="button" aria-label="下一页节点" disabled>下一页</button>
             </div>
           </div>
-          <p id="admin-node-help" class="panel-footnote">心跳仅代表升级器近期上报，不代表模型或服务健康。版本为最近上报值，不是目标发行版；超时或停止上报后可能已过期，未接入的节点显示未知。共享 Workspace UI 独立发布。此总览不提供连接、会话、密钥或跨用户更新权限。</p>
+          <p id="admin-node-help" class="panel-footnote">心跳仅代表升级器近期上报，不代表模型或服务健康。未接入升级器的受信任节点另用 Workspace 健康检查判断可达性，不伪造心跳；检查成功也不代表模型已登录。版本只来自节点上报或健康接口，不使用目标发行版填充。共享 Workspace UI 独立发布。此总览不提供连接、会话、密钥或跨用户更新权限。</p>
         </section>
 
         <section id="admin-users-panel" role="tabpanel" aria-labelledby="admin-users-tab" tabindex="0" hidden>
@@ -160,7 +160,7 @@
         <div class="dialog-heading">
           <div>
             <h2 id="add-node-title">添加自己的节点</h2>
-            <p id="add-node-description" class="muted">先配置机器，再验通添加。支持 Azure Linux x64。</p>
+            <p id="add-node-description" class="muted">先选择目标系统、配置机器，再验通添加。Windows 与 Linux 使用各自安装脚本；macOS 规划中。</p>
           </div>
           <button id="close-add-node" class="icon-button quiet" type="button" aria-label="关闭添加节点" autofocus>×</button>
         </div>
@@ -168,23 +168,29 @@
           <li>
             <span class="step-number" aria-hidden="true">1</span>
             <div class="step-content">
-              <h3>下载机器配置 Skill</h3>
+              <h3>按目标系统下载机器配置包</h3>
               <p class="muted">包含临时机器身份、改版源码与安装脚本。Node 和软件依赖会自动下载安装。</p>
-              <form id="machine-skill-form" action="/api/settings/machines/skill" method="post">
-                <button id="download-machine-skill" type="submit" disabled>↓ 下载 Config new Codey machine</button>
+              <form id="machine-windows-skill-form" action="/api/settings/machines/skill?platform=windows-x64" method="post" data-machine-platform="windows-x64">
+                <button id="download-machine-windows-skill" type="submit" disabled>↓ Windows · setup-windows.ps1</button>
               </form>
+              <p id="machine-windows-package-status" class="muted">正在检查 Windows 配置包…</p>
+              <form id="machine-skill-form" action="/api/settings/machines/skill" method="post" data-machine-platform="linux-x64">
+                <button id="download-machine-skill" type="submit" disabled>↓ Linux · setup-linux.sh</button>
+              </form>
+              <p id="machine-package-status" class="muted">正在检查 Linux 配置包…</p>
+              <button id="download-machine-macos-skill" type="button" disabled aria-describedby="machine-macos-status">macOS · 规划中</button>
+              <p id="machine-macos-status" class="muted">尚无完整 macOS 节点安装器，不会下载其他平台的替代脚本。</p>
               <p id="machine-download-message" role="status" aria-live="polite"></p>
-              <p id="machine-package-status" class="muted">正在检查配置包…</p>
             </div>
           </li>
           <li>
             <span class="step-number" aria-hidden="true">2</span>
             <div class="step-content">
               <h3>在 Codex 中配置目标机器</h3>
-              <p class="muted">解压后，让 Codex 使用 <code>config-new-codey-machine/SKILL.md</code>，按指引完成配置。</p>
+              <p class="muted">解压后，让 Codex 使用 <code>config-new-codey-machine/SKILL.md</code>。Windows 执行 PowerShell 入口，Linux 执行 Shell 入口，默认均先显示计划。</p>
               <details class="setup-help">
                 <summary>支持范围与安全说明</summary>
-                <p class="muted">目标机器需要联网安装依赖；Windows Codex 可作为控制端。Skill 配置服务、HTTPS、SSO 与 VNet，Azure 权限和模型登录仍需本人授权。无需另行收集安装包或证书。</p>
+                <p class="muted">目标为 Azure Windows x64 或 Linux x64，需联网安装依赖。网络、防火墙与模型登录必须本人确认。Windows 服务仅在本人登录后运行，不安装 Linux 升级器；可达性使用真实 Workspace 健康检查。现有 Windows Dev Tunnel 节点不需重新安装。</p>
                 <p class="muted">每次下载预留一个七天有效的机器身份，尚不加入节点列表。包内含本次专属密钥，请勿分享。</p>
               </details>
             </div>

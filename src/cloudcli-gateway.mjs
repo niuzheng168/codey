@@ -5,6 +5,7 @@ import path from "node:path";
 import { issueWorkspaceAssertion } from "./workspace-sso.mjs";
 import { nodeTlsOptions } from "./machine-identity.mjs";
 import { DevTunnelTransport, normalizeDevTunnel } from "./devtunnel-transport.mjs";
+import { readWorkspaceHealth } from "./workspace-health.mjs";
 
 const NODE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const HOP_BY_HOP_HEADERS = new Set([
@@ -214,6 +215,7 @@ export function resolveCloudCliGatewayConfig(
 export class CloudCliGateway {
   constructor(config, { sessionAuthenticator, nodePolicy, accessLeaseMs = 5000, ui,
     tunnelTransportFactory = (node, ca) => new DevTunnelTransport(node.devTunnel, nodeTlsOptions(node, ca)),
+    healthProbe = readWorkspaceHealth, healthClock = Date.now, healthTtlMs = 30_000,
   } = {}) {
     this.config = config;
     this.sessionAuthenticator = sessionAuthenticator;
@@ -223,6 +225,11 @@ export class CloudCliGateway {
     this.machineNodes = [];
     this.tunnelTransports = new Map();
     this.tunnelTransportFactory = tunnelTransportFactory;
+    this.healthProbe = healthProbe;
+    this.healthClock = healthClock;
+    this.healthTtlMs = healthTtlMs;
+    this.healthCache = new Map();
+    this.healthActive = 0;
     if (config.ssoMaster && !sessionAuthenticator) {
       throw new Error("Workspace SSO requires revocable portal authentication");
     }
@@ -252,6 +259,34 @@ export class CloudCliGateway {
   async close() {
     await Promise.allSettled([...this.tunnelTransports.values()].map(transport => transport.dispose()));
     this.tunnelTransports.clear();
+    this.healthCache.clear();
+  }
+
+  async healthMetadata(nodeId) {
+    const node = this.allNodes().find((entry) => entry.id === nodeId);
+    // Opt in only trusted tunnel nodes and explicitly installed non-Linux
+    // machines. Ordinary admin inventory must not start probing arbitrary VMs.
+    if (!node || (!node.devTunnel && node.healthMonitoring !== true)) return null;
+    const cached = this.healthCache.get(nodeId);
+    const age = cached ? this.healthClock() - cached.checkedAt : null;
+    if (cached?.node === node && (cached.pending || (age >= 0 && age < this.healthTtlMs))) {
+      return cached.promise;
+    }
+    // Bound concurrent work; a busy check remains unknown, never falsely online.
+    if (this.healthActive >= 4) return null;
+    this.healthActive++;
+    const entry = { node, pending: true, checkedAt: this.healthClock() };
+    entry.promise = Promise.resolve().then(() =>
+      this.healthProbe(node, this.upstreamOptions(node), { clock: this.healthClock }))
+      .catch(() => ({ reachable: false, checkedAt: this.healthClock(), version: null }))
+      .then((value) => {
+        entry.checkedAt = this.healthClock();
+        entry.pending = false;
+        this.healthActive--;
+        return value;
+      });
+    this.healthCache.set(nodeId, entry);
+    return entry.promise;
   }
 
   publicNodes(allowedNodeIds) {

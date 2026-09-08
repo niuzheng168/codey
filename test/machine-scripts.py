@@ -2,11 +2,14 @@ import importlib.util
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 import tarfile
 import tempfile
 import time
 import unittest
+import zipfile
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,11 +24,24 @@ def load(name, file):
 
 network = load("machine_network", "skills/config-new-codey-machine/scripts/azure-vnet.py")
 installer = load("machine_installer", "skills/config-new-codey-machine/scripts/configure-machine.py")
+windows = load("machine_windows", "skills/config-new-codey-machine/scripts/configure-windows.py")
 ID = "n-0123456789abcdef01234567"
 VNET = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/test/providers/Microsoft.Network/virtualNetworks/node"
 
 
 class NetworkTests(unittest.TestCase):
+    def test_windows_azure_cli_uses_its_installed_python_without_shell_interpolation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            launcher = root / "wbin/az.cmd"
+            launcher.parent.mkdir()
+            launcher.write_text("fixture only")
+            python = root / "python.exe"
+            python.write_text("fixture only")
+            with patch.object(network.sys, "platform", "win32"), \
+                 patch.object(network.shutil, "which", return_value=str(launcher)):
+                self.assertEqual(network.az_command(), [str(python), "-X", "utf8", "-I", "-B", "-m", "azure.cli"])
+
     def test_overlap_includes_existing_peers_not_just_portal_cidr(self):
         self.assertFalse(network.overlap(["172.16.0.0/16"], ["10.0.0.0/16"]))
         self.assertTrue(network.overlap(["172.16.0.0/16"], ["172.16.0.0/24"]))
@@ -140,6 +156,233 @@ class InstallerTests(unittest.TestCase):
             self.assertNotIn("private-client", output)
             self.assertNotIn("private-sso", output)
             self.assertEqual(json.loads(output)["tlsCertificate"], "public certificate")
+
+
+class WindowsInstallerTests(unittest.TestCase):
+    def fixture(self, root):
+        assets = root / "skill/assets"
+        assets.mkdir(parents=True)
+        enrollment = {"schema": 1, "nodeId": ID, "platform": "windows-x64",
+                      "principalId": "fixture-owner", "username": "alice",
+                      "expiresAt": int(time.time() * 1000) + 3600000, "portalOrigin": "https://codey.example.test",
+                      "clientSigningKey": "a" * 43, "workspaceSsoKey": "b" * 43}
+        artifacts = []
+        for name in ("cloudcli-source.tar.gz", "copilot-api-source.tar.gz"):
+            data = ("fixture only: " + name).encode()
+            (assets / name).write_bytes(data)
+            artifacts.append({"file": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+        manifest = {
+            "schema": 1, "platform": "windows-x64", "node": "24.20.0", "bunBuildTool": "1.4.2",
+            "dependencyMode": "install-on-target", "artifacts": artifacts,
+            "nodeDistribution": {"file": "node-v24.20.0-win-x64.zip",
+                                 "url": "https://nodejs.org/dist/v24.20.0/node-v24.20.0-win-x64.zip",
+                                 "sha256": "c" * 64},
+        }
+        value = "\n".join(["24.20.0", "1.4.2", "c" * 64] + [item["sha256"] for item in artifacts])
+        enrollment["releaseId"] = manifest["releaseId"] = "machine-" + hashlib.sha256(value.encode()).hexdigest()[:16]
+        topology = {"schema": 1, "nodeId": ID, "name": "windows-devbox", "region": "Japan East",
+                    "networkMode": "same-vnet", "listenIp": "10.0.1.4", "privateIp": "10.0.1.4",
+                    "allowedSources": ["10.0.2.0/24"], "vmResourceId": "descriptive-fixture"}
+        for name, value in [("enrollment.json", enrollment), ("manifest.json", manifest)]:
+            (assets / name).write_text(json.dumps(value), encoding="utf-8")
+        network_file = root / "network.json"
+        network_file.write_text(json.dumps(topology), encoding="utf-8")
+        home = root / "home"
+        home.mkdir()
+        args = SimpleNamespace(enrollment=assets / "enrollment.json", network_file=network_file,
+                               out=root / "machine.json", name=None, openssl=None, codex_executable=None,
+                               apply=False, network_approved=False)
+        return assets.parent, home, args, enrollment, manifest, topology
+
+    def test_distinct_platforms_reject_each_others_enrollment_and_node_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, _, enrollment, manifest, topology = self.fixture(Path(directory))
+            self.assertEqual(len(installer.validate_inputs(enrollment, manifest, topology, "windows-x64")), 2)
+            with self.assertRaises(installer.SetupError):
+                installer.validate_inputs(enrollment, manifest, topology)
+            with self.assertRaises(installer.SetupError):
+                installer.validate_inputs({**enrollment, "platform": "linux-x64"}, manifest, topology, "windows-x64")
+            with self.assertRaises(installer.SetupError):
+                installer.validate_inputs(enrollment, {**manifest, "nodeDistribution": {
+                    **manifest["nodeDistribution"], "file": "node-v24.20.0-linux-x64.tar.xz"}}, topology, "windows-x64")
+
+    def test_windows_archive_traversal_drive_ads_reserved_names_links_and_case_collisions_are_rejected(self):
+        for name in ("../out", "/out", "C:/out", "C:out", "a\\out", "a:stream", "CON", "a/NUL.txt",
+                     "a/trailing.", "a/space ", "a/a?.txt", "a/a|.txt"):
+            with self.subTest(name=name), self.assertRaises(windows.SetupError):
+                windows.archive_name(name)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for entries in [
+                ["node-win/README", "node-win/readme"], ["other-root/file"], ["node-win/../../out"],
+            ]:
+                archive = root / "node.zip"
+                with zipfile.ZipFile(archive, "w") as output:
+                    for name in entries:
+                        output.writestr(name, "fixture")
+                with self.assertRaises(windows.SetupError):
+                    windows.extract_zip(archive, root / "target", "node-win")
+            self.assertFalse((root / "out").exists())
+
+    def test_windows_source_file_links_are_materialized_without_link_privilege_or_escape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for target in ("AGENTS.md", "../outside", "C:/outside", "CLAUDE.md"):
+                archive = root / "source.tar.gz"
+                with tarfile.open(archive, "w:gz") as output:
+                    item = tarfile.TarInfo("AGENTS.md")
+                    item.size = 7
+                    output.addfile(item, io.BytesIO(b"fixture"))
+                    link = tarfile.TarInfo("CLAUDE.md")
+                    link.type, link.linkname = tarfile.SYMTYPE, target
+                    output.addfile(link)
+                destination = root / ("valid" if target == "AGENTS.md" else "invalid")
+                if target == "AGENTS.md":
+                    windows.extract_source(archive, destination)
+                    self.assertEqual((destination / "CLAUDE.md").read_text(), "fixture")
+                    self.assertFalse((destination / "CLAUDE.md").is_symlink())
+                else:
+                    with self.assertRaises(windows.SetupError):
+                        windows.extract_source(archive, destination)
+            self.assertFalse((root / "outside").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Native Windows path planning is verified on Windows")
+    def test_windows_plan_only_reads_inputs_and_never_installs_runs_or_changes_firewall(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            skill, home, args, _, _, _ = self.fixture(root)
+            context = {"sid": "owner-test", "elevated": False, "sessionId": 1}
+            before = sorted(str(file.relative_to(root)) for file in root.rglob("*"))
+            with patch.object(windows.os, "name", "nt"), patch.object(windows.platform, "machine", return_value="AMD64"), \
+                 patch.object(windows.service, "owner_context", return_value=context), \
+                 patch.object(windows, "SKILL", skill), patch.object(windows.Path, "home", return_value=home), \
+                 patch.object(windows, "port_conflicts", return_value=["127.0.0.1:4141"]), \
+                 patch.object(windows, "command") as command, patch.object(windows, "runtime") as runtime, \
+                 patch("sys.stdout", new_callable=io.StringIO) as output:
+                windows.configure(args)
+                report = json.loads(output.getvalue())
+            self.assertEqual(report["portConflicts"], ["127.0.0.1:4141"])
+            self.assertEqual(report["updater"], "unsupported; no Linux updater is installed")
+            self.assertFalse(report["firewallChanged"])
+            self.assertTrue(report["logonOnly"])
+            command.assert_not_called()
+            runtime.assert_not_called()
+            self.assertEqual(sorted(str(file.relative_to(root)) for file in root.rglob("*")), before)
+
+    def test_windows_apply_requires_explicit_network_confirmation_before_any_file_or_process_change(self):
+        args = SimpleNamespace(apply=True, network_approved=False)
+        with patch.object(windows.os, "name", "nt"), patch.object(windows.platform, "machine", return_value="AMD64"), \
+             patch.object(windows.service, "owner_context", return_value={"sid": "owner", "elevated": False, "sessionId": 1}), \
+             patch.object(windows, "command") as command, patch.object(windows, "runtime") as runtime:
+            with self.assertRaisesRegex(windows.SetupError, "network-approved"):
+                windows.configure(args)
+        command.assert_not_called()
+        runtime.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Native Windows transaction paths are verified on Windows")
+    def test_mocked_windows_install_preserves_codex_home_and_only_marks_ready_after_successful_export(self):
+        for export_fails in (False, True):
+            with self.subTest(export_fails=export_fails), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                skill, home, args, _, _, _ = self.fixture(root)
+                tools = root / "tools"
+                tools.mkdir()
+                for name in ("python.exe", "pythonw.exe", "openssl.exe", "codex.exe"):
+                    (tools / name).write_bytes(b"test stub, never executed")
+                codex_home = root / "existing-codex-home"
+                codex_home.mkdir()
+                original = codex_home / "config.toml"
+                original.write_text("original owner configuration")
+                args.apply = args.network_approved = True
+                args.openssl, args.codex_executable = str(tools / "openssl.exe"), str(tools / "codex.exe")
+                context = {"sid": "test-owner", "elevated": False, "sessionId": 1}
+                commands = []
+
+                def fake_runtime(_manifest, _enrollment, _root, stage, _log):
+                    for name in ("node/node.exe", "copilot-api/dist/main.js", "cloudcli/dist-server/server/index.js"):
+                        file = stage / name
+                        file.parent.mkdir(parents=True, exist_ok=True)
+                        file.write_bytes(b"test stub, never executed")
+
+                def fake_command(arguments, **_kwargs):
+                    values = [str(value) for value in arguments]
+                    commands.append(values)
+                    if values[0] == args.openssl:
+                        Path(values[values.index("-out") + 1]).write_text("test public certificate")
+                        Path(values[values.index("-keyout") + 1]).write_text("test private key")
+
+                export = windows.machine_file
+                with patch.object(windows.service, "owner_context", return_value=context), \
+                     patch.object(windows, "SKILL", skill), patch.object(windows.Path, "home", return_value=home), \
+                     patch.object(windows.sys, "executable", str(tools / "python.exe")), \
+                     patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}), \
+                     patch.object(windows, "port_conflicts", return_value=[]), \
+                     patch.object(windows.shutil, "disk_usage", return_value=SimpleNamespace(free=16 * 1024 ** 3)), \
+                     patch.object(windows, "runtime", side_effect=fake_runtime), \
+                     patch.object(windows, "command", side_effect=fake_command), \
+                     patch.object(windows.common, "verify") as verify, \
+                     patch.object(windows, "machine_file", side_effect=OSError("test output failure") if export_fails else export), \
+                     patch("sys.stdout", new_callable=io.StringIO) as output:
+                    if export_fails:
+                        with self.assertRaisesRegex(OSError, "test output failure"):
+                            windows.configure(args)
+                        self.assertEqual(output.getvalue(), "")
+                    else:
+                        windows.configure(args)
+                        self.assertTrue(json.loads(output.getvalue())["ok"])
+                config = home / ".config/codey-machine-windows"
+                state = json.loads((config / "installation.json").read_text())
+                runtime = json.loads((config / "runtime.json").read_text())
+                self.assertEqual(state["ready"], not export_fails)
+                self.assertEqual(runtime["environment"]["CODEX_HOME"], str(codex_home))
+                self.assertEqual(original.read_text(), "original owner configuration")
+                verify.assert_called_once()
+                task_commands = [call for call in commands if "-Operation" in call]
+                self.assertEqual([call[-1] for call in task_commands], ["Install", "RemoveCreated"] if export_fails else ["Install"])
+                for call in task_commands:
+                    self.assertEqual(call[call.index("-ConfigPath") + 1], str(config / "runtime.json"))
+
+    def test_gateway_source_ranges_and_computed_paths_are_bounded(self):
+        self.assertEqual(windows.approved_sources({"allowedSources": ["10.0.0.0/24"]}), ["10.0.0.0/24"])
+        for sources in ([], ["0.0.0.0/0"], ["*"], ["169.254.169.254/32"], ["::/0"], ["8.8.8.8/32"]):
+            with self.assertRaises((windows.SetupError, ValueError, TypeError)):
+                windows.approved_sources({"allowedSources": sources})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaises(windows.SetupError):
+                windows.within(root / "../outside", root)
+            self.assertEqual(windows.within(root / "release", root), root / "release")
+
+    def test_supervisor_refuses_foreign_owner_elevation_no_login_and_unpinned_runtime(self):
+        for context in [
+            {"sid": "someone-else", "elevated": False, "sessionId": 1},
+            {"sid": "owner", "elevated": True, "sessionId": 1},
+            {"sid": "owner", "elevated": False, "sessionId": 0},
+        ]:
+            with self.assertRaisesRegex(RuntimeError, "original_logged_on"):
+                windows.service.validate({"schema": 1, "ownerSid": "owner"}, "workspace", context)
+        script = (ROOT / "skills/config-new-codey-machine/scripts/windows-tasks.ps1").read_text()
+        self.assertIn("LogonType = 3", script)
+        self.assertIn("RunLevel = 0", script)
+        self.assertIn("Triggers.Create(9)", script)
+        for forbidden in ("ExecutionPolicy", "RunAs", "New-NetFirewallRule", "Triggers.Create(8)", "Codey Local Copilot API"):
+            self.assertNotIn(forbidden, script)
+
+    def test_windows_machine_export_has_platform_but_no_node_or_tls_private_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, _, _, enrollment, _, topology = self.fixture(root)
+            cert = root / "public.pem"
+            cert.write_text("public certificate")
+            with patch("sys.stdout", new_callable=io.StringIO) as output:
+                report = windows.machine_file(enrollment, topology, cert, root / "machine.json", "windows-devbox")
+            self.assertEqual(output.getvalue(), "", "Do not announce success before installation state is saved")
+            self.assertTrue(report["logonOnly"])
+            self.assertFalse(report["firewallChanged"])
+            text = (root / "machine.json").read_text()
+            self.assertEqual(json.loads(text)["platform"], "windows-x64")
+            self.assertNotIn(enrollment["clientSigningKey"], text)
+            self.assertNotIn(enrollment["workspaceSsoKey"], text)
 
 
 if __name__ == "__main__":

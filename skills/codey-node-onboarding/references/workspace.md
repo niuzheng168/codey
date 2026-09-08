@@ -126,8 +126,11 @@ WantedBy=default.target
    CloudCLI，首次安装则仅停止新建 CloudCLI。保留数据与诊断，不循环重装。
    已修改数据库 schema 时先确认旧版本兼容，不能盲目覆盖数据库回退。
 
-Windows/macOS 没有在本仓库中验证过同等的 CloudCLI 一键部署器。需要这类
-Workspace 时先检查 fork 的 native PTY/SQLite 兼容性，使用该 OS 的独立服务管理
-方式；不能声称 Linux 脚本直接支持它们。只做 `8443` 直连无需部署 CloudCLI。
+新增完整机器配置流程现在有分开的 Windows `scripts/setup-windows.ps1` 和 Linux
+`scripts/setup-linux.sh` 入口，由本人在门户下载对应平台的 `config-new-codey-machine`
+完整包。Windows 使用原 owner 登录任务，不使用 systemd/WSL、不覆盖既有服务；
+首次干净 Windows 安装仍须单独验收 native PTY/SQLite、登录自启和 ACA 访问，
+不能把语法/规划测试当作安装验证。包未发布时不回退到 Linux 或本篇手动说明 ZIP。
+macOS 仍为规划中。只做 `8443` 直连无需部署 CloudCLI。
 
 网络放行与 ACA 上游配置继续 [VNet](vnet.md)，最终按 [验收](verification.md) 检查。

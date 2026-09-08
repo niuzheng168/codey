@@ -85,6 +85,7 @@ export function safeAgentReport(value) {
 
 function eligibility(node, device, release) {
   if (node.id === "local") return { eligible: false, reason: "protected_local" };
+  if (node.platform && node.platform !== "linux-x64") return { eligible: false, reason: "unsupported_platform" };
   if (!device || device.revoked || !device.report) return { eligible: false, reason: "needs_setup" };
   const report = device.report;
   if (report.platform !== release.platform || report.layout === "unsupported") return { eligible: false, reason: "unsupported_platform" };
@@ -135,7 +136,10 @@ export class MachineUpdates {
     const account = await this.accounts.byId(principalId);
     if (!account?.enabled) throw requestError("账号已停用", 403);
     const node = await this.nodePolicy.owned(principalId, nodeId);
-    if (nodeId === "local") throw requestError("受保护的本地节点不接受页面或批量升级", 403);
+    if (nodeId === "local") throw requestError("受保护节点不接受页面或批量升级", 403);
+    if (node.machine?.platform && node.machine.platform !== "linux-x64") {
+      throw requestError("此平台尚未支持签名升级器；不会分发 Linux 升级脚本", 409);
+    }
     return { account, node };
   }
 
@@ -154,9 +158,11 @@ export class MachineUpdates {
         const currentJob = data.jobs.findLast((job) => job.nodeId === node.id && job.ownerId === principalId && !terminal.has(job.state));
         return {
           id: node.id, name: node.name, protected: node.id === "local", enrolled: Boolean(device && !device.revoked),
+          updaterSupported: !node.platform || node.platform === "linux-x64",
           connected: Boolean(device && !device.revoked && this.clock() - (device.lastSeen || 0) < HEARTBEAT_TIMEOUT_MS),
           lastSeen: device?.lastSeen || null, report: device?.report || null,
-          ...(latest ? eligibility(node, device, latest) : { eligible: false, reason: "no_release" }),
+          ...(node.platform && node.platform !== "linux-x64" ? { eligible: false, reason: "unsupported_platform" }
+            : latest ? eligibility(node, device, latest) : { eligible: false, reason: "no_release" }),
           activeJob: currentJob ? publicJob(currentJob) : null,
         };
       }),

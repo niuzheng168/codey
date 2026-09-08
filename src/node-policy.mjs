@@ -4,6 +4,7 @@ import { validateConfig } from "./config.mjs";
 import { SignedStore, requestError } from "./signed-store.mjs";
 import { workspaceNodeKey } from "./workspace-sso.mjs";
 import { machineServerName } from "./machine-identity.mjs";
+import { machinePlatform } from "./machine-platforms.mjs";
 
 const NODE_ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const allowedFields = new Set(["name", "region", "endpoint", "accent"]);
@@ -36,7 +37,8 @@ function nodeSettings(body, previous = {}) {
 
 function publicNode(record) {
   const { id, name, region, endpoint, accent } = record;
-  return { id, name, region, endpoint, accent, ...(record.machine ? { vnetOnly: true } : {}) };
+  return { id, name, region, endpoint, accent, ...(record.machine
+    ? { vnetOnly: true, platform: record.machine.platform ?? "linux-x64" } : {}) };
 }
 
 export class NodePolicy {
@@ -156,7 +158,8 @@ export class NodePolicy {
     });
   }
 
-  async reserveMachine(principalId, now = Date.now()) {
+  async reserveMachine(principalId, now = Date.now(), platform = "linux-x64") {
+    machinePlatform(platform);
     return this.store.mutate((data) => {
       const own = data.nodes.filter((node) => node.ownerId === principalId);
       const pending = own.filter((node) => node.setup?.status === "reserved" && node.setup.expiresAt > now);
@@ -171,7 +174,7 @@ export class NodePolicy {
         endpoint: `https://${machineServerName(id)}:8443/usage`, accent: "#60a5fa",
         enabled: false, keyMode: "isolated", serverNode: null,
         createdAt: new Date(now).toISOString(),
-        setup: { status: "reserved", expiresAt: now + 7 * 86400000 },
+        setup: { status: "reserved", platform, expiresAt: now + 7 * 86400000 },
       };
       data.nodes.push(node);
       return node;
@@ -191,7 +194,8 @@ export class NodePolicy {
   async pendingMachines(principalId, now = Date.now()) {
     return (await this.records()).data.nodes
       .filter((node) => node.ownerId === principalId && node.setup?.status === "reserved")
-      .map((node) => ({ id: node.id, createdAt: node.createdAt, expiresAt: node.setup.expiresAt, expired: node.setup.expiresAt <= now }));
+      .map((node) => ({ id: node.id, platform: node.setup.platform ?? "linux-x64",
+        createdAt: node.createdAt, expiresAt: node.setup.expiresAt, expired: node.setup.expiresAt <= now }));
   }
 
   async cancelMachine(principalId, nodeId) {
@@ -208,6 +212,9 @@ export class NodePolicy {
         !item.enabled && item.setup?.status === "reserved");
       if (!node) throw requestError("机器配置已添加、取消或无权访问", 409);
       if (node.setup.expiresAt <= now) throw requestError("配置包已过期", 410);
+      if ((machine.platform ?? "linux-x64") !== (node.setup.platform ?? "linux-x64")) {
+        throw requestError("机器平台与预留身份不一致", 409);
+      }
       if (data.nodes.filter((item) => item.ownerId === principalId && item.enabled).length >= 32) {
         throw requestError("节点数量已达上限", 409);
       }

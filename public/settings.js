@@ -203,7 +203,10 @@ function renderNodes(nodes) {
     card.append(summary);
 
     const editor = element("div", null, "node-editor");
-    editor.append(element("p", `节点 ID · ${node.id}`, "node-id"));
+    editor.append(element("p", `${node.id === "local" ? "兼容节点 ID" : "节点 ID"} · ${node.id}`, "node-id"));
+    if (node.id === "local") {
+      editor.append(element("p", "保留旧 ID 以兼容现有会话与 SSO；它不是机器名称。此节点的 Workspace 是远程机器，Usage/History 的回环地址仍指向当前浏览器设备，不代表已开通远程 Windows 用量。", "muted"));
+    }
     const form = element("form", null, "node-form");
     form.setAttribute("aria-label", `${node.name} 节点设置`);
     const endpointField = field(node.vnetOnly ? "HTTPS 服务入口（VNet 专用，由机器配置提供）" : "HTTPS 服务入口", "endpoint", origin, "url");
@@ -287,11 +290,20 @@ async function load() {
   const result = await api("/api/settings");
   renderNodes(result.nodes);
   const setup = result.machineSetup;
+  const linuxSetup = setup?.platforms?.find((item) => item.platform === "linux-x64")
+    ?? (setup?.platform !== "windows-x64" ? setup : null);
+  const windowsSetup = setup?.platforms?.find((item) => item.platform === "windows-x64");
   machineSkillButtons.clear();
-  machineSkillButtons.set(document.querySelector("#download-machine-skill"), Boolean(setup?.enabled));
-  document.querySelector("#machine-package-status").textContent = setup?.enabled
-    ? `约 ${Math.ceil(setup.bytes / 1024 / 1024)} MB · Node ${setup.node} · CloudCLI ${setup.cloudcli} · copilot-api ${setup.copilotApi}`
-    : setup?.reason || "完整机器配置包尚未发布；旧版说明 ZIP 不能替代依赖包。";
+  machineSkillButtons.set(document.querySelector("#download-machine-skill"), Boolean(linuxSetup?.enabled));
+  machineSkillButtons.set(document.querySelector("#download-machine-windows-skill"), Boolean(windowsSetup?.enabled));
+  for (const [id, entry, label] of [
+    ["machine-package-status", linuxSetup, "Linux"],
+    ["machine-windows-package-status", windowsSetup, "Windows"],
+  ]) {
+    document.querySelector(`#${id}`).textContent = entry?.enabled
+      ? `${label} · 约 ${Math.ceil(entry.bytes / 1024 / 1024)} MB · Node ${entry.node} · CloudCLI ${entry.cloudcli} · copilot-api ${entry.copilotApi}`
+      : entry?.reason || `${label} 完整机器配置包尚未发布；不会使用其他平台的包代替。`;
+  }
   const pendingCount = result.pendingMachines?.length || 0;
   document.querySelector("#pending-machine-details").hidden = !pendingCount;
   document.querySelector("#pending-machine-count").textContent = String(pendingCount);
@@ -301,13 +313,16 @@ async function load() {
   pendingMachinesRoot.textContent = "";
   for (const pending of result.pendingMachines ?? []) {
     const row = element("div", null, "user-row pending-machine");
-    row.append(element("span", `${pending.id} · ${pending.expired ? "已过期" : "待配置，尚未添加"}`, "muted"));
+    const platform = pending.platform ?? "linux-x64";
+    const available = platform === "linux-x64" ? linuxSetup : platform === "windows-x64" ? windowsSetup : null;
+    row.append(element("span", `${pending.id} · ${platform} · ${pending.expired ? "已过期" : "待配置，尚未添加"}`, "muted"));
     const retryForm = element("form");
     retryForm.action = `/api/settings/machines/${pending.id}/skill`;
     retryForm.method = "post";
+    retryForm.dataset.machinePlatform = platform;
     const retry = element("button", "重新下载此身份的 Skill");
     retry.type = "submit";
-    machineSkillButtons.set(retry, !pending.expired && Boolean(setup?.enabled));
+    machineSkillButtons.set(retry, !pending.expired && Boolean(available?.enabled));
     retryForm.append(retry);
     retryForm.addEventListener("submit", downloadMachineSkill);
     row.append(retryForm);
@@ -360,9 +375,13 @@ async function downloadMachineSkill(event) {
       throw new Error(result?.error || `HTTP ${response.status}`);
     }
     const filename = response.headers.get("content-disposition")
-      ?.match(/^attachment;\s*filename="(config-new-codey-machine-n-[a-f0-9]{24}\.zip)"$/i)?.[1];
+      ?.match(/^attachment;\s*filename="(config-new-codey-machine(?:-windows)?-n-[a-f0-9]{24}\.zip)"$/i)?.[1];
+    const expectedWindows = form.dataset.machinePlatform === "windows-x64";
     if (response.headers.get("content-type")?.split(";")[0].trim() !== "application/zip" || !filename) {
       throw new Error("服务器未返回有效的 ZIP 配置包，请刷新页面后重试");
+    }
+    if (filename.startsWith("config-new-codey-machine-windows-") !== expectedWindows) {
+      throw new Error("服务器返回的配置包平台与所选系统不一致；不会安装其他平台的包");
     }
     const blob = await response.blob();
     const length = response.headers.get("content-length");
@@ -398,6 +417,7 @@ async function downloadMachineSkill(event) {
 }
 
 document.querySelector("#machine-skill-form").addEventListener("submit", downloadMachineSkill);
+document.querySelector("#machine-windows-skill-form").addEventListener("submit", downloadMachineSkill);
 
 document.querySelector("#add-prepared-machine-form").addEventListener("submit", (event) => {
   event.preventDefault();

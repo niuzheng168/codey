@@ -1,6 +1,6 @@
 ---
 name: config-new-codey-machine
-description: "配置一台新的 Codey 机器：使用登录用户下载的接入与改版源码包，自动安装 Codey CloudCLI/copilot-api 及独立 Node/Codex 依赖、每机器 HTTPS/SSO 和 Azure VNet；产出机器文件，最后由用户在门户验通并添加。适用于首次配置 Azure Linux x64 VM，也可从 Windows Codex 经 SSH/Azure 编排；不覆盖已有机器身份、任务或服务。"
+description: "配置新的 Codey 节点：按 Windows/Linux 分别使用原生安装脚本和本人下载的完整包，安装独立 CloudCLI/copilot-api/Node、HTTPS/SSO，产出机器文件后由门户验通添加。默认先计划，网络/防火墙须单独确认；Windows 登录后运行，Linux 使用 systemd 用户服务；macOS 规划中。不覆盖既有身份、任务或服务。"
 ---
 
 # Configure a new Codey machine
@@ -15,10 +15,24 @@ description: "配置一台新的 Codey 机器：使用登录用户下载的接�
 - `assets/enrollment.json`：本次预留 ID、owner、两个独立节点 key、门户网络信息。
 - `assets/manifest.json`：审查过的准确 commit/version、平台、各文件 SHA-256。
 - 两份 `*-source.tar.gz`：对应 fork 源码及许可证，包含此发行版的本地补丁。
-- `assets/codey-updater/`：独立升级器、仅绑定本机 owner/ID 的升级凭据和发行版公钥。
+- Linux 包的 `assets/codey-updater/`：独立升级器、仅绑定本节点 owner/ID 的升级凭据和发行版公钥。
   重下载同一待配置身份不会轮换这份凭据；它不能调用模型或登录门户。
-- 两个脚本：自动下载校验 Node、安装锁定的 Bun/npm 依赖、构建应用、配置 Azure 网络
-  与目标机服务。TLS leaf/key 在目标机本地生成。
+- 当前平台的原生入口及公共辅助脚本：下载校验 Node、安装锁定依赖、构建应用。
+  Azure 网络计划与安装执行分开确认，TLS leaf/key 在目标机生成。
+
+## 平台与入口
+
+| 目标 | 入口 | 服务方式 | 状态 |
+| --- | --- | --- | --- |
+| Windows x64 | `scripts/setup-windows.ps1` | 原 owner 的 InteractiveToken 登录任务，隐藏监督进程 | 原生脚本；必须使用已发布的 Windows 完整包 |
+| Linux x64 | `scripts/setup-linux.sh` | systemd 用户服务及独立签名升级器 | 原生脚本；现有 Linux 包保持兼容 |
+| macOS | 无 | 后续单独实现 | 规划中，禁止回退到 Linux/Windows 脚本 |
+
+门户分别发布两个平台的依赖清单和包。尚未发布 Windows 包时，其下载按钮必须
+明确不可用，不能给用户 Linux 包、只有说明的 ZIP 或旧的工作站安装器。
+旧 `/bootstrap/*` / `install-codex-workstation.*` 配置工作站，不是这个完整节点流程。
+重下载待配置身份保留原平台、ID/key 和有效期，不能借重试更换操作系统。
+此流程目前使用 Azure VNet；既有 Windows Dev Tunnel 节点不需重新运行首次安装。
 
 这是**轻量联网安装包**，不把 Node 等所有 binary 塞进 ZIP。脚本将它们安装到独立
 release 目录，不改系统 Node/npm、nvm default 或已有服务；目标需可访问官方 Node、
@@ -34,9 +48,10 @@ npm registry 及锁文件引用的依赖源。Bun 只用于构建，服务使用
 
 只确认目标 VM/OS owner 与可用管理方式；若当前就在目标 VM，可由 IMDS 发现资源 ID。
 同一完整包只用于**一台**目标机，不能把包转给其他账号或反复换机器。
-此版目标是 **Azure Linux x64（Ubuntu 24.04 / Python 3.12 已验证）**。
-Windows/macOS 上的 Codex 可作为控制端；不能在 Windows 上运行 Linux 安装器，
-也不能把未知操作系统/架构包装成已支持。
+目标为 Azure Linux x64 或 Windows x64。Linux 的 Ubuntu 24.04 / Python 3.12
+路径已有部署验证；Windows 安装器需要 Python 3.12+、原生 OpenSSL 和依赖构建工具。
+必须如实记录 Windows 的首次干净机器安装验收，不能把语法/规划测试当成完成安装。
+控制端系统不等于目标系统：Windows/macOS 上的 Codex 仍可管理 Linux 目标。
 
 只读检查已有服务、`4141/8443/3001`、磁盘、owner、`~/.codex` 配置是否已存在。
 脚本拒绝接管既有 copilot-api / CloudCLI、占用的端口及别的安装身份；遇到冲突先说明，
@@ -76,15 +91,54 @@ Azure 资源和两条限源端口规则都有节点专属名字；输出对应 `
 大文件可经受控私有存储临时传输；令牌仅放受保护文件/API 请求体，不写命令行或日志；
 验证相同 SHA-256，传输完成撤销临时权限。不要把 enrollment/key 放到公共 URL。
 
-## 2. 安装并自检目标机
+## 2. 使用匹配的原生入口安装
+
+### Windows
+
+先完成同一身份的 Azure 网络计划/授权，把 `output/network.json` 交给目标 owner。
+在原用户、**非管理员** PowerShell 中先运行计划：
+
+```powershell
+.\scripts\setup-windows.ps1 -NetworkFile .\output\network.json -Name windows-devbox
+```
+
+检查计划中的端口冲突、私网监听地址、来源网段和磁盘/工具要求。获得明确网络确认后：
+
+```powershell
+.\scripts\setup-windows.ps1 -NetworkFile .\output\network.json -Name windows-devbox -Apply -NetworkApproved
+```
+
+可用 `-PythonExe`、`-OpenSslExe`、`-CodexExe` 指定已安装的绝对路径。脚本不升级
+全局工具、不改执行策略、不转入 WSL，不更改既有 Codex config/provider/login。
+原生 Codex 读取器优先由 owner 用 `-CodexExe` 指向已安装且验证过的 Desktop CLI；
+未指定时仅查本次发行包的原生可执行文件，不从任意 PATH 取替代程序。
+
+网络授权并不意味着脚本自动改防火墙。Windows 防火墙如需补规则，先单独展示并
+取得确认：仅允许 network.json 的 `allowedSources` 到本机指定私网 IP 的
+TCP 3001/8443；Private Link 还需审核 Azure LB 健康探测源。不要开放 4141/22、
+Internet/Any 或更改全局防火墙策略。权限不足不能偷偷切到管理员/SYSTEM。
+
+Windows 独立目录是 `~/.local/share/codey-machine-windows` 与
+`~/.config/codey-machine-windows`，后者及发行目录 ACL 仅 owner/SYSTEM/Administrators。
+每节点创建两个唯一登录任务，使用 pythonw 隐藏监督独立 Node 服务，非登录期间不运行。
+受保护 copilot-api / 已用端口 / 未识别安装目录导致拒绝安装，不接管已有服务。
+失败仅撤销这次创建的精确任务，保留目录和 owner-only 构建日志；不递归清理旧目录。
+同一成功安装重跑只验收；首次安装器不是升级工具。
+
+Windows **尚不安装 Linux 签名升级器**。可达性由门户通过已验证 TLS 的 Workspace
+健康接口检测；“Workspace 在线”与“有升级器心跳”是两件事。不要伪造心跳、填入
+目标发行版版本，或因此放开该节点的升级权限。
+
+### Linux
 
 在目标 **OS owner** 的 shell 中执行，不能以 root 运行安装器：
 
 ```text
-python3 scripts/configure-machine.py --network-file output/network.json --out output/codey-machine.json
-python3 scripts/configure-machine.py --network-file output/network.json --out output/codey-machine.json --apply
+bash scripts/setup-linux.sh --network-file output/network.json --out output/codey-machine.json
+bash scripts/setup-linux.sh --network-file output/network.json --out output/codey-machine.json --apply
 ```
 
+旧 `configure-machine.py` 入口保留兼容，但不能直接用它安装 Windows。
 先读计划再执行。需要 SSH 退出后继续服务时说明 `loginctl enable-linger <owner>`
 这个 OS 设置并在获准后启用，或传 `--enable-linger`；权限不足时不擅自更改 sudoers。
 Azure Run Command 默认 root：只在 root 层完成经授权的 linger，再用 `runuser`、
@@ -121,7 +175,7 @@ Azure Run Command 默认 root：只在 root 层完成经授权的 linger，再�
 **无需每加一台机器重建/发布门户镜像**。其他用户，包括管理员，不能认领此 ID。
 新节点的 Usage/History 固定走 VNet，Workspace 使用门户统一托管的前端。
 
-添加后在“设置 → 机器软件更新”刷新，确认升级器已连接、ID/owner 与当前机器一致。
+Linux 添加后在“设置 → 机器软件更新”刷新，确认升级器已连接、ID/owner 与当前机器一致。
 以后在这里单机或批量预览、确认升级，不重新运行首次安装器、不重建机器身份。
 批量先灰度一台，再最多三台并发；忙碌机器等待，不中断已有任务。升级后必须通过
 Codey 和 Codex 真模型调用，否则回退本次代码，不回退用户数据库或凭据。

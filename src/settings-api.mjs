@@ -39,27 +39,36 @@ export class SettingsApi {
     const [registered, users] = await Promise.all([this.nodePolicy.inventory(), this.accounts.list()]);
     const owners = new Map(users.map((user) => [user.id, user]));
     const snapshot = await this.machineUpdates?.inventory(registered);
-    const nodes = registered.map(({ id, name, region, ownerId }) => {
+    const nodes = await Promise.all(registered.map(async ({ id, name, region, ownerId }) => {
       const owner = owners.get(ownerId);
       const metadata = snapshot?.nodes.get(id);
+      const updaterStatus = metadata?.status ?? "unavailable";
+      const health = owner?.enabled && ["not_enrolled", "unreported", "unavailable"].includes(updaterStatus)
+        ? await this.cloudCliGateway?.healthMetadata?.(id) : null;
+      const status = !owner ? "unknown" : !owner.enabled ? "owner_disabled"
+        : health?.reachable ? "workspace_online" : health ? "workspace_unreachable" : updaterStatus;
       return {
         id, name, region,
         owner: { id: ownerId, username: owner?.username ?? null, enabled: owner?.enabled ?? false },
-        status: !owner ? "unknown" : !owner.enabled ? "owner_disabled" : metadata?.status ?? "unavailable",
+        status,
         lastSeen: metadata?.lastSeen ?? null,
         releaseId: metadata?.releaseId ?? null,
+        ...(health ? { workspaceHealth: health, updaterStatus } : {}),
         components: {
-          cloudcli: metadata?.components.cloudcli ?? null,
+          cloudcli: health?.reachable && health.version
+            ? { version: health.version, commit: null, nodeMajor: null, source: "workspace_health" }
+            : metadata?.components.cloudcli ?? null,
           copilotApi: metadata?.components.copilotApi ?? null,
         },
       };
-    });
-    const online = nodes.filter((node) => node.status === "online").length;
+    }));
+    const online = nodes.filter((node) => ["online", "workspace_online"].includes(node.status)).length;
     const stale = nodes.filter((node) => node.status === "stale").length;
     return {
       generatedAt: snapshot?.generatedAt ?? Date.now(),
       heartbeatTimeoutMs: snapshot?.heartbeatTimeoutMs ?? null,
       telemetryAvailable: Boolean(snapshot),
+      workspaceHealthAvailable: nodes.some((node) => node.workspaceHealth),
       summary: {
         total: nodes.length, owners: new Set(nodes.map((node) => node.owner.id)).size,
         online, stale, unknown: nodes.length - online - stale,

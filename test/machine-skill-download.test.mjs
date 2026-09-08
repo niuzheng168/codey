@@ -9,17 +9,17 @@ const nodeId = `n-${"a".repeat(24)}`;
 const filename = `config-new-codey-machine-${nodeId}.zip`;
 const endpoint = "/api/settings/machines/skill";
 
-function archiveResponse({ type = "application/zip", body = "PK\u0003\u0004test archive", length } = {}) {
+function archiveResponse({ type = "application/zip", body = "PK\u0003\u0004test archive", length, name = filename } = {}) {
   return new Response(body, {
     headers: {
       "content-type": type,
-      "content-disposition": `attachment; filename="${filename}"`,
+      "content-disposition": `attachment; filename="${name}"`,
       "content-length": String(length ?? Buffer.byteLength(body)),
     },
   });
 }
 
-async function page({ download = async () => archiveResponse(), pending = [] } = {}) {
+async function page({ download = async () => archiveResponse(), pending = [], machineSetup } = {}) {
   const requests = [];
   const { document, elements, downloads } = settingsDom();
   const objectUrls = [];
@@ -46,7 +46,7 @@ async function page({ download = async () => archiveResponse(), pending = [] } =
         settingsRequests++;
         return { status: 200, ok: true, json: async () => ({
           nodes: [], user: { role: "user" },
-          machineSetup: { enabled: true, bytes: 4194304, node: "24.20.0", cloudcli: "1.37.2", copilotApi: "2.5.1" },
+          machineSetup: machineSetup ?? { enabled: true, bytes: 4194304, node: "24.20.0", cloudcli: "1.37.2", copilotApi: "2.5.1" },
           pendingMachines: pending,
         }) };
       }
@@ -92,6 +92,26 @@ test("machine skill submits an authenticated same-origin POST without navigating
   assert.ok(p.timers[0].delay >= 1000);
   p.timers[0].fn();
   assert.deepEqual(p.revoked, ["blob:test-download"]);
+});
+
+test("Windows has its own download action and filename; macOS stays unavailable", async () => {
+  const entry = { enabled: true, bytes: 4194304, node: "24.20.0", cloudcli: "1.37.2", copilotApi: "2.5.1" };
+  const machineSetup = { ...entry, platforms: [
+    { ...entry, platform: "windows-x64" }, { ...entry, platform: "linux-x64" },
+    { platform: "macos", enabled: false, planned: true },
+  ] };
+  const windowsName = `config-new-codey-machine-windows-${nodeId}.zip`;
+  const p = await page({ machineSetup, download: async () => archiveResponse({ name: windowsName }) });
+  assert.equal(p.elements.get("#download-machine-windows-skill").disabled, false);
+  assert.equal(p.elements.get("#download-machine-macos-skill").disabled, true);
+  await p.submit(p.elements.get("#machine-windows-skill-form")).finished;
+  assert.equal(p.requests[0].url, endpoint + "?platform=windows-x64");
+  assert.equal(p.requests[0].options.body, undefined);
+  assert.equal(p.downloads[0].download, windowsName);
+  const wrong = await page({ machineSetup });
+  await wrong.submit(wrong.elements.get("#machine-windows-skill-form")).finished;
+  assert.equal(wrong.downloads.length, 0);
+  assert.match(wrong.elements.get("#machine-download-message").textContent, /平台.*不一致/);
 });
 
 test("re-downloading a pending identity uses the same handler and disables all download buttons in flight", async () => {

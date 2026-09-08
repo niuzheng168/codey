@@ -8,6 +8,7 @@ import { machineIdentity, MACHINE_ID, preparedGateways } from "./machine-identit
 import { verifyMachine } from "./machine-verification.mjs";
 import { requestError } from "./signed-store.mjs";
 import { zipStream } from "./zip-stream.mjs";
+import { MACHINE_PLATFORMS, machinePlatform } from "./machine-platforms.mjs";
 
 export const MACHINE_SKILL = "config-new-codey-machine";
 export const MACHINE_SKILL_FILES = Object.freeze([
@@ -45,7 +46,15 @@ export function machineReleaseId(manifest) {
   return `machine-${createHash("sha256").update(identity).digest("hex").slice(0, 16)}`;
 }
 
-export async function loadMachineBundle(root) {
+export async function loadMachineBundle(root, platformId = "linux-x64") {
+  const platform = machinePlatform(platformId);
+  // Keep the existing Linux release layout/backlinks; each additional platform
+  // has its own immutable active pointer and cannot fall back to Linux assets.
+  if (platformId !== "linux-x64") {
+    const expected = path.join(await realpath(root), "platforms", platformId);
+    if (await realpath(expected) !== expected) throw new Error("Unsafe platform release directory");
+    root = expected;
+  }
   root = await realpath(root);
   let pointerText;
   try {
@@ -63,12 +72,12 @@ export async function loadMachineBundle(root) {
   const raw = await readFile(path.join(root, "manifest.json"), "utf8");
   if (raw.length > 16384) throw new Error("Oversized machine manifest");
   const manifest = JSON.parse(raw);
-  if (manifest.schema !== 1 || manifest.platform !== "linux-x64" ||
+  if (manifest.schema !== 1 || manifest.platform !== platformId ||
       !/^machine-[a-f0-9]{16}$/.test(manifest.releaseId ?? "") ||
       !/^\d+\.\d+\.\d+$/.test(manifest.node ?? "") || !/^\d+\.\d+\.\d+$/.test(manifest.bunBuildTool ?? "") ||
       manifest.dependencyMode !== "install-on-target" ||
-      manifest.nodeDistribution?.url !== `https://nodejs.org/dist/v${manifest.node}/node-v${manifest.node}-linux-x64.tar.xz` ||
-      manifest.nodeDistribution?.file !== `node-v${manifest.node}-linux-x64.tar.xz` ||
+      manifest.nodeDistribution?.url !== `https://nodejs.org/dist/v${manifest.node}/node-v${manifest.node}-${platform.nodeSuffix}` ||
+      manifest.nodeDistribution?.file !== `node-v${manifest.node}-${platform.nodeSuffix}` ||
       !/^[a-f0-9]{64}$/.test(manifest.nodeDistribution?.sha256 ?? "") ||
       !Array.isArray(manifest.artifacts) || manifest.artifacts.length !== ARTIFACTS.length) {
     throw new Error("Invalid machine bundle manifest");
@@ -114,22 +123,33 @@ export class MachineSetup {
     if (cloudCliGateway) cloudCliGateway.refreshMachines = () => this.refreshGateways();
   }
 
-  async availability() {
-    if (!this.bundleRoot || !this.network || !this.cloudCliGateway || !this.nodeDataGateway || !this.cloudCliUi) {
-      return { enabled: false, reason: "运维尚未发布完整机器配置包或启用共享 Workspace UI / 私网配置" };
+  async availability(platformId) {
+    if (platformId === undefined) {
+      const platforms = await Promise.all(MACHINE_PLATFORMS.map(async (definition) =>
+        definition.implemented ? { ...await this.availability(definition.id) }
+          : { enabled: false, platform: definition.id, name: definition.name, planned: true, reason: definition.description }));
+      const selected = platforms.find((entry) => entry.platform === "linux-x64" && entry.enabled)
+        ?? platforms.find((entry) => entry.enabled) ?? platforms.find((entry) => entry.platform === "linux-x64");
+      return { ...selected, platforms };
     }
-    if (this.machineUpdates && !this.machineUpdates.catalog.configured) {
-      return { enabled: false, reason: "请先配置节点升级器签名公钥，确保新机器可持续更新" };
+    const definition = machinePlatform(platformId);
+    const identity = { platform: platformId, name: definition.name, entrypoint: definition.entrypoint,
+      updaterSupported: definition.updater, description: definition.description };
+    if (!this.bundleRoot || !this.network || !this.cloudCliGateway || !this.nodeDataGateway || !this.cloudCliUi) {
+      return { ...identity, enabled: false, reason: "运维尚未发布完整机器配置包或启用共享 Workspace UI / 私网配置" };
+    }
+    if (definition.updater && this.machineUpdates && !this.machineUpdates.catalog.configured) {
+      return { ...identity, enabled: false, reason: "请先配置节点升级器签名公钥，确保新机器可持续更新" };
     }
     try {
-      const { manifest, files } = await loadMachineBundle(this.bundleRoot);
+      const { manifest, files } = await loadMachineBundle(this.bundleRoot, platformId);
       await this.cloudCliUi.active?.();
       return {
-        enabled: true, platform: manifest.platform, releaseId: manifest.releaseId,
+        ...identity, enabled: true, platform: manifest.platform, releaseId: manifest.releaseId,
         bytes: files.reduce((sum, file) => sum + file.size, 0),
         node: manifest.node, cloudcli: manifest.cloudcli.version, copilotApi: manifest.copilotApi.version,
       };
-    } catch { return { enabled: false, reason: "机器配置包或共享 Workspace UI 不可用，请联系运维发布；不会退回仅说明的 ZIP" }; }
+    } catch { return { ...identity, enabled: false, reason: `${definition.name} 完整配置包尚未发布或不可用；不会退回其他平台或仅说明的 ZIP` }; }
   }
 
   async refreshGateways() {
@@ -145,16 +165,21 @@ export class MachineSetup {
     try { await this.refreshing; } finally { this.refreshing = null; }
   }
 
-  async download(req, res, reserved) {
+  async download(req, res, reserved, requestedPlatform) {
     for await (const chunk of req) {
       if (chunk.length) throw requestError("下载配置包不接受 owner、节点 ID 或密钥参数");
     }
-    const available = await this.availability();
+    const platformId = reserved?.setup.platform ?? requestedPlatform ?? "linux-x64";
+    if (reserved && requestedPlatform && requestedPlatform !== (reserved.setup.platform ?? "linux-x64")) {
+      throw requestError("待配置身份已绑定原平台，请下载同一平台的包", 409);
+    }
+    const definition = machinePlatform(platformId);
+    const available = await this.availability(platformId);
     if (!available.enabled) throw requestError(available.reason, 503);
-    const { manifest, files } = await loadMachineBundle(this.bundleRoot);
+    const { manifest, files } = await loadMachineBundle(this.bundleRoot, platformId);
     const skillRoot = await realpath(this.skillRoot);
     const entries = [];
-    for (const name of MACHINE_SKILL_FILES) {
+    for (const name of [...MACHINE_SKILL_FILES, ...definition.files]) {
       const file = path.join(skillRoot, name);
       const info = await lstat(file);
       const actual = await realpath(file);
@@ -163,12 +188,12 @@ export class MachineSetup {
       }
       entries.push({ name: `${MACHINE_SKILL}/${name}`, data: await readFile(file) });
     }
-    const node = reserved ?? await this.nodePolicy.reserveMachine(req.codeyPrincipal.id);
+    const node = reserved ?? await this.nodePolicy.reserveMachine(req.codeyPrincipal.id, Date.now(), platformId);
     const enrollment = {
       schema: 1, ...this.nodePolicy.enrollmentValues(req.codeyPrincipal, node.id, this.origin),
-      expiresAt: node.setup.expiresAt, releaseId: manifest.releaseId, network: this.network,
+      expiresAt: node.setup.expiresAt, releaseId: manifest.releaseId, platform: platformId, network: this.network,
     };
-    if (this.machineUpdates) {
+    if (definition.updater && this.machineUpdates) {
       entries.push(...(await this.machineUpdates.newMachineEntries(req.codeyPrincipal.id, node.id))
         .map((entry) => ({ ...entry, name: `${MACHINE_SKILL}/assets/${entry.name}` })));
     }
@@ -180,27 +205,33 @@ export class MachineSetup {
     const zip = zipStream(entries);
     res.writeHead(200, {
       "content-type": "application/zip", "content-length": zip.length,
-      "content-disposition": `attachment; filename="${MACHINE_SKILL}-${node.id}.zip"`,
+      "content-disposition": `attachment; filename="${MACHINE_SKILL}${platformId === "linux-x64" ? "" : "-windows"}-${node.id}.zip"`,
       "cache-control": "private, no-store", vary: "Cookie", "x-content-type-options": "nosniff",
       "referrer-policy": "no-referrer",
     });
     await pipeline(Readable.from(zip), res);
   }
 
-  async limitedDownload(req, res, reserved) {
+  async limitedDownload(req, res, reserved, requestedPlatform) {
     if (this.downloading >= 4) throw requestError("配置包下载繁忙，请稍后重试", 429);
     this.downloading++;
-    try { await this.download(req, res, reserved); } finally { this.downloading--; }
+    try { await this.download(req, res, reserved, requestedPlatform); } finally { this.downloading--; }
   }
 
   async handle(req, res) {
-    const pathname = new URL(req.url, "http://portal.local").pathname;
+    const url = new URL(req.url, "http://portal.local");
+    const pathname = url.pathname;
     if (!pathname.startsWith("/api/settings/machines")) return false;
     try {
       if (!req.codeyPrincipal) throw requestError("需要登录", 401);
       if (pathname === "/api/settings/machines/skill") {
         if (req.method !== "POST") throw requestError("Method not allowed", 405);
-        await this.limitedDownload(req, res);
+        if ([...url.searchParams.keys()].some((key) => key !== "platform") || url.searchParams.getAll("platform").length > 1) {
+          throw requestError("只接受一个目标平台参数");
+        }
+        const platform = url.searchParams.get("platform") ?? undefined;
+        machinePlatform(platform);
+        await this.limitedDownload(req, res, undefined, platform);
         return true;
       }
       const match = pathname.match(/^\/api\/settings\/machines\/(n-[a-f0-9]{24})(\/activate|\/skill)?$/);
@@ -214,13 +245,21 @@ export class MachineSetup {
       const reserved = await this.nodePolicy.reservedMachine(req.codeyPrincipal.id, nodeId);
       if (activate === "/skill") {
         if (req.method !== "POST") throw requestError("Method not allowed", 405);
-        await this.limitedDownload(req, res, reserved);
+        const platform = url.searchParams.get("platform") ?? undefined;
+        if ([...url.searchParams.keys()].some((key) => key !== "platform") || url.searchParams.getAll("platform").length > 1) {
+          throw requestError("只接受一个目标平台参数");
+        }
+        if (platform) machinePlatform(platform);
+        await this.limitedDownload(req, res, reserved, platform);
         return true;
       }
       if (!activate || req.method !== "POST") throw requestError("Method not allowed", 405);
-      const available = await this.availability();
+      const available = await this.availability(reserved.setup.platform ?? "linux-x64");
       if (!available.enabled) throw requestError(available.reason, 503);
       const machine = machineIdentity(await input(req), nodeId);
+      if (machine.platform !== (reserved.setup.platform ?? "linux-x64")) {
+        throw requestError("机器文件的平台与下载时预留的平台不一致");
+      }
       if (this.verifying >= 4) throw requestError("正在验收其他机器，请稍后重试", 429);
       this.verifying++;
       try {

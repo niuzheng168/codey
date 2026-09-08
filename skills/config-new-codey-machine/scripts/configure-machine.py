@@ -70,7 +70,7 @@ def digest(file):
     return value.hexdigest()
 
 
-def validate_inputs(enrollment, manifest, network):
+def validate_inputs(enrollment, manifest, network, target_platform="linux-x64"):
     node_id = enrollment.get("nodeId", "")
     if enrollment.get("schema") != 1 or not NODE_ID.fullmatch(node_id):
         raise SetupError("The ZIP must contain a real, reserved enrollment.json")
@@ -84,7 +84,10 @@ def validate_inputs(enrollment, manifest, network):
     origin = urlsplit(enrollment.get("portalOrigin", ""))
     if origin.scheme != "https" or not origin.hostname or origin.username or origin.password or origin.path or origin.query or origin.fragment:
         raise SetupError("Portal origin must be an exact HTTPS origin")
-    if manifest.get("schema") != 1 or manifest.get("platform") != "linux-x64" or manifest.get("releaseId") != enrollment.get("releaseId"):
+    suffix = {"linux-x64": "linux-x64.tar.xz", "windows-x64": "win-x64.zip"}.get(target_platform)
+    if (not suffix or manifest.get("schema") != 1 or manifest.get("platform") != target_platform
+            or enrollment.get("platform", "linux-x64") != target_platform
+            or manifest.get("releaseId") != enrollment.get("releaseId")):
         raise SetupError("Enrollment and runtime release do not match")
     if network.get("schema") != 1 or network.get("nodeId") != node_id or network.get("networkMode") not in ("same-vnet", "peering", "private-link"):
         raise SetupError("Run azure-vnet.py for this invitation first; do not reuse another node's network file")
@@ -100,7 +103,7 @@ def validate_inputs(enrollment, manifest, network):
     distribution = manifest.get("nodeDistribution", {})
     if not re.fullmatch(r"\d+\.\d+\.\d+", version) or not re.fullmatch(r"\d+\.\d+\.\d+", bun):
         raise SetupError("Runtime versions must be pinned")
-    expected_file = f"node-v{version}-linux-x64.tar.xz"
+    expected_file = f"node-v{version}-{suffix}"
     if distribution.get("file") != expected_file or distribution.get("url") != f"https://nodejs.org/dist/v{version}/{expected_file}" or not re.fullmatch(r"[a-f0-9]{64}", distribution.get("sha256", "")):
         raise SetupError("Node must come from the pinned official distribution and checksum")
     artifacts = manifest.get("artifacts", [])

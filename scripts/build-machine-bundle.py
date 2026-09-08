@@ -61,7 +61,8 @@ def build(args):
     work = output / ".build"
     work.mkdir()
     version = dependencies["node"]
-    name = f"node-v{version}-linux-x64.tar.xz"
+    suffix = {"linux-x64": "linux-x64.tar.xz", "windows-x64": "win-x64.zip"}[args.platform]
+    name = f"node-v{version}-{suffix}"
     base = f"https://nodejs.org/dist/v{version}/"
     with urllib.request.urlopen(base + "SHASUMS256.txt", timeout=60) as response:
         sums = response.read().decode()
@@ -75,7 +76,7 @@ def build(args):
     for file, folder in [("copilot-api-source.tar.gz", copilot), ("cloudcli-source.tar.gz", cloudcli)]:
         archive_tree(folder, output / file)
     info = {
-        "schema": 1, "platform": "linux-x64", "node": version,
+        "schema": 1, "platform": args.platform, "node": version,
         "cloudcli": cloudcli_info, "copilotApi": copilot_info,
         "sharedWorkspaceUiRequired": True,
         "bunBuildTool": dependencies["bunBuildTool"],
@@ -95,5 +96,6 @@ def build(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--platform", choices=["linux-x64", "windows-x64"], default="linux-x64")
     parser.add_argument("--allow-reviewed-diff", action="store_true")
     build(parser.parse_args())

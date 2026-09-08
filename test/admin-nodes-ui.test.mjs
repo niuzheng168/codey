@@ -24,10 +24,11 @@ const defaults = [
 ];
 
 function inventory(nodes, generatedAt = now) {
-  const online = nodes.filter((item) => item.status === "online").length;
+  const online = nodes.filter((item) => ["online", "workspace_online"].includes(item.status)).length;
   const stale = nodes.filter((item) => item.status === "stale").length;
   return {
     generatedAt, heartbeatTimeoutMs: 90000, telemetryAvailable: true,
+    workspaceHealthAvailable: nodes.some((item) => item.workspaceHealth),
     summary: { total: nodes.length, owners: new Set(nodes.map((item) => item.owner.id)).size,
       online, stale, unknown: nodes.length - online - stale },
     nodes,
@@ -122,6 +123,25 @@ test("node names, owner labels and version metadata are inserted as text, not ex
   assert.ok(p.rows()[0].textContent.includes(attack));
   assert.ok(p.get("admin-node-owner").textContent.includes(attack));
   assert.equal(p.get("admin-node-list").querySelectorAll("img").length, 0);
+});
+
+test("Windows Workspace health counts as online without claiming an updater heartbeat or unknown component version", async () => {
+  const p = await page({ nodes: [node("local", {
+    name: "windows-devbox", status: "workspace_online", updaterStatus: "not_enrolled", lastSeen: null, releaseId: null,
+    workspaceHealth: { reachable: true, checkedAt: now, version: "1.37.2" },
+    components: { cloudcli: { version: "1.37.2", commit: null, nodeMajor: null, source: "workspace_health" }, copilotApi: null },
+  })] });
+  assert.equal(p.get("admin-node-online").textContent, "1");
+  assert.equal(p.get("admin-node-unknown").textContent, "0");
+  const row = p.rows()[0];
+  assert.match(row.textContent, /windows-devbox.*兼容 ID: local.*Workspace 在线.*健康检查.*未接入升级器/s);
+  assert.ok(!row.textContent.includes("心跳在线"));
+  assert.match(row.children[3].title, /来源：Workspace 健康检查/);
+  assert.match(row.children[4].textContent, /未上报/);
+  p.filter("admin-node-status", "online");
+  assert.equal(p.rows().length, 1);
+  p.filter("admin-node-status", "unknown");
+  assert.equal(p.rows().length, 0);
 });
 
 test("search, owner and status filters combine without changing global totals", async () => {

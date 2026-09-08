@@ -2,6 +2,7 @@ import { X509Certificate } from "node:crypto";
 import { isIP } from "node:net";
 import { checkServerIdentity } from "node:tls";
 import { requestError } from "./signed-store.mjs";
+import { machinePlatform } from "./machine-platforms.mjs";
 
 export const MACHINE_ID = /^n-[a-f0-9]{24}$/;
 export const machineServerName = (id) => `${id}.nodes.codey.internal`;
@@ -16,12 +17,13 @@ export function privateMachineIp(value) {
 // not an editable URL or a caller-supplied CA. TLS must verify it before ANY
 // HTTP request (and therefore any ticket/SSO assertion) reaches the target.
 export function machineIdentity(input, expectedId, now = Date.now()) {
-  const fields = new Set(["schema", "nodeId", "name", "region", "privateIp", "tlsCertificate", "networkMode", "vmResourceId"]);
+  const fields = new Set(["schema", "nodeId", "name", "region", "privateIp", "tlsCertificate", "networkMode", "vmResourceId", "platform"]);
   if (!input || typeof input !== "object" || Array.isArray(input) ||
       Object.keys(input).some((key) => !fields.has(key)) || input.schema !== 1 ||
       !MACHINE_ID.test(expectedId) || input.nodeId !== expectedId) {
     throw requestError("请选择此账号下载的 Skill 生成的 codey-machine.json");
   }
+  const platform = machinePlatform(input.platform ?? "linux-x64").id;
   if (!privateMachineIp(input.privateIp)) throw requestError("机器网关必须使用私网 IPv4，不能使用公网、回环或 metadata 地址");
   const name = typeof input.name === "string" ? input.name.trim() : "";
   const region = typeof input.region === "string" ? input.region.trim() : "";
@@ -59,7 +61,7 @@ export function machineIdentity(input, expectedId, now = Date.now()) {
     }
   } catch { throw requestError("TLS 证书必须是绑定本次机器 ID、有效且非 CA 的独立自签名证书"); }
   return {
-    id: expectedId, name, region, privateIp: input.privateIp,
+    id: expectedId, name, region, platform, privateIp: input.privateIp,
     tlsServerName: serverName, ca: certificate.toString(),
     fingerprint: certificate.fingerprint256,
     networkMode: input.networkMode, vmResourceId: input.vmResourceId,
@@ -77,6 +79,7 @@ export function preparedGateways(node) {
       id: node.id, name: node.name, region: node.region, basePath: `/cloudcli/${node.id}`,
       upstream: new URL(`https://${machine.privateIp}:3001`),
       tlsServerName: machine.tlsServerName, ca: machine.ca, fingerprint: machine.fingerprint,
+      healthMonitoring: !machinePlatform(machine.platform ?? "linux-x64").updater,
     },
   };
 }

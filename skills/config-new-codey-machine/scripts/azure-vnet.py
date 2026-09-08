@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
@@ -23,8 +25,20 @@ class SetupError(RuntimeError):
     pass
 
 
+def az_command():
+    executable = shutil.which("az")
+    if not executable:
+        raise SetupError("Azure CLI is required; use the owner's normal az login")
+    if sys.platform == "win32" and Path(executable).suffix.lower() == ".cmd":
+        python = Path(executable).parent.parent / "python.exe"
+        if not python.is_file():
+            raise SetupError("This Azure CLI installation needs review; no command-shell or authentication fallback")
+        return [str(python), "-X", "utf8", "-I", "-B", "-m", "azure.cli"]
+    return [executable]
+
+
 def az(*args, missing=False):
-    result = subprocess.run(["az", *map(str, args), "--only-show-errors", "-o", "json"],
+    result = subprocess.run([*az_command(), *map(str, args), "--only-show-errors", "-o", "json"],
                             text=True, capture_output=True)
     if result.returncode:
         if missing and any(code in result.stderr for code in ("ResourceNotFound", "NotFound", "ResourceGroupNotFound")):

@@ -5,12 +5,14 @@
 
 ## 用户流程
 
-1. 本人登录，下载个性化轻量 Skill。包内有预留机器身份、两个 Codey fork 的
+1. 本人登录，分别选择 **Windows** 或 **Linux** 个性化轻量 Skill；macOS 入口仅展示
+   “规划中”。包内有预留机器身份、两个 Codey fork 的
    源码/lockfile/许可证、准确版本及校验值、网络和安装脚本。
    **不需要把所有 binary 打包**：Node 从官方发行地址自动下载并核验 SHA-256，
    Bun/npm 依赖按锁文件在独立 release 内安装，Codex 随 CloudCLI 的依赖安装。
 2. Codex 盘点目标机、显示 Azure 网络计划，再在授权范围内配置服务、TLS、SSO、
-   VNet。当前支持目标为 Azure Linux x64；Windows/macOS 可以作为控制端。
+   VNet。目标平台为 Azure Linux x64 或 Windows x64，使用不同的原生安装入口；
+   Windows/macOS 作为控制端管理 Linux 时仍下载 Linux 包。
    缺普通工具由 Codex 按官方方式安装；Azure RBAC、系统权限和本人 provider 登录
    不能通过下载包凭空获得。已有任务、全局 Node/Codex 和其他服务不能被替换。
 3. 本机验证后生成不含签名 key/私钥的 `codey-machine.json`。本人在页面选择文件，
@@ -21,9 +23,41 @@
 七天。每用户最多四个未过期预留。失败后可重新下载同一预留，ID/key/到期时间不变；
 避免重试反复创建身份和 Azure 资源。已取消、过期、已消费或别人的预留不能添加。
 
-安装器只接管自己的未完成安装；`--retry-failed` 不能升级已就绪的服务。
+Linux 安装器只接管自己的未完成安装；`--retry-failed` 不能升级已就绪的服务。
+Windows 的未完成安装必须先人工审查，不自动覆盖；成功安装重跑仅验收。
 没有 Codex 数据库的全新机器返回空 History，不创建假 SQLite schema。
 `copilot-api --headless` 不会在 systemd 中弹 provider 设置，但不会绕过模型身份认证。
+
+## 独立平台入口
+
+| 目标 | 包内入口 | 服务方式 |
+| --- | --- | --- |
+| Windows x64 | `scripts/setup-windows.ps1` | 原 owner 登录后运行的隐藏监督进程；不要求无人登录运行 |
+| Linux x64 | `scripts/setup-linux.sh` | systemd 用户服务；旧 Python 入口保留兼容 |
+| macOS | 尚未实现 | 规划中，不回退到其他平台 |
+
+两个入口默认只输出计划。Windows 执行需显式 `-Apply -NetworkApproved`，Linux 需
+`--apply`；Azure 网络脚本另行确认。Windows 安装器不改防火墙、执行策略或全局
+Node/Python/Codex，也不停止占用端口的已有服务。Windows 包必须使用 `win-x64.zip`
+Node 发行物，Linux 包使用 `linux-x64.tar.xz`；预留、重下和添加都绑定同一平台。
+
+Windows 首次完整安装需要 Python 3.12+、原生 OpenSSL 和必要依赖构建工具。
+新任务使用 InteractiveToken/LeastPrivilege、登录触发器，不使用 boot/SYSTEM/S4U。
+Windows 没有 Linux 签名升级器；不为它分发 Linux 更新包或伪造心跳。
+脚本/规划测试已覆盖的平台不等于在干净机器完成实际安装；发布 Windows 完整包前
+还需验证依赖构建、PTY/SQLite、TLS/SSO、ACA 访问及重新登录自启。
+
+### 既有 Windows Dev Box 的名称与在线依据
+
+既有节点显示名使用 `windows-devbox`；保留历史兼容 ID `local`，不改变 session 路由、
+SSO、密钥或保护规则。当前 Dev Tunnel 已能访问的机器无需重跑首次 VNet 安装器。
+`local` 的 Usage/History 回环地址仍指向打开浏览器的设备，因此浏览器数据页标为
+“浏览器本机”；不能把这个回环入口当成已开放的远程 Windows 用量服务。
+
+节点总览将“升级器心跳”和“Workspace 健康检查”分开：可信 Dev Tunnel/Windows
+节点通过现有 TLS 固定 `/health` 检查可达性，最多缓存 30 秒。不发送用户 Cookie、
+SSO assertion 或模型密钥，失败不沿用在线结果。显示“Workspace 在线”时仍单独注明
+“未接入升级器”，只显示实际健康接口报告的 CloudCLI 版本，不推测 copilot-api 版本。
 
 ## 隔离与网络
 
@@ -51,14 +85,15 @@
 开发者 home、`.env`、缓存或数据库：
 
 ```sh
-python3 scripts/build-machine-bundle.py --output /path/to/new-machine-release
+python3 scripts/build-machine-bundle.py --platform linux-x64 --output /path/to/new-linux-release
+python3 scripts/build-machine-bundle.py --platform windows-x64 --output /path/to/new-windows-release
 ```
 
 开发验证可显式加 `--allow-reviewed-diff` 纳入已审查的 **tracked diff**，manifest
 记录 patch SHA；新源文件须先纳入 Git。生产发布优先使用干净提交。
 这一步只生成几 MB 的源码包和清单；实际 runtime/npm 安装与构建发生在目标机。
 
-在既有持久卷发布固定三个文件（保留旧 release 供正在下载的用户使用）：
+在既有持久卷按平台发布固定三个文件（保留旧 release 供正在下载的用户使用）：
 
 ```text
 /data/machine-bundles/
@@ -67,6 +102,12 @@ python3 scripts/build-machine-bundle.py --output /path/to/new-machine-release
     cloudcli-source.tar.gz
     copilot-api-source.tar.gz
   active.json                 # {"releaseId":"machine-<digest>"}，原子切换
+  platforms/windows-x64/
+    releases/machine-<digest>/
+      manifest.json
+      cloudcli-source.tar.gz
+      copilot-api-source.tar.gz
+    active.json               # Windows 独立指针，不复用 Linux manifest/runtime
 ```
 
 Portal 固定文件名、限制大小、拒绝 symlink/path traversal，下载流重新校验 CRC/SHA。
@@ -88,7 +129,10 @@ PORTAL_MACHINE_NETWORK_CONFIG=/data/machine-network.json
 ```
 
 还必须启用现有 Workspace SSO、data/workspace 网关及已发布的共享 Workspace UI。
-未配置/缺包时页面禁用自动配置下载，不能悄悄返回旧的说明 ZIP。
+未配置/缺包时页面只禁用对应平台下载，不能返回 Linux 代用品或旧的说明 ZIP。
+Windows 使用同源 POST `/api/settings/machines/skill?platform=windows-x64`；
+Linux 保持无参数旧入口兼容，也接受 `platform=linux-x64`。
+平台查询不赋予调用方选择 owner、node ID 或 key 的权限。
 后续依赖包发布可切换 `active.json`；已有机器不被自动升级或重启。
 
 ## 验证

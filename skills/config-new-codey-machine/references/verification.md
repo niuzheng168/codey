@@ -4,8 +4,11 @@
 
 1. 源码包及下载的 Node SHA-256 与 manifest 一致；Node、两个 fork 的 commit/version
    可追溯，npm/Bun 依赖使用锁文件安装，不要求所有 binary 都包含在 ZIP。
-2. 目标机 `codey-copilot-api.service` 和 `codey-cloudcli.service` active/enabled。
+2. Linux 的 `codey-copilot-api.service` 和 `codey-cloudcli.service` active/enabled；
+   Windows 的两个 `Codey Node <nodeId> ...` 任务仅在原 owner 登录后运行，
+   使用 InteractiveToken/LeastPrivilege，没有 boot/SYSTEM/S4U 或执行策略变更。
    `4141` 仅 loopback；`8443/3001` 仅既有 VM 私有 IP；没有修改全局 Node/Codex。
+   Windows 要单独验证注销后不运行、重新登录后自动启动；语法/规划测试不算实机验收。
 3. 本机正确 SNI/CA 的 TLS 握手、带本节点 ticket 的 Usage/History、
    带本 owner 的 Workspace SSO 均通过；匿名请求 401。
 4. Azure 路由按计划建立。Peering 双向 Connected；或 PE Approved，PLS NAT/IP、
@@ -16,9 +19,13 @@
    移除后不能用旧机器文件重新认领；需新的预留身份与明确的机器重配。
 7. 如果用户要模型推理，另验证本人 provider 登录与一次真实请求。
    无 provider 认证不能标“全部就绪”；只读服务和网络通过可单独交付。
-8. `codey-node-updater.service` active/enabled；加机完成后设置页显示升级器在线，
+8. Linux 的 `codey-node-updater.service` active/enabled；加机完成后设置页显示升级器在线，
    owner/ID 和组件/Node 版本正确。私有升级凭据不能登录门户或调用模型，其他账号
    无法排队升级。后续通过页面确认更新，不借首次安装器重装或改变 enrollment。
+   Windows 尚无签名升级器：总览的“Workspace 在线”来自固定 `/health` 的严格 TLS
+   检查，不写入升级器心跳，不推测 copilot-api 版本，也不开放 Linux 更新入口。
+9. Windows 和 Linux 必须使用各自完整包；重下/添加平台与预留身份一致。
+   Windows 包未发布或依赖缺失时明确停止；macOS 仍为规划中，不用 Linux 包代替。
 
 ## 故障定位
 
@@ -28,6 +35,8 @@
 - SSH 超时：保持 SSH/公网规则不变；用用户已授权的 Azure 管理渠道。
 - 地址重叠：PLS 路径，不强行 peering、不改 VM IP/默认路由。
 - `installation.json` ID/release 不匹配、端口/服务被占：停止，不重装未知环境。
+- Windows 防火墙阻止私网访问：先审核精确来源/IP/端口并获得用户确认，不自动放行；
+  现有 Dev Tunnel 节点不用这个首次 VNet 安装器重装。
 - 本机通过、门户添加失败：检查 PE/LB/NSG/UDR/ACA egress；保留机器文件供重试。
   不删除正在工作的节点或重新创建多个邀请绕过失败。
 
@@ -36,9 +45,12 @@
 - 未添加的配置包：在门户“待配置身份”取消，立即拒绝该 ID 后续添加。
   包有签名 key，应从 Downloads/临时传输位置移入 owner 受保护目录或删除多余副本。
 - 已添加的机器：本人在页面移除；撤销门户访问，但不关 VM、不删项目/会话。
-- 本次首次安装：只 disable/stop `codey-copilot-api.service` 和
+- Linux 本次首次安装：只 disable/stop `codey-copilot-api.service` 和
   `codey-cloudcli.service`、`codey-node-updater.service`；仅在它们确属本次新建时操作。
   保留 `.codex`、业务数据、证书与诊断，别清理用户目录。
+- Windows 本次首次安装：只停止/删除本次新建的、身份/owner/启动路径全部匹配的
+  `Codey Node <nodeId> copilot-api` 和 `Codey Node <nodeId> workspace` 登录任务。
+  不接管原有任务、终止其他进程或递归删除安装目录。现有 Dev Box 服务不在回退范围。
 - Azure：依据对应 `.azure-state.json` 逐项审核本次新建资源。先移除本次 NSG rules，
   PE → PLS → 本次 NIC backend association → LB → 专属 /28；不要删 NIC 或原 subnet。
   删除前核实 node-specific name/ownership tags 与当前引用，避免删除后来已复用的资源。

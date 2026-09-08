@@ -11,7 +11,7 @@ const labels = {
   waiting_idle: "等待任务空闲", applying: "切换中", verifying: "验收中", succeeded: "升级成功",
   failed: "升级失败", rolled_back: "已恢复旧版本", needs_action: "需要人工处理",
   needs_migration: "需要配置迁移", cancelled: "已取消",
-  needs_setup: "尚未接入升级器", protected_local: "本机受保护", no_release: "暂无发行版",
+  needs_setup: "尚未接入升级器", protected_local: "受保护节点", no_release: "暂无发行版",
   up_to_date: "已是目标版本", unsupported_platform: "平台不支持", runtime_incompatible: "Node 运行时不兼容",
   model_auth_migration_required: "需先迁移模型 API key/调用方", migration_unsupported: "升级器尚不支持此迁移",
   model_login_required: "需先完成本人模型登录", configuration_changed: "节点配置已改变，请检查",
@@ -136,7 +136,7 @@ if (root) {
       update.setAttribute("id", `node-update-button-${node.id}`);
       update.addEventListener("click", () => preview([node.id]));
       actions.append(update);
-      if (!node.protected) {
+      if (!node.protected && node.updaterSupported !== false) {
         const menu = element("details", null, "updater-menu");
         menu.dataset.nodeId = node.id;
         menu.open = openMenus.has(node.id);

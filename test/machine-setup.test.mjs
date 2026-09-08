@@ -20,6 +20,7 @@ import { CloudCliGateway } from "../src/cloudcli-gateway.mjs";
 import { crc32, zipStream } from "../src/zip-stream.mjs";
 import { fetchNodeJson } from "../public/node-transport.js";
 import { MachineUpdates } from "../src/machine-updates.mjs";
+import { MACHINE_PLATFORMS } from "../src/machine-platforms.mjs";
 
 const run = promisify(execFile);
 const origin = "https://codey.example.test";
@@ -30,13 +31,22 @@ const network = {
   privateEndpointSubnetId: `${resourceRoot}/subnets/endpoints`,
 };
 
+test("the Portal image includes every platform helper that its download catalog promises", async () => {
+  const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
+  const copied = new Set(dockerfile.split(/\r?\n/).filter((line) => /^COPY /.test(line))
+    .flatMap((line) => line.trim().split(/\s+/).slice(1, -1)));
+  for (const file of [...MACHINE_SKILL_FILES, ...MACHINE_PLATFORMS.flatMap((platform) => platform.files)]) {
+    assert.ok(copied.has(`skills/config-new-codey-machine/${file}`), `Missing image input: ${file}`);
+  }
+});
+
 async function temporary(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), "codey-machine-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }
 
-async function bundle(root) {
+async function bundle(root, platform = "linux-x64") {
   await mkdir(root, { recursive: true });
   const artifacts = [];
   for (const file of ["cloudcli-source.tar.gz", "copilot-api-source.tar.gz"]) {
@@ -45,12 +55,13 @@ async function bundle(root) {
     artifacts.push({ file, size: bytes.length, crc32: crc32(bytes), sha256: createHash("sha256").update(bytes).digest("hex") });
   }
   const manifest = {
-    schema: 1, platform: "linux-x64",
+    schema: 1, platform,
     node: "24.20.0", cloudcli: { version: "test-cloudcli" }, copilotApi: { version: "test-copilot" }, artifacts,
     bunBuildTool: "1.4.2", dependencyMode: "install-on-target",
     nodeDistribution: {
-      file: "node-v24.20.0-linux-x64.tar.xz",
-      url: "https://nodejs.org/dist/v24.20.0/node-v24.20.0-linux-x64.tar.xz", sha256: "a".repeat(64),
+      file: platform === "windows-x64" ? "node-v24.20.0-win-x64.zip" : "node-v24.20.0-linux-x64.tar.xz",
+      url: `https://nodejs.org/dist/v24.20.0/node-v24.20.0-${platform === "windows-x64" ? "win-x64.zip" : "linux-x64.tar.xz"}`,
+      sha256: (platform === "windows-x64" ? "b" : "a").repeat(64),
     },
   };
   manifest.releaseId = machineReleaseId(manifest);
@@ -204,6 +215,52 @@ test("complete skill download reserves only this user's identity, includes depen
   assert.equal(again.expiresAt, enrollment.expiresAt);
   assert.equal((await f.policy.pendingMachines(f.member.id)).length, 1);
   assert.equal((await f.request(`/api/settings/machines/${enrollment.nodeId}/skill`, { method: "POST", user: f.admin })).status, 404);
+});
+
+test("Windows and Linux have separate native downloads; macOS is planned and never falls back", async (t) => {
+  const f = await fixture(t);
+  const initial = (await (await f.request("/api/settings")).json()).machineSetup;
+  assert.equal(initial.platforms.find((item) => item.platform === "linux-x64").enabled, true);
+  assert.equal(initial.platforms.find((item) => item.platform === "windows-x64").enabled, false);
+  assert.equal(initial.platforms.find((item) => item.platform === "macos").planned, true);
+  for (const value of ["macos", "darwin", "../linux-x64", ""]) {
+    assert.equal((await f.request("/api/settings/machines/skill?platform=" + encodeURIComponent(value),
+      { method: "POST" })).status, 400);
+  }
+  assert.equal((await f.request("/api/settings/machines/skill?platform=windows-x64", { method: "POST" })).status, 503);
+  assert.equal((await f.policy.pendingMachines(f.member.id)).length, 0, "Unavailable/wrong platforms do not reserve IDs");
+  await bundle(path.join(f.bundleRoot, "platforms/windows-x64"), "windows-x64");
+  const response = await f.request("/api/settings/machines/skill?platform=windows-x64", { method: "POST" });
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-disposition"), /config-new-codey-machine-windows-n-/);
+  const files = unzip(Buffer.from(await response.arrayBuffer()));
+  for (const file of ["setup-windows.ps1", "configure-windows.py", "windows-service.py", "windows-tasks.ps1"]) {
+    assert.ok(files.has("config-new-codey-machine/scripts/" + file));
+  }
+  assert.ok(!files.has("config-new-codey-machine/scripts/setup-linux.sh"));
+  assert.ok(![...files.keys()].some((name) => name.includes("assets/codey-updater/")));
+  const enrollment = JSON.parse(files.get("config-new-codey-machine/assets/enrollment.json"));
+  assert.equal(enrollment.platform, "windows-x64");
+  assert.equal((await f.policy.pendingMachines(f.member.id))[0].platform, "windows-x64");
+  const again = await f.request(`/api/settings/machines/${enrollment.nodeId}/skill`, { method: "POST" });
+  assert.equal(again.status, 200);
+  assert.match(again.headers.get("content-disposition"), /-windows-n-/);
+  const repeated = JSON.parse(unzip(Buffer.from(await again.arrayBuffer())).get("config-new-codey-machine/assets/enrollment.json"));
+  assert.equal(repeated.clientSigningKey, enrollment.clientSigningKey);
+  assert.equal(repeated.nodeId, enrollment.nodeId);
+  assert.equal((await f.request(`/api/settings/machines/${enrollment.nodeId}/skill?platform=linux-x64`,
+    { method: "POST" })).status, 409);
+  const machine = await machineFile(f.root, enrollment.nodeId);
+  assert.equal((await f.request(`/api/settings/machines/${enrollment.nodeId}/activate`,
+    { method: "POST", value: machine })).status, 400);
+  assert.equal(f.probes.length, 0);
+  const activation = await f.request(`/api/settings/machines/${enrollment.nodeId}/activate`,
+    { method: "POST", value: { ...machine, platform: "windows-x64" } });
+  assert.equal(activation.status, 201);
+  assert.equal((await activation.json()).node.platform, "windows-x64");
+  assert.equal(f.workspace.match(`/cloudcli/${enrollment.nodeId}/`).healthMonitoring, true);
+  await assert.rejects(f.machineSetup.machineUpdates.bootstrap(f.member.id, enrollment.nodeId), { status: 409 });
+  assert.equal((await f.machineSetup.machineUpdates.store.read()).data.devices[enrollment.nodeId], undefined);
 });
 
 test("machine downloads reject anonymous/forged/cross-origin requests, caller identities, wrong methods and logout", async (t) => {
