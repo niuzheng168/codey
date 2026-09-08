@@ -81,6 +81,79 @@ test("session records are tamper-evident, persist across replicas, and are revok
   cleanup();
 });
 
+test("default sessions keep a secure cookie for 30 days and survive authenticator restart", async (t) => {
+  let clock = Date.UTC(2026, 8, 8);
+  const startedAt = clock;
+  const auth = await authenticator(t, { clock: () => clock });
+  const login = await auth.login("zhn", password);
+  const request = cookieRequest(cookieValue(login));
+  const expiresAt = startedAt + 30 * 24 * 60 * 60 * 1000;
+  assert.equal(login.principal.expiresAt, expiresAt);
+  assert.match(login.cookie, /; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000$/);
+  const file = path.join(auth.root, "sessions", `${login.principal.sessionId}.json`);
+  assert.equal(JSON.parse(await readFile(file, "utf8")).expiresAt, expiresAt);
+
+  clock += 9 * 60 * 60 * 1000;
+  const restarted = new PasswordAuthenticator({
+    credential, root: auth.root, publicBaseUrl: origin, clock: () => clock,
+    staticRoot: path.resolve("public"),
+  });
+  assert.deepEqual(await restarted.principal(request), login.principal);
+});
+
+test("default sessions expire after exactly 48 hours without authenticated activity", async (t) => {
+  let clock = Date.UTC(2026, 8, 8);
+  const auth = await authenticator(t, { clock: () => clock });
+  const login = await auth.login("zhn", password);
+  const request = cookieRequest(cookieValue(login));
+  clock += 48 * 60 * 60 * 1000 - 1000;
+  assert.deepEqual(await auth.principal(request, { touch: false }), login.principal);
+  clock += 1000;
+  assert.equal(await auth.principal(request), null);
+});
+
+test("authenticated activity slides the idle window but never the 30-day absolute deadline", async (t) => {
+  let clock = Date.UTC(2026, 8, 8);
+  const startedAt = clock;
+  const dayMs = 24 * 60 * 60 * 1000;
+  const auth = await authenticator(t, { clock: () => clock });
+  const login = await auth.login("zhn", password);
+  const request = cookieRequest(cookieValue(login));
+  for (let day = 1; day < 30; day++) {
+    clock = startedAt + day * dayMs;
+    assert.deepEqual(await auth.principal(request), login.principal, `session remains active on day ${day}`);
+  }
+  clock = startedAt + 30 * dayMs - 1000;
+  assert.deepEqual(await auth.principal(request), login.principal);
+  const file = path.join(auth.root, "sessions", `${login.principal.sessionId}.json`);
+  assert.equal(JSON.parse(await readFile(file, "utf8")).expiresAt, startedAt + 30 * dayMs);
+  clock += 1000;
+  assert.equal(await auth.principal(request), null);
+});
+
+test("updated defaults preserve a pre-existing session's signed absolute deadline", async (t) => {
+  let clock = Date.UTC(2026, 8, 8);
+  const startedAt = clock;
+  const hourMs = 60 * 60 * 1000;
+  const legacy = await authenticator(t, {
+    clock: () => clock, sessionTtlMs: 8 * hourMs, idleTtlMs: 30 * 60 * 1000,
+  });
+  const login = await legacy.login("zhn", password);
+  const request = cookieRequest(cookieValue(login));
+  const file = path.join(legacy.root, "sessions", `${login.principal.sessionId}.json`);
+  const original = await readFile(file, "utf8");
+  const updated = new PasswordAuthenticator({
+    credential, root: legacy.root, publicBaseUrl: origin, clock: () => clock,
+    staticRoot: path.resolve("public"),
+  });
+  assert.deepEqual(await updated.principal(request), login.principal);
+  clock = startedAt + 7 * hourMs;
+  assert.deepEqual(await updated.principal(request), login.principal);
+  assert.equal(await readFile(file, "utf8"), original);
+  clock = startedAt + 8 * hourMs;
+  assert.equal(await updated.principal(request), null);
+});
+
 test("absolute/idle expiration and periodic connection lease checks fail closed", async (t) => {
   let clock = Date.now();
   const auth = await authenticator(t, { clock: () => clock, sessionTtlMs: 20000, idleTtlMs: 10000, leaseIntervalMs: 10 });

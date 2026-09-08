@@ -83,7 +83,7 @@ async function loginBody(req) {
 
 /** Password-mode authentication, shared by HTTP routes and Workspace upgrades. */
 export class PasswordAuthenticator {
-  constructor({ credential, accountStore, root, publicBaseUrl, staticRoot, clock = Date.now, sessionTtlMs = 8 * 60 * 60 * 1000, idleTtlMs = 30 * 60 * 1000, leaseIntervalMs = 5000 }) {
+  constructor({ credential, accountStore, root, publicBaseUrl, staticRoot, clock = Date.now, sessionTtlMs = 30 * 24 * 60 * 60 * 1000, idleTtlMs = 48 * 60 * 60 * 1000, leaseIntervalMs = 5000 }) {
     if (!credential || !/^[a-z][a-z0-9_-]{0,31}$/.test(credential.username ?? "") ||
         !/^[a-z0-9-]{1,80}$/.test(credential.principalId ?? "")) {
       throw new Error("A single valid password account is required");
