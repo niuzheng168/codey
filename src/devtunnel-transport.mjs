@@ -67,7 +67,9 @@ function loadSdk() {
 
 class TunnelHttpsAgent extends https.Agent {
   constructor(transport) {
-    super({ keepAlive: true, maxSockets: 32, maxFreeSockets: 4, maxCachedSessions: 0 });
+    // Relay streams can report the host's idle close only on their next write.
+    // Reuse the relay client, not HTTP TLS sockets; upgraded WebSockets stay open.
+    super({ keepAlive: false, maxSockets: 32, maxCachedSessions: 0 });
     this.transport = transport;
   }
 

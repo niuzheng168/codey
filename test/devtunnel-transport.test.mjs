@@ -8,6 +8,7 @@ import https from "node:https";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { Duplex } from "node:stream";
 import test from "node:test";
 import { promisify } from "node:util";
 import { CancellationTokenSource } from "@microsoft/dev-tunnels-ssh";
@@ -70,8 +71,8 @@ test("only a live connect-only token for the exact tunnel is accepted, without l
   }
 });
 
-function sdkFixture(port, { metadataError, neverConnect = false } = {}) {
-  const observed = { clients: [], metadata: [], forwarded: [], sockets: new Set() };
+function sdkFixture(port, { metadataError, neverConnect = false, deferRemoteEof = false } = {}) {
+  const observed = { clients: [], metadata: [], forwarded: [], connections: 0, sockets: new Set() };
   class Management {
     async getTunnel(reference, options) {
       observed.metadata.push({ reference, options });
@@ -103,10 +104,31 @@ function sdkFixture(port, { metadataError, neverConnect = false } = {}) {
     async waitForForwardedPort(portNumber) { assert.equal(portNumber, 3001); }
     async connectToForwardedPort(portNumber) {
       assert.equal(portNumber, 3001);
+      observed.connections++;
       const socket = net.connect(port, "127.0.0.1");
       observed.sockets.add(socket);
       socket.once("close", () => observed.sockets.delete(socket));
       await once(socket, "connect");
+      if (deferRemoteEof) {
+        // A relay stream can report the host's idle close only on the next write.
+        // Keep it apparently readable to reproduce the stale HTTPS-agent socket.
+        const stream = new Duplex({
+          read() {},
+          write(chunk, encoding, callback) {
+            if (socket.destroyed || socket.writableEnded) {
+              callback(Object.assign(new Error("Simulated idle relay close"), { code: "ECONNRESET" }));
+            } else {
+              socket.write(chunk, encoding, callback);
+            }
+          },
+          destroy(error, callback) { socket.destroy(); callback(error); },
+        });
+        socket.on("data", chunk => stream.push(chunk));
+        socket.on("error", error => stream.destroy(error));
+        observed.sockets.add(stream);
+        stream.once("close", () => observed.sockets.delete(stream));
+        return stream;
+      }
       return socket;
     }
     async dispose() {
@@ -288,6 +310,39 @@ test("a bad node TLS name or pinned certificate rejects the tunnel before any HT
     await assert.rejects(transport.openTlsSocket(), { code: "ERR_CODEY_DEV_TUNNEL" });
   }
   assert.equal(requests, 0);
+});
+
+test("HTTP requests do not reuse idle relay-backed TLS sockets while retaining one tunnel client", async t => {
+  const fixture = await tlsFixture(t);
+  const upstream = https.createServer(fixture, (req, res) => {
+    // Keep the real host's advertised timeout; shorten only the test's idle timer.
+    res.setHeader("Keep-Alive", "timeout=5");
+    const socket = req.socket;
+    res.once("finish", () => setTimeout(() => socket.destroy(), 30).unref());
+    res.end("ok");
+  });
+  const sdk = sdkFixture(await listen(t, upstream), { deferRemoteEof: true });
+  const options = nodeTlsOptions({ tlsServerName: "localhost", fingerprint: fixture.fingerprint }, fixture.cert);
+  const transport = new DevTunnelTransport(tunnelConfig, options, {
+    getToken: () => token(), sdkFactory: sdk.sdkFactory, timeoutMs: 1000,
+  });
+  t.after(() => transport.dispose());
+  const responses = [];
+  for (const delay of [0, 100, 100]) {
+    if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+    responses.push(await new Promise((resolve, reject) => {
+      const req = https.get("https://localhost:3001/health", { ...options, agent: transport.agent }, res => {
+        res.resume();
+        res.once("end", () => resolve({ status: res.statusCode, reusedSocket: req.reusedSocket }));
+      });
+      req.setTimeout(1000, () => req.destroy(new Error("Test request deadline")));
+      req.once("error", reject);
+    }));
+  }
+  assert.deepEqual(responses, Array.from({ length: 3 }, () => ({ status: 200, reusedSocket: false })));
+  assert.equal(sdk.observed.connections, 3, "Each HTTP request uses a new pinned TLS stream");
+  assert.equal(sdk.observed.clients.length, 1, "HTTP isolation must not reconnect the underlying relay client");
+  assert.equal(Object.keys(transport.agent.freeSockets).length, 0);
 });
 
 test("SDK failures are credential-safe and failed or hanging connections are bounded and disposed", async t => {
