@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { packageCloudCliUi } from "../../scripts/build-cloudcli-ui.mjs";
 
-export async function uiFixture(t, release = "ui-one") {
+export async function uiFixture(t, release = "ui-one", { title = "CloudCLI UI" } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "codey-ui-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const built = path.join(root, "built");
@@ -12,7 +12,7 @@ export async function uiFixture(t, release = "ui-one") {
   await mkdir(path.join(built, "icons"));
   const base = `/cloudcli-ui/${release}/`;
   const files = {
-    "index.html": `<!doctype html><html><head><link rel="manifest" href="${base}manifest.json"><script type="module" src="${base}assets/app.js"></script></head><body><div id="root"></div><script id="cloudcli-runtime">window.__CLOUDCLI_BASE_PATH__='${base}';</script></body></html>`,
+    "index.html": `<!doctype html><html><head>${title === null ? "" : `<title>${title}</title>`}<link rel="manifest" href="${base}manifest.json"><script type="module" src="${base}assets/app.js"></script></head><body><div id="root"></div><script id="cloudcli-runtime">window.__CLOUDCLI_BASE_PATH__='${base}';</script></body></html>`,
     "assets/app.js": "window.TEST_SHARED_UI=true;",
     "icons/icon.png": "test-png",
     "logo.svg": "<svg></svg>",

@@ -35,6 +35,39 @@ export class SettingsApi {
     Object.assign(this, { accounts, nodePolicy, authenticator, cloudCliGateway, nodeDataGateway, machineSetup, machineUpdates });
   }
 
+  async adminNodes() {
+    const [registered, users] = await Promise.all([this.nodePolicy.inventory(), this.accounts.list()]);
+    const owners = new Map(users.map((user) => [user.id, user]));
+    const snapshot = await this.machineUpdates?.inventory(registered);
+    const nodes = registered.map(({ id, name, region, ownerId }) => {
+      const owner = owners.get(ownerId);
+      const metadata = snapshot?.nodes.get(id);
+      return {
+        id, name, region,
+        owner: { id: ownerId, username: owner?.username ?? null, enabled: owner?.enabled ?? false },
+        status: !owner ? "unknown" : !owner.enabled ? "owner_disabled" : metadata?.status ?? "unavailable",
+        lastSeen: metadata?.lastSeen ?? null,
+        releaseId: metadata?.releaseId ?? null,
+        components: {
+          cloudcli: metadata?.components.cloudcli ?? null,
+          copilotApi: metadata?.components.copilotApi ?? null,
+        },
+      };
+    });
+    const online = nodes.filter((node) => node.status === "online").length;
+    const stale = nodes.filter((node) => node.status === "stale").length;
+    return {
+      generatedAt: snapshot?.generatedAt ?? Date.now(),
+      heartbeatTimeoutMs: snapshot?.heartbeatTimeoutMs ?? null,
+      telemetryAvailable: Boolean(snapshot),
+      summary: {
+        total: nodes.length, owners: new Set(nodes.map((node) => node.owner.id)).size,
+        online, stale, unknown: nodes.length - online - stale,
+      },
+      nodes,
+    };
+  }
+
   async handle(req, res) {
     const pathname = new URL(req.url, "http://portal.local").pathname;
     if (!pathname.startsWith("/api/settings") && !pathname.startsWith("/api/admin/")) return false;
@@ -44,7 +77,7 @@ export class SettingsApi {
       if (this.machineUpdates && await this.machineUpdates.handleOwner(req, res)) return true;
       if (this.machineSetup && await this.machineSetup.handle(req, res)) return true;
       if (pathname.startsWith("/api/admin/") && principal.role !== "admin") {
-        throw requestError("只有管理员可以管理账号", 403);
+        throw requestError("只有管理员可以访问全局管理", 403);
       }
       if (pathname === "/api/settings" && req.method === "GET") {
         const nodes = await this.nodePolicy.list(principal.id);
@@ -60,6 +93,11 @@ export class SettingsApi {
           machineSetup: this.machineSetup ? await this.machineSetup.availability() : { enabled: false },
           pendingMachines: await this.nodePolicy.pendingMachines(principal.id),
         });
+        return true;
+      }
+      if (pathname === "/api/admin/nodes") {
+        if (req.method !== "GET") throw requestError("节点总览仅支持只读查询", 405);
+        send(res, 200, await this.adminNodes());
         return true;
       }
       if (pathname === "/api/admin/users") {

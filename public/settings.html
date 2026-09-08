@@ -8,6 +8,7 @@
     <link rel="icon" href="/favicon.svg" />
     <link rel="stylesheet" href="/settings.css" />
     <script type="module" src="/settings.js"></script>
+    <script type="module" src="/admin-nodes.js"></script>
     <script type="module" src="/machine-updates.js"></script>
     <script type="module" src="/portal-session.js"></script>
   </head>
@@ -26,7 +27,7 @@
         <button id="nodes-tab" type="button" role="tab" data-settings-panel="nodes" aria-controls="nodes" aria-selected="true">我的节点 <span id="nodes-count" class="tab-count">—</span></button>
         <button id="updates-tab" type="button" role="tab" data-settings-panel="machine-updates" aria-controls="machine-updates" aria-selected="false" tabindex="-1">软件更新 <span id="node-update-count" class="tab-count" hidden><span id="node-update-count-label" class="count-label"></span><span id="node-update-count-compact" class="count-compact" aria-hidden="true"></span></span></button>
         <button id="account-tab" type="button" role="tab" data-settings-panel="account" aria-controls="account" aria-selected="false" tabindex="-1">账号安全</button>
-        <button id="admin-tab" type="button" role="tab" data-settings-panel="admin-section" aria-controls="admin-section" aria-selected="false" tabindex="-1" hidden>用户管理</button>
+        <button id="admin-tab" type="button" role="tab" data-settings-panel="admin-section" aria-controls="admin-section" aria-selected="false" tabindex="-1" hidden>全局管理</button>
       </div>
       <p id="settings-message" role="status" aria-live="polite"></p>
 
@@ -34,7 +35,7 @@
         <div class="panel-heading">
           <div>
             <h2 id="nodes-heading">我的节点</h2>
-            <p class="muted">查看连接配置，展开节点以编辑设置。</p>
+            <p class="muted">查看节点服务入口，展开节点以编辑设置。</p>
           </div>
           <button id="open-add-node" class="primary" type="button" aria-haspopup="dialog" aria-controls="add-node">＋ 添加节点</button>
         </div>
@@ -81,23 +82,78 @@
       </section>
 
       <section id="admin-section" class="settings-panel" role="tabpanel" aria-labelledby="admin-tab" tabindex="0" hidden>
-        <div class="panel-heading">
-          <div>
-            <h2 id="users-heading">用户管理 <span id="users-count" class="tab-count"></span></h2>
-            <p class="muted">仅管理员可创建和停用账号。</p>
-          </div>
+        <div class="admin-tabs" role="tablist" aria-label="全局管理分类">
+          <button id="admin-nodes-tab" type="button" role="tab" data-admin-panel="admin-nodes-panel" aria-controls="admin-nodes-panel" aria-selected="true">节点总览</button>
+          <button id="admin-users-tab" type="button" role="tab" data-admin-panel="admin-users-panel" aria-controls="admin-users-panel" aria-selected="false" tabindex="-1">用户管理</button>
         </div>
-        <details id="create-user" class="secondary-details create-user">
-          <summary>＋ 创建用户</summary>
-          <form id="create-user-form" class="form-grid">
-            <label>用户名<input name="username" autocomplete="off" minlength="3" maxlength="32" pattern="[a-z][a-z0-9_-]{2,31}" placeholder="alice" required /></label>
-            <label>初始密码<input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" aria-describedby="new-user-help" required /></label>
-            <p id="new-user-help" class="muted form-note">密码至少 12 个字符。新账号没有节点，也不会继承你的节点或未共享会话。</p>
-            <button class="primary" type="submit">创建用户</button>
-          </form>
-        </details>
-        <div id="users-list"></div>
-        <p class="panel-footnote">Shared 为已登录用户共用的只读区；管理员可管理 Shared。管理员也不能借节点名称访问他人的数据。</p>
+
+        <section id="admin-nodes-panel" role="tabpanel" aria-labelledby="admin-nodes-tab" tabindex="0" hidden>
+          <div class="panel-heading">
+            <div>
+              <h2>全局节点 <span class="badge">只读</span></h2>
+              <p class="muted">所有用户已添加的节点，含停用账号；不含待配置或已移除节点。</p>
+            </div>
+            <button id="admin-node-refresh" class="quiet" type="button">刷新</button>
+          </div>
+          <div class="inventory-summary" role="group" aria-label="全局节点统计">
+            <span><strong id="admin-node-total">—</strong> 台节点</span>
+            <span><strong id="admin-node-owners">—</strong> 位所属用户</span>
+            <span><strong id="admin-node-online">—</strong> 心跳在线</span>
+            <span><strong id="admin-node-stale">—</strong> 心跳超时</span>
+            <span><strong id="admin-node-unknown">—</strong> 状态未知</span>
+          </div>
+          <div class="inventory-filters">
+            <label class="inventory-search">搜索<input id="admin-node-search" type="search" maxlength="120" placeholder="名称、ID、用户或版本" disabled /></label>
+            <label>所属用户<select id="admin-node-owner" disabled><option value="">全部用户</option></select></label>
+            <label>上报状态<select id="admin-node-status" disabled>
+              <option value="">全部状态</option>
+              <option value="online">心跳在线</option>
+              <option value="stale">心跳超时</option>
+              <option value="unknown">状态未知</option>
+            </select></label>
+          </div>
+          <p id="admin-node-message" class="muted" role="status" aria-live="polite">选择节点总览以读取状态。</p>
+          <p class="inventory-scroll-hint muted" aria-hidden="true">左右滑动查看状态与版本 →</p>
+          <div class="inventory-scroll" tabindex="0" role="region" aria-label="全局节点版本表，可横向滚动" aria-describedby="admin-node-help">
+            <table class="inventory-table">
+              <caption>所属用户、升级器心跳与最近上报的节点软件版本</caption>
+              <thead><tr>
+                <th scope="col">节点</th><th scope="col">所属用户</th><th scope="col">上报状态</th>
+                <th scope="col">CloudCLI <span class="muted">节点端</span></th><th scope="col">copilot-api</th>
+              </tr></thead>
+              <tbody id="admin-node-list"></tbody>
+            </table>
+          </div>
+          <div class="inventory-pagination">
+            <span id="admin-node-results" class="muted"></span>
+            <div>
+              <button id="admin-node-prev" class="quiet" type="button" aria-label="上一页节点" disabled>上一页</button>
+              <span id="admin-node-page" class="muted" aria-live="polite"></span>
+              <button id="admin-node-next" class="quiet" type="button" aria-label="下一页节点" disabled>下一页</button>
+            </div>
+          </div>
+          <p id="admin-node-help" class="panel-footnote">心跳仅代表升级器近期上报，不代表模型或服务健康。版本为最近上报值，不是目标发行版；超时或停止上报后可能已过期，未接入的节点显示未知。共享 Workspace UI 独立发布。此总览不提供连接、会话、密钥或跨用户更新权限。</p>
+        </section>
+
+        <section id="admin-users-panel" role="tabpanel" aria-labelledby="admin-users-tab" tabindex="0" hidden>
+          <div class="panel-heading">
+            <div>
+              <h2 id="users-heading">用户管理 <span id="users-count" class="tab-count"></span></h2>
+              <p class="muted">仅管理员可创建和停用账号。停用账号不会关闭其机器。</p>
+            </div>
+          </div>
+          <details id="create-user" class="secondary-details create-user">
+            <summary>＋ 创建用户</summary>
+            <form id="create-user-form" class="form-grid">
+              <label>用户名<input name="username" autocomplete="off" minlength="3" maxlength="32" pattern="[a-z][a-z0-9_-]{2,31}" placeholder="alice" required /></label>
+              <label>初始密码<input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" aria-describedby="new-user-help" required /></label>
+              <p id="new-user-help" class="muted form-note">密码至少 12 个字符。新账号没有节点，也不会继承你的节点或未共享会话。</p>
+              <button class="primary" type="submit">创建用户</button>
+            </form>
+          </details>
+          <div id="users-list"></div>
+          <p class="panel-footnote">Shared 为已登录用户共用的只读区；管理员可管理 Shared。全局节点元数据可见，但他人节点的连接与私有数据仍按归属隔离。</p>
+        </section>
       </section>
 
       <dialog id="add-node" class="setup-dialog" aria-labelledby="add-node-title" aria-describedby="add-node-description">

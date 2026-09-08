@@ -44,6 +44,7 @@ const STATIC_FILES = new Map([
   ["/portal-features.js", ["portal-features.js", "text/javascript; charset=utf-8"]],
   ["/settings", ["settings.html", "text/html; charset=utf-8"]],
   ["/settings.js", ["settings.js", "text/javascript; charset=utf-8"]],
+  ["/admin-nodes.js", ["admin-nodes.js", "text/javascript; charset=utf-8"]],
   ["/machine-updates.js", ["machine-updates.js", "text/javascript; charset=utf-8"]],
   ["/settings.css", ["settings.css", "text/css; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],

@@ -195,6 +195,39 @@ dialog > h2 { margin-bottom: 12px; }
 .pending-machine { flex-wrap: wrap; gap: 8px; }
 .pending-machine > span { flex-basis: 100%; font: 12px/1.6 ui-monospace, monospace; }
 
+.admin-tabs { display: flex; gap: 6px; margin-bottom: 22px; }
+.admin-tabs [role="tab"] { background: transparent; border-color: transparent; color: var(--muted); }
+.admin-tabs [aria-selected="true"] { color: var(--accent); border-color: #295062; background: #102a36; }
+.inventory-summary { display: flex; flex-wrap: wrap; gap: 8px 26px; padding: 14px 0; margin-bottom: 16px; border-block: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+.inventory-summary strong { margin-right: 4px; font-size: 22px; font-weight: 600; color: #e2e8f0; font-variant-numeric: tabular-nums; }
+#admin-node-online { color: #6ee7b7; }
+#admin-node-stale { color: #fcd69a; }
+.inventory-filters { display: grid; grid-template-columns: minmax(0, 2fr) repeat(2, minmax(0, 1fr)); gap: 12px; }
+#admin-node-message { margin: 12px 0; font-size: 12px; overflow-wrap: anywhere; }
+#admin-node-message.error { color: #fda4af; }
+.inventory-scroll { overflow-x: auto; overscroll-behavior-x: contain; }
+.inventory-scroll-hint { display: none; font-size: 12px; margin-bottom: 8px; }
+.inventory-table { width: 100%; min-width: 700px; border-collapse: collapse; table-layout: fixed; text-align: left; font-size: 13px; }
+.inventory-table caption { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.inventory-table th { padding: 8px; color: var(--muted); font-size: 12px; font-weight: 500; background: #0c1422; }
+.inventory-table th:first-child { width: 26%; }
+.inventory-table th:nth-child(2) { width: 14%; }
+.inventory-table td { padding: 12px 8px; vertical-align: top; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.inventory-table td > strong, .inventory-table td > span, .inventory-table td > code { display: block; }
+.inventory-table td > strong { font-weight: 500; }
+.inventory-table td > code, .inventory-table td > .muted { margin-top: 3px; font-size: 11px; }
+.inventory-table code { color: var(--muted); font-family: ui-monospace, "Cascadia Code", monospace; }
+.inventory-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inventory-version { font-family: ui-monospace, "Cascadia Code", monospace; }
+.inventory-status { font-size: 12px; color: #cbd5e1; }
+.inventory-status.online { color: #6ee7b7; }
+.inventory-status.stale { color: #fcd69a; }
+.inventory-table .inventory-empty { padding: 28px 12px; color: var(--muted); text-align: center; }
+.inventory-pagination { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; margin-top: 12px; }
+.inventory-pagination > div { display: flex; align-items: center; gap: 8px; }
+.inventory-pagination button { font-size: 12px; }
+#admin-node-page { font-variant-numeric: tabular-nums; }
+
 #settings-message, #machine-download-message, #machine-activation-message { color: #6ee7b7; overflow-wrap: anywhere; font-size: 13px; }
 #settings-message { padding: 10px 14px; margin: 16px 0 0; border: 1px solid #28474b; border-radius: 8px; background: #0e242b; }
 #settings-message.error { border-color: #633347; background: #281724; }
@@ -234,6 +267,7 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; background:
   .node-endpoint { display: none; }
   .node-update-row { grid-template-columns: minmax(100px, .6fr) minmax(160px, 1fr) auto; gap: 12px; }
   .update-toolbar .release-picker { flex-basis: 100%; }
+  .inventory-scroll-hint { display: block; }
 }
 
 @media (max-width: 640px) {
@@ -268,4 +302,9 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; background:
   .node-update-info { grid-column: 1 / -1; grid-row: 2; padding-left: 26px; }
   .update-actions { grid-column: 2; grid-row: 1; gap: 2px; }
   .update-actions > button { padding: 6px 8px; font-size: 12px; }
+  .admin-tabs { margin-bottom: 18px; }
+  .inventory-summary { gap: 4px 18px; }
+  .inventory-summary strong { font-size: 20px; }
+  .inventory-filters { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+  .inventory-search { grid-column: 1 / -1; }
 }

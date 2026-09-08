@@ -222,7 +222,47 @@ test("multi-user security: independent accounts, immutable node ownership and ob
     assert.equal((await api(anotherBobCookie, "/api/node-data/alice-node/usage")).status, 404);
   });
 
-  await t.test("Usage, History, Workspace HTTP and WebSocket deny cross-user names before contacting a VM", async () => {
+  await t.test("admin sees all registered node metadata without receiving endpoints, secrets or connection rights", async () => {
+    const before = await readFile(f.policy.store.file, "utf8");
+    const seen = [f.vmA.seen.length, f.vmB.seen.length];
+    const response = await api(cookieA, "/api/admin/nodes");
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    const text = await response.text();
+    const result = JSON.parse(text);
+    assert.deepEqual(result.summary, { total: 3, owners: 2, online: 0, stale: 0, unknown: 3 });
+    assert.equal(result.telemetryAvailable, false);
+    assert.equal(result.heartbeatTimeoutMs, null);
+    assert.ok(Number.isSafeInteger(result.generatedAt));
+    assert.deepEqual(result.nodes.map((node) => node.id), ["alice-node", "local", nodeB.id]);
+    assert.deepEqual(result.nodes.at(-1).owner, { id: bob.id, username: "bob", enabled: true });
+    for (const node of result.nodes) {
+      assert.deepEqual(Object.keys(node).sort(), ["components", "id", "lastSeen", "name", "owner", "region", "releaseId", "status"]);
+      assert.deepEqual(node.components, { cloudcli: null, copilotApi: null });
+      assert.equal(node.status, "unavailable");
+    }
+    for (const privateValue of [f.master, f.ticketMaster, credential.passwordHash,
+      "alice.example.test", "bob.example.test", "10.0.0.7", "serverNode", "endpoint", "credentialHash"]) {
+      assert.ok(!text.includes(privateValue), privateValue);
+    }
+    assert.equal((await api("", "/api/admin/nodes")).status, 401);
+    assert.equal((await api(cookieB, "/api/admin/nodes?role=admin&ownerId=owner-a", "GET", undefined,
+      { "x-ms-client-principal-id": "owner-a", "x-codey-role": "admin" })).status, 403);
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+      assert.equal((await api(cookieA, "/api/admin/nodes", method, { nodeId: nodeB.id })).status, 405);
+      assert.equal((await api(cookieB, "/api/admin/nodes", method, {})).status, 403);
+    }
+    assert.equal((await api("", "/admin-nodes.js")).status, 401);
+    assert.equal((await api(cookieA, "/admin-nodes.js")).status, 200);
+    assert.equal((await api(cookieB, "/admin-nodes.js")).status, 200, "The static module contains no inventory data");
+    assert.equal(await readFile(f.policy.store.file, "utf8"), before);
+    assert.deepEqual([f.vmA.seen.length, f.vmB.seen.length], seen, "Inventory must not contact any owner's VM");
+    assert.deepEqual((await (await api(cookieA, "/api/client-nodes")).json()).nodes.map((node) => node.id), ["alice-node", "local"]);
+    assert.equal((await api(cookieA, `/api/settings/nodes/${nodeB.id}/enrollment`, "POST", {})).status, 404);
+    assert.equal((await api(cookieA, `/api/settings/nodes/${nodeB.id}`, "DELETE")).status, 404);
+  });
+
+  await t.test("Usage, History, Workspace HTTP and WebSocket still deny cross-user names after inventory access", async () => {
     for (const [cookie, ownId, ownOwner, foreignId, foreignVm] of [
       [cookieA, "alice-node", credential.principalId, nodeB.id, f.vmB],
       [cookieB, nodeB.id, bob.id, "alice-node", f.vmA],
@@ -317,8 +357,12 @@ test("multi-user security: independent accounts, immutable node ownership and ob
   });
 
   await t.test("personal settings persist independently and account creation cannot assign caller-chosen roles or nodes", async () => {
-    assert.equal((await api(cookieB, `/api/settings/nodes/${nodeB.id}`, "PUT", { name: "Bob renamed" })).status, 200);
+    assert.equal((await api(cookieB, `/api/settings/nodes/${nodeB.id}`, "PUT", {
+      name: "Bob renamed", endpoint: "https://bob.example.test:8443",
+    })).status, 200);
     assert.equal((await f.policy.list(bob.id))[0].name, "Bob renamed");
+    assert.equal((await f.policy.list(bob.id))[0].endpoint, "https://bob.example.test:8443/usage",
+      "The settings editor accepts a service origin while retaining the usage client's legacy contract");
     assert.equal((await f.policy.list(credential.principalId))[0].name, "Alice private");
     const restarted = new NodePolicy({
       root: f.authRoot, master: f.master, ticketMaster: f.ticketMaster, seedPrincipalId: credential.principalId,

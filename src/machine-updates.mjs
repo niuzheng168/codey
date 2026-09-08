@@ -12,6 +12,7 @@ const NODE_ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const HEX = /^[a-f0-9]{64}$/;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const JOB_ID = /^[a-f0-9]{32}$/;
+const HEARTBEAT_TIMEOUT_MS = 90_000;
 const terminal = new Set(["succeeded", "failed", "rolled_back", "needs_migration", "needs_action", "cancelled"]);
 const active = new Set(["claimed", "downloading", "staging", "waiting_idle", "applying", "verifying"]);
 const transitions = {
@@ -153,13 +154,42 @@ export class MachineUpdates {
         const currentJob = data.jobs.findLast((job) => job.nodeId === node.id && job.ownerId === principalId && !terminal.has(job.state));
         return {
           id: node.id, name: node.name, protected: node.id === "local", enrolled: Boolean(device && !device.revoked),
-          connected: Boolean(device && !device.revoked && this.clock() - (device.lastSeen || 0) < 90000),
+          connected: Boolean(device && !device.revoked && this.clock() - (device.lastSeen || 0) < HEARTBEAT_TIMEOUT_MS),
           lastSeen: device?.lastSeen || null, report: device?.report || null,
           ...(latest ? eligibility(node, device, latest) : { eligible: false, reason: "no_release" }),
           activeJob: currentJob ? publicJob(currentJob) : null,
         };
       }),
       jobs: data.jobs.filter((job) => job.ownerId === principalId && ids.has(job.nodeId)).slice(-100).map(publicJob),
+    };
+  }
+
+  async inventory(nodes) {
+    // Read the signed heartbeat snapshot only. This must not probe machines,
+    // load a target release, issue credentials, or grant owner capabilities.
+    const { devices } = (await this.store.read()).data;
+    const generatedAt = this.clock();
+    return {
+      generatedAt, heartbeatTimeoutMs: HEARTBEAT_TIMEOUT_MS,
+      nodes: new Map(nodes.map((node) => {
+        const saved = devices[node.id];
+        const device = saved?.nodeId === node.id && saved.ownerId === node.ownerId ? saved : null;
+        const lastSeen = Number.isSafeInteger(device?.lastSeen) && device.lastSeen > 0 ? device.lastSeen : null;
+        const age = lastSeen === null ? null : generatedAt - lastSeen;
+        const status = !device ? "not_enrolled" : device.revoked ? "revoked"
+          : age === null ? "unreported" : age < 0 ? "unknown"
+            : age < HEARTBEAT_TIMEOUT_MS ? "online" : "stale";
+        // Explicit, narrower allowlist than the owner's updater report.
+        const components = Object.fromEntries(["cloudcli", "copilotApi"].map((name) => {
+          const component = device?.report?.components?.[name];
+          return [name, component ? {
+            version: component.version, commit: component.commit || null, nodeMajor: component.nodeMajor,
+          } : null];
+        }));
+        return [node.id, {
+          status, lastSeen, releaseId: device?.report?.currentRelease || null, components,
+        }];
+      })),
     };
   }
 
@@ -248,7 +278,7 @@ export class MachineUpdates {
       const check = eligibility(node, device?.ownerId === principalId ? device : null, selected.release);
       const busy = data.jobs.some((job) => job.nodeId === node.id && !terminal.has(job.state));
       return { nodeId: node.id, name: node.name, ...check, ...(busy ? { eligible: false, reason: "job_active" } : {}),
-        deferred: Boolean(device && this.clock() - (device.lastSeen || 0) >= 90000) };
+        deferred: Boolean(device && this.clock() - (device.lastSeen || 0) >= HEARTBEAT_TIMEOUT_MS) };
     });
     const result = { id: id(), releaseId, digest: selected.digest, targets, expiresAt: this.clock() + 300000,
       notes: selected.release.notes, migrations: selected.release.migrations, components: selected.release.components,

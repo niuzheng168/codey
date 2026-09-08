@@ -19,8 +19,8 @@ async function listen(t, server) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 
-async function portal(t) {
-  const fixture = await uiFixture(t);
+async function portal(t, options) {
+  const fixture = await uiFixture(t, "ui-one", options);
   const seen = [];
   const backend = await listen(t, http.createServer((req, res) => {
     seen.push({ path: req.url, prefix: req.headers["x-forwarded-prefix"] });
@@ -28,7 +28,7 @@ async function portal(t) {
   }));
   const ui = new CloudCliUi(fixture.store);
   const gateway = new CloudCliGateway({
-    nodes: ["node-a", "node-b"].map((id) => ({ id, name: id, basePath: `/cloudcli/${id}`, upstream: new URL(backend) })),
+    nodes: ["node-a", "node-b"].map((id) => ({ id, name: `Display name ${id}`, basePath: `/cloudcli/${id}`, upstream: new URL(backend) })),
   }, { ui });
   const url = await listen(t, createPortalServer({
     config: validateConfig({ nodes: ["node-a", "node-b"].map((id) => ({ id, name: id, endpoint: `${backend}/usage` })) }),
@@ -43,6 +43,8 @@ test("one package serves both node shells without contacting either backend", as
     const response = await fetch(`${fixture.url}/cloudcli/${node}/session/example`);
     const html = await response.text();
     assert.equal(response.status, 200);
+    assert.match(html, new RegExp(`<title>cloudcli - ${node}</title>`));
+    assert.doesNotMatch(html, /CloudCLI UI|Display name/);
     assert.match(html, /src="\/cloudcli-ui\/ui-one\/assets\/app.js"/);
     assert.ok(html.includes(`src="/cloudcli/${node}/_ui/runtime.js"`));
     assert.ok(html.includes(`href="/cloudcli/${node}/manifest.json"`));
@@ -63,6 +65,30 @@ test("one package serves both node shells without contacting either backend", as
   });
   assert.equal(cached.status, 304);
   assert.equal(await cached.text(), "");
+});
+
+test("every SPA shell has its routed node title without modifying the immutable shared template", async (t) => {
+  const fixture = await portal(t);
+  for (const node of ["node-a", "node-b"]) {
+    for (const suffix of ["/", "/session/example", "/future-client-route"]) {
+      const response = await fetch(`${fixture.url}/cloudcli/${node}${suffix}`);
+      const html = await response.text();
+      assert.equal(response.status, 200);
+      assert.deepEqual(html.match(/<title>[^<]*<\/title>/g), [`<title>cloudcli - ${node}</title>`]);
+    }
+  }
+  const bundle = await fixture.ui.active();
+  assert.match((await readUiPackageFile(bundle, "index.html")).toString("utf8"), /<title>CloudCLI UI<\/title>/);
+  assert.deepEqual(fixture.seen, []);
+});
+
+test("older shared templates without a title also receive the node-specific shell title", async (t) => {
+  const fixture = await portal(t, { title: null });
+  const response = await fetch(`${fixture.url}/cloudcli/node-b/`);
+  const html = await response.text();
+  assert.equal(response.status, 200);
+  assert.deepEqual(html.match(/<title>[^<]*<\/title>/g), ["<title>cloudcli - node-b</title>"]);
+  assert.deepEqual(fixture.seen, []);
 });
 
 test("API, SSE, health and legacy per-node assets are still proxied, not turned into HTML", async (t) => {

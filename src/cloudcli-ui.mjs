@@ -26,6 +26,16 @@ function error(req, res, status, code) {
   send(req, res, status, JSON.stringify({ error: code }));
 }
 
+/** Identify the routed node even before the shared frontend has hydrated. */
+function withWorkspaceTitle(template, nodeId) {
+  const title = `cloudcli - ${nodeId}`.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  const markup = `<title>${title}</title>`;
+  const existing = /<title\b[^>]*>[\s\S]*?<\/title\s*>/i;
+  return existing.test(template)
+    ? template.replace(existing, () => markup)
+    : template.replace(/<\/head\s*>/i, () => `${markup}</head>`);
+}
+
 /** Portal serves one immutable UI package; node APIs, SSO and WebSockets remain in CloudCliGateway. */
 export class CloudCliUi {
   constructor(root) {
@@ -133,7 +143,7 @@ export class CloudCliUi {
         }), undefined, headers);
       } else if (page) {
         const template = validateUiTemplate((await readUiPackageFile(bundle, "index.html")).toString("utf8"));
-        const html = template
+        const html = withWorkspaceTitle(template, node.id)
           .replace(UI_RUNTIME_MARKER, `<script src="${node.basePath}/_ui/runtime.js"></script>`)
           .replace(UI_MANIFEST_MARKER, `${node.basePath}/manifest.json`);
         send(req, res, 200, html, "text/html; charset=utf-8", headers);

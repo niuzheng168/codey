@@ -130,6 +130,14 @@ export class NodePolicy {
       .map((node) => ({ ...publicNode(node), managedLegacy: node.keyMode === "legacy" }));
   }
 
+  async inventory() {
+    // Metadata for the administrator's read-only directory, never an access
+    // list. Do not reuse publicNode: it includes an owner's service endpoint.
+    return (await this.records()).data.nodes
+      .filter((node) => node.enabled)
+      .map(({ id, name, region, ownerId }) => ({ id, name, region, ownerId }));
+  }
+
   async create(principalId, body) {
     const settings = nodeSettings(body);
     return this.store.mutate((data) => {

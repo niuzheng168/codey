@@ -3,6 +3,7 @@ const nodesRoot = document.querySelector("#my-nodes");
 const usersRoot = document.querySelector("#users-list");
 const adminTab = document.querySelector("#admin-tab");
 const settingsTabs = [...document.querySelectorAll("[data-settings-panel]")];
+const adminTabs = [...document.querySelectorAll("[data-admin-panel]")];
 const addNodeDialog = document.querySelector("#add-node");
 const enrollment = document.querySelector("#enrollment");
 const enrollmentValue = document.querySelector("#enrollment-value");
@@ -12,6 +13,23 @@ const machineSkillButtons = new Map();
 let machineSkillDownloading = false;
 let settingsReady = false;
 let activePanel = "nodes";
+let activeAdminPanel = "admin-nodes-panel";
+
+function syncAdminPanels() {
+  for (const tab of adminTabs) {
+    const selected = tab.dataset.adminPanel === activeAdminPanel;
+    tab.setAttribute("aria-selected", String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    document.getElementById(tab.dataset.adminPanel).hidden = !selected || adminTab.hidden || activePanel !== "admin-section";
+  }
+}
+
+function activateAdminPanel(id) {
+  if (adminTab.hidden || activePanel !== "admin-section" || !adminTabs.some((tab) => tab.dataset.adminPanel === id)) return;
+  activeAdminPanel = id;
+  syncAdminPanels();
+  document.dispatchEvent(new CustomEvent("admin-panel-change", { detail: id }));
+}
 
 function activatePanel(id, updateHistory = false) {
   const next = settingsTabs.find((tab) => tab.dataset.settingsPanel === id && !tab.hidden)
@@ -25,6 +43,7 @@ function activatePanel(id, updateHistory = false) {
     tab.tabIndex = selected ? 0 : -1;
     document.getElementById(tab.dataset.settingsPanel).hidden = !selected;
   }
+  syncAdminPanels();
   if (updateHistory && window.location.hash !== `#${activePanel}`) {
     window.history.pushState(null, "", `#${activePanel}`);
   }
@@ -59,6 +78,20 @@ for (const tab of settingsTabs) {
       : (index + (event.key === "ArrowRight" ? 1 : -1) + visible.length) % visible.length;
     const next = visible[nextIndex];
     activatePanel(next.dataset.settingsPanel, true);
+    next.focus();
+  });
+}
+
+for (const tab of adminTabs) {
+  tab.addEventListener("click", () => activateAdminPanel(tab.dataset.adminPanel));
+  tab.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) || adminTab.hidden) return;
+    event.preventDefault();
+    const index = adminTabs.indexOf(tab);
+    const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? adminTabs.length - 1
+      : (index + (event.key === "ArrowRight" ? 1 : -1) + adminTabs.length) % adminTabs.length;
+    const next = adminTabs[nextIndex];
+    activateAdminPanel(next.dataset.adminPanel);
     next.focus();
   });
 }
@@ -127,6 +160,13 @@ function field(label, name, value, type = "text") {
   return node;
 }
 
+function nodeServiceOrigin(endpoint) {
+  // Older records use the usage URL as their endpoint. Settings describe the
+  // node's service origin, not one API; the existing PUT accepts either form.
+  try { return new URL(endpoint).origin; }
+  catch { return endpoint || ""; }
+}
+
 async function operation(button, action, report = notice) {
   if (button.disabled) return;
   button.disabled = true;
@@ -145,14 +185,15 @@ function renderNodes(nodes) {
     nodesRoot.append(empty);
   }
   for (const node of nodes) {
+    const origin = nodeServiceOrigin(node.endpoint);
     const card = element("details", null, "node-card");
     card.dataset.nodeId = node.id;
     card.open = expanded.has(node.id);
     const summary = element("summary", null, "node-summary");
     const identity = element("span", null, "node-identity");
     identity.append(element("strong", node.name), element("span", node.region || "未设置区域", "node-region"));
-    const endpoint = element("span", node.endpoint, "node-endpoint");
-    endpoint.title = node.endpoint;
+    const endpoint = element("span", origin, "node-endpoint");
+    endpoint.title = origin;
     const badges = element("span", null, "badges");
     const connection = element("span", node.vnetOnly ? "VNet 专用" : node.vnetAvailable ? "VNet 已配置" : "浏览器直连", "badge");
     connection.title = node.vnetOnly ? "VNet 专用，无需浏览器证书" : connection.textContent;
@@ -165,8 +206,9 @@ function renderNodes(nodes) {
     editor.append(element("p", `节点 ID · ${node.id}`, "node-id"));
     const form = element("form", null, "node-form");
     form.setAttribute("aria-label", `${node.name} 节点设置`);
-    const endpointField = field(node.vnetOnly ? "HTTPS 地址（VNet 专用，由机器配置提供）" : "HTTPS 地址", "endpoint", node.endpoint, "url");
+    const endpointField = field(node.vnetOnly ? "HTTPS 服务入口（VNet 专用，由机器配置提供）" : "HTTPS 服务入口", "endpoint", origin, "url");
     endpointField.className = "node-endpoint-field";
+    endpointField.querySelector("input").placeholder = "https://host:8443";
     if (node.vnetOnly) endpointField.querySelector("input").readOnly = true;
     form.append(field("名称", "name", node.name), field("区域", "region", node.region),
       field("颜色", "accent", node.accent, "color"), endpointField);
@@ -231,6 +273,7 @@ async function renderUsers() {
         void operation(toggle, async () => {
           await api(`/api/admin/users/${user.id}`, "PATCH", { enabled: !user.enabled });
           await renderUsers();
+          document.dispatchEvent(new CustomEvent("admin-users-change"));
           notice("账号状态已更新。");
         });
       });
@@ -287,7 +330,9 @@ async function load() {
   if (adminTab.hidden && activePanel === "admin-section") activatePanel("nodes", true);
   settingsReady = true;
   followSettingsLocation();
+  document.dispatchEvent(new CustomEvent("settings-role-change", { detail: result.user.role }));
   if (!adminTab.hidden) await renderUsers();
+  else usersRoot.replaceChildren();
 }
 
 async function downloadMachineSkill(event) {
@@ -391,6 +436,7 @@ document.querySelector("#create-user-form").addEventListener("submit", (event) =
     details.querySelector("summary").focus();
     notice(`用户 ${user.username} 已创建，初始节点列表为空。`);
     await renderUsers();
+    document.dispatchEvent(new CustomEvent("admin-users-change"));
   });
 });
 

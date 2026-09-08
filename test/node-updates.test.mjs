@@ -177,6 +177,7 @@ test("update UI and static module stay authenticated; owner API rejects CSRF, fo
 
 test("mixed-owner batches fail atomically, administrators cannot update another owner, local is protected", async (t) => {
   const f = await fixture(t);
+  assert.equal((await f.request("/api/admin/nodes")).status, 200, "Inventory access must not broaden update permissions");
   assert.equal((await f.request("/api/settings/updates/plans", { method: "POST", body: {
     nodeIds: ["alpha", f.bobNode.id], releaseId: f.built.release.id,
   } })).status, 404);
@@ -188,6 +189,134 @@ test("mixed-owner batches fail atomically, administrators cannot update another 
   }
   const own = await (await f.request("/api/settings/updates", { cookie: f.cookieB })).json();
   assert.deepEqual(own.nodes.map((node) => node.id), [f.bobNode.id]);
+});
+
+test("admin inventory joins owner-bound heartbeats and reports installed versions, never target releases or private reports", async (t) => {
+  const f = await fixture(t);
+  const alpha = await f.enroll();
+  const bob = await f.enroll(f.bobNode.id, f.cookieB);
+  await f.enroll("beta"); // An issued credential is not evidence that a node is online.
+  await f.heartbeat(alpha);
+  await f.heartbeat(bob, report({
+    currentRelease: "previously-installed-release",
+    components: { copilotApi: { version: "2.0.3", commit: "c".repeat(40), entrySha256: "d".repeat(64), nodeMajor: 24 } },
+  }));
+  await f.updates.store.mutate((data) => {
+    data.devices[f.bobNode.id].futurePrivateField = "private-device-detail";
+    data.devices[f.bobNode.id].report.futurePrivateField = "private-report-detail";
+    data.devices[f.bobNode.id].report.components.copilotApi.futurePrivateField = "private-component-detail";
+  });
+  // A broken/unavailable release catalog must not hide already reported versions.
+  f.updates.catalog.list = f.updates.catalog.get = async () => { throw new Error("Must not read release catalog"); };
+  const files = [f.policy.store.file, f.accounts.store.file, f.updates.store.file];
+  const before = await Promise.all(files.map((file) => readFile(file, "utf8")));
+  const response = await f.request("/api/admin/nodes");
+  assert.equal(response.status, 200);
+  const text = await response.text();
+  const data = JSON.parse(text);
+  assert.deepEqual(data.summary, { total: 4, owners: 2, online: 2, stale: 0, unknown: 2 });
+  assert.equal(data.generatedAt, f.clock.now);
+  assert.equal(data.heartbeatTimeoutMs, 90000);
+  assert.equal(data.telemetryAvailable, true);
+  const alphaRow = data.nodes.find((node) => node.id === "alpha");
+  assert.equal(alphaRow.components.cloudcli.version, "1.0.0");
+  assert.notEqual(alphaRow.components.cloudcli.version, f.built.release.components.cloudcli.version);
+  assert.equal(alphaRow.releaseId, null, "Do not substitute a desired release for an installed one");
+  assert.equal(alphaRow.lastSeen, f.clock.now);
+  const bobRow = data.nodes.find((node) => node.id === f.bobNode.id);
+  assert.deepEqual(bobRow.owner, { id: f.bob.id, username: "bob", enabled: true });
+  assert.equal(bobRow.releaseId, "previously-installed-release");
+  assert.equal(bobRow.components.cloudcli, null);
+  assert.deepEqual(bobRow.components.copilotApi, { version: "2.0.3", commit: "c".repeat(40), nodeMajor: 24 });
+  assert.equal(data.nodes.find((node) => node.id === "beta").status, "unreported");
+  assert.equal(data.nodes.find((node) => node.id === "local").status, "not_enrolled");
+  for (const node of data.nodes) {
+    assert.deepEqual(Object.keys(node).sort(), ["components", "id", "lastSeen", "name", "owner", "region", "releaseId", "status"]);
+    assert.deepEqual(Object.keys(node.owner).sort(), ["enabled", "id", "username"]);
+    for (const component of Object.values(node.components).filter(Boolean)) {
+      assert.deepEqual(Object.keys(component).sort(), ["commit", "nodeMajor", "version"]);
+    }
+  }
+  for (const forbidden of [alpha.credential, bob.credential, "credentialHash", "entrySha256", "readyMigrations",
+    "futurePrivateField", "private-device-detail", "private-report-detail", "private-component-detail",
+    "example.test", "endpoint", "enrollmentSalt", "plans", "jobs"]) {
+    assert.ok(!text.includes(forbidden), forbidden);
+  }
+  assert.deepEqual(await Promise.all(files.map((file) => readFile(file, "utf8"))), before, "GET must not mutate any store");
+  assert.equal((await f.request("/api/admin/nodes", { cookie: f.cookieB })).status, 403);
+  assert.equal((await f.request("/api/admin/nodes", { cookie: null })).status, 401);
+  assert.equal((await f.agent(bob, "/api/admin/nodes")).status, 401);
+  assert.deepEqual((await (await f.request("/api/settings", { cookie: f.cookieB })).json()).nodes.map((node) => node.id), [f.bobNode.id]);
+  const lateWired = new SettingsApi({ accounts: f.accounts, nodePolicy: f.policy });
+  lateWired.machineUpdates = f.updates;
+  assert.deepEqual((await lateWired.adminNodes()).summary, data.summary, "Production attaches the updater after SettingsApi construction");
+  lateWired.accounts = { list: async () => (await f.accounts.list()).filter((user) => user.id !== f.bob.id) };
+  const orphan = (await lateWired.adminNodes()).nodes.find((node) => node.id === f.bobNode.id);
+  assert.deepEqual(orphan.owner, { id: f.bob.id, username: null, enabled: false });
+  assert.equal(orphan.status, "unknown", "A missing owner record must not imply either an enabled or a merely disabled account");
+});
+
+test("admin inventory counts activated nodes across disabled owners, excluding pending, removed and empty-user records", async (t) => {
+  const f = await fixture(t);
+  const bob = await f.enroll(f.bobNode.id, f.cookieB);
+  await f.heartbeat(bob);
+  const pending = await f.policy.reserveMachine(f.bob.id);
+  await f.policy.remove("owner-a", "beta");
+  await f.accounts.create({ username: "carol", password });
+  await f.accounts.setEnabled(f.bob.id, false, "owner-a");
+  const response = await f.request("/api/admin/nodes");
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.deepEqual(data.summary, { total: 3, owners: 2, online: 0, stale: 0, unknown: 3 });
+  assert.ok(!data.nodes.some((node) => ["beta", pending.id].includes(node.id)));
+  const row = data.nodes.find((node) => node.id === f.bobNode.id);
+  assert.equal(row.owner.username, "bob");
+  assert.equal(row.owner.enabled, false);
+  assert.equal(row.status, "owner_disabled");
+  assert.equal(row.lastSeen, f.clock.now);
+  assert.equal(row.components.cloudcli.version, "1.0.0", "Disabled accounts retain clearly historical version metadata");
+  assert.equal((await f.agent(bob, "/api/node-updater/poll", { protocol: 1, report: report() })).status, 403);
+});
+
+test("inventory distinguishes fresh, expired, revoked, re-enrolled and mismatched-owner reports without fabricating liveness", async (t) => {
+  const f = await fixture(t);
+  const alpha = await f.enroll();
+  await f.heartbeat(alpha);
+  const inventory = async () => {
+    const response = await f.request("/api/admin/nodes");
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  f.clock.now += 89999;
+  assert.equal((await inventory()).nodes[0].status, "online");
+  f.clock.now++;
+  let data = await inventory();
+  assert.equal(data.nodes[0].status, "stale");
+  assert.deepEqual(data.summary, { total: 4, owners: 2, online: 0, stale: 1, unknown: 3 });
+  assert.equal(data.nodes[0].components.cloudcli.version, "1.0.0");
+  await f.updates.revoke("owner-a", "alpha");
+  assert.equal((await inventory()).nodes[0].status, "revoked");
+  await f.updates.bootstrap("owner-a", "alpha", true);
+  data = await inventory();
+  assert.equal(data.nodes[0].status, "unreported");
+  assert.equal(data.nodes[0].lastSeen, null);
+  assert.equal(data.nodes[0].components.cloudcli.version, "1.0.0", "Old report has no fresh timestamp after credential replacement");
+  await f.updates.store.mutate((state) => { state.devices.alpha.lastSeen = f.clock.now + 1; });
+  assert.equal((await inventory()).nodes[0].status, "unknown", "Future timestamps must not imply a live agent");
+  for (const patch of [{ ownerId: f.bob.id }, { nodeId: "beta" }]) {
+    await f.updates.store.mutate((state) => {
+      Object.assign(state.devices.alpha, { nodeId: "alpha", ownerId: "owner-a" }, patch);
+    });
+    const row = (await inventory()).nodes[0];
+    assert.equal(row.status, "not_enrolled");
+    assert.equal(row.lastSeen, null);
+    assert.equal(row.releaseId, null);
+    assert.deepEqual(row.components, { cloudcli: null, copilotApi: null }, "A report is bound to both owner and node");
+  }
+  await writeFile(f.updates.store.file, "corrupt signed heartbeat state");
+  const failure = await f.request("/api/admin/nodes");
+  assert.equal(failure.status, 503);
+  assert.deepEqual(await failure.json(), { error: "账号或节点设置暂不可用" }, "Corrupt telemetry must not be presented as zero nodes or offline");
 });
 
 test("bootstrap credentials are updater-only, absent from status and cannot authorize another node or owner API", async (t) => {

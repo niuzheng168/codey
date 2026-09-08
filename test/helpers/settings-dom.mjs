@@ -46,7 +46,8 @@ export function settingsDom() {
         if (child.parentElement) child.remove();
         child.parentElement = this;
         this.children.push(child);
-        if (this.tag === "select" && !this.value) this.value = child.value;
+        if (this.tag === "select" && child.tag === "option" &&
+            this.children.filter((item) => item.tag === "option").length === 1) this.value = child.value;
       }
     }
     replaceChildren(...children) {

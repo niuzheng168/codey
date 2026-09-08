@@ -36,7 +36,7 @@ async function page({ role = "user", hash = "", nodes = [ownedNode], pending = [
     confirmResult: true, setTimeout() {},
   };
   runInNewContext(source, {
-    document: dom.document, window, FormData: dom.FormData, CustomEvent,
+    document: dom.document, window, FormData: dom.FormData, CustomEvent, URL,
     BroadcastChannel: class {
       constructor(name) { this.name = name; }
       postMessage(value) { broadcasts.push([this.name, value]); }
@@ -133,11 +133,39 @@ test("administrator deep links resolve after role loading; members never request
   assert.equal(admin.get("admin-tab").hidden, false);
   assert.equal(admin.get("admin-section").hidden, false);
   assert.equal(admin.get("nodes").hidden, true);
+  assert.equal(admin.get("admin-nodes-panel").hidden, false);
+  assert.equal(admin.get("admin-users-panel").hidden, true);
   assert.equal(admin.get("users-count").textContent, "2");
   const member = await page({ hash: "#admin-section" });
   await member.get("admin-tab").click();
   assert.equal(member.get("admin-section").hidden, true);
   assert.equal(member.get("nodes").hidden, false);
+  assert.equal(member.requests.some((request) => request.url.startsWith("/api/admin")), false);
+});
+
+test("global nodes and user management share one administrator tab with keyboard-accessible subpanels", async () => {
+  const p = await page({ role: "admin", hash: "#admin-section" });
+  assert.equal(p.get("admin-tab").textContent, "全局管理");
+  p.get("admin-nodes-tab").dispatch("keydown", { key: "ArrowRight" });
+  assert.equal(p.document.activeElement, p.get("admin-users-tab"));
+  assert.equal(p.get("admin-users-panel").hidden, false);
+  assert.equal(p.get("admin-nodes-panel").hidden, true);
+  assert.equal(p.get("admin-users-tab").getAttribute("aria-selected"), "true");
+  p.get("account-tab").click();
+  assert.equal(p.get("admin-users-panel").hidden, true);
+  p.get("admin-tab").click();
+  assert.equal(p.get("admin-users-panel").hidden, false, "Returning retains the chosen administration subpanel");
+  p.get("admin-users-tab").dispatch("keydown", { key: "Home" });
+  assert.equal(p.get("admin-nodes-panel").hidden, false);
+  assert.equal(p.get("admin-users-panel").hidden, true);
+  p.get("admin-nodes-tab").dispatch("keydown", { key: "End" });
+  assert.equal(p.get("admin-users-panel").hidden, false);
+  p.get("admin-users-tab").dispatch("keydown", { key: "ArrowLeft" });
+  assert.equal(p.get("admin-nodes-tab").tabIndex, 0);
+  assert.equal(p.get("admin-users-tab").tabIndex, -1);
+  const member = await page();
+  member.get("admin-users-tab").click();
+  assert.equal(member.get("admin-users-panel").hidden, true);
   assert.equal(member.requests.some((request) => request.url.startsWith("/api/admin")), false);
 });
 
@@ -185,6 +213,7 @@ test("collapsed nodes preserve all editable fields, VNet address restrictions an
   assert.match(row.querySelector("summary").textContent, /VNet 专用.*Workspace 已配置/);
   assert.deepEqual(row.querySelectorAll("input").map((input) => input.name), ["name", "region", "accent", "endpoint"]);
   assert.equal(row.querySelector('[name="endpoint"]').readOnly, true);
+  assert.equal(row.querySelector('[name="endpoint"]').value, "https://alpha.example.test:8443");
   assert.equal(row.querySelector('[name="name"]').maxLength, 80);
   assert.equal(row.querySelector('[name="endpoint"]').maxLength, 2048);
   assert.equal(row.querySelectorAll("button").some((button) => button.textContent === "移除节点"), true);
@@ -198,10 +227,35 @@ test("saving a node uses the original owner-scoped API, keeps its editor open an
   await p.submit(row.querySelector("form"));
   const save = p.requests.find((request) => request.method === "PUT");
   assert.equal(save.url, "/api/settings/nodes/alpha");
-  assert.deepEqual(save.data, { name: "Renamed", region: ownedNode.region, accent: ownedNode.accent, endpoint: ownedNode.endpoint });
+  assert.deepEqual(save.data, { name: "Renamed", region: ownedNode.region, accent: ownedNode.accent, endpoint: "https://alpha.example.test:8443" });
   assert.equal(p.get("my-nodes").children[0].open, true);
   assert.equal(p.document.activeElement, p.get("my-nodes").children[0].querySelector("summary"));
   assert.match(p.get("settings-message").textContent, /已保存/);
+});
+
+test("node summaries, hover text and editors show the service origin rather than an API path", async () => {
+  for (const [endpoint, origin] of [
+    ["https://alpha.example.test:8443/usage", "https://alpha.example.test:8443"],
+    ["https://alpha.example.test:8443/", "https://alpha.example.test:8443"],
+    ["https://alpha.example.test:8443", "https://alpha.example.test:8443"],
+    ["https://alpha.example.test:8443/v1/models", "https://alpha.example.test:8443"],
+    ["https://[::1]:8443/usage", "https://[::1]:8443"],
+  ]) {
+    const p = await page({ nodes: [{ ...ownedNode, endpoint }] });
+    const row = p.get("my-nodes").children[0];
+    assert.equal(row.querySelector(".node-endpoint").textContent, origin);
+    assert.equal(row.querySelector(".node-endpoint").title, origin);
+    assert.equal(row.querySelector('[name="endpoint"]').value, origin);
+    assert.match(row.querySelector(".node-endpoint-field").textContent, /HTTPS 服务入口/);
+    assert.equal(p.requests.filter((request) => request.method !== "GET").length, 0, "Displaying a legacy record must not migrate or rewrite it");
+  }
+});
+
+test("one malformed legacy address remains editable without hiding the rest of the node list", async () => {
+  const p = await page({ nodes: [{ ...ownedNode, endpoint: "invalid-address" }, { ...ownedNode, id: "beta" }] });
+  assert.equal(p.get("my-nodes").children.length, 2);
+  assert.equal(p.get("my-nodes").children[0].querySelector('[name="endpoint"]').value, "invalid-address");
+  assert.equal(p.get("my-nodes").children[1].querySelector(".node-endpoint").textContent, "https://alpha.example.test:8443");
 });
 
 test("node removal still requires confirmation and never sends a service lifecycle request", async () => {
@@ -265,6 +319,7 @@ test("successful activation refreshes the list and returns from the modal to the
 
 test("administrator creation and enable/disable controls retain their APIs and confirmations", async () => {
   const p = await page({ role: "admin", hash: "#admin-section" });
+  p.get("admin-users-tab").click();
   p.get("create-user").open = true;
   const form = p.get("create-user-form");
   form.elements.username.value = "bob";
