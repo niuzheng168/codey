@@ -461,5 +461,76 @@ class SupervisorTests(unittest.TestCase):
         popen.assert_not_called()
 
 
+class WorkspaceLauncherTests(unittest.TestCase):
+    def test_module_path_is_removed_only_from_the_child_environment(self):
+        environment = {"PSModulePath": "foreign-core-modules", "PSMODULEPATH": "other-case",
+                       "PATH": "preserved-tools", "UNRELATED": "preserved"}
+        with patch.dict(worker.os.environ, environment, clear=True):
+            before = dict(worker.os.environ)
+            child = worker.powershell_child_environment()
+            self.assertTrue(all(name.casefold() != "psmodulepath" for name in child))
+            self.assertEqual(child["PATH"], "preserved-tools")
+            self.assertEqual(child["UNRELATED"], "preserved")
+            self.assertEqual(dict(worker.os.environ), before)
+
+    def test_32_bit_worker_resolves_only_the_configured_native_host(self):
+        configured = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        expected = r"C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+        with patch.object(worker.os, "name", "nt"), patch.object(worker.ctypes, "sizeof", return_value=4), \
+             patch.dict(worker.os.environ, {"WINDIR": r"C:\Windows"}), \
+             patch.object(worker.os.path, "isfile", return_value=True):
+            self.assertEqual(worker.native_powershell(configured), expected)
+            self.assertEqual(worker.native_powershell(configured.lower()), expected)
+            self.assertEqual(worker.native_powershell(r"C:\tools\pwsh.exe"), r"C:\tools\pwsh.exe")
+
+    def test_missing_native_host_fails_without_fallback_or_policy_changes(self):
+        with patch.object(worker.os, "name", "nt"), patch.object(worker.ctypes, "sizeof", return_value=4), \
+             patch.dict(worker.os.environ, {"WINDIR": r"C:\Windows"}), \
+             patch.object(worker.os.path, "isfile", return_value=False):
+            with self.assertRaisesRegex(worker.SafeError, "native_windows_powershell_missing"):
+                worker.native_powershell(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+
+    def test_64_bit_worker_keeps_the_exact_configured_host(self):
+        configured = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        with patch.object(worker.os, "name", "nt"), patch.object(worker.ctypes, "sizeof", return_value=8):
+            self.assertEqual(worker.native_powershell(configured), configured)
+
+    @unittest.skipUnless(os.name == "nt", "Requires Windows PowerShell")
+    def test_hash_guard_with_inherited_powershell_module_path(self):
+        # This deliberately fails at the hash guard, BEFORE listener inspection,
+        # process launch, or real enrollment/history access. Only fixtures are read.
+        powershell = (Path(os.environ["WINDIR"]) / "System32" / "WindowsPowerShell"
+                      / "v1.0" / "powershell.exe")
+        if not powershell.is_file():
+            self.skipTest("Windows PowerShell is not installed")
+        with tempfile.TemporaryDirectory(prefix="codey-launcher-hash-test-") as directory:
+            root = Path(directory)
+            fixture = root / "not-an-executable.bin"
+            fixture.write_bytes(b"fixture only; this file must never execute")
+            enrollment = root / "fixture-enrollment.json"
+            enrollment.write_text(json.dumps({
+                "nodeId": "test-node", "workspaceSsoKey": "A" * 43,
+                "principalId": "fixture-owner", "username": "fixture",
+            }), encoding="utf-8")
+            config = root / "fixture-runtime.json"
+            config.write_text(json.dumps({
+                "schema": 1, "ownerSid": worker.windows_context()["sid"],
+                "host": "127.0.0.1", "port": 3001, "nodeId": "test-node",
+                "enrollmentFile": str(enrollment), "nodeExe": str(fixture),
+                "entryPath": str(fixture), "tlsCertificate": str(fixture),
+                "tlsPrivateKey": str(fixture), "codexExe": str(fixture),
+                "nodeSha256": "0" * 64,
+            }), encoding="utf-8")
+            completed = subprocess.run([
+                worker.native_powershell(str(powershell)), "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+                "-File", str(Path(__file__).with_name("start-codey-workspace.ps1")),
+                "-ConfigPath", str(config),
+            ], capture_output=True, text=True, errors="replace", timeout=30,
+                creationflags=worker.CREATE_NO_WINDOW, env=worker.powershell_child_environment())
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("The isolated Node runtime hash changed", completed.stderr)
+            self.assertNotIn("CommandNotFoundException", completed.stderr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

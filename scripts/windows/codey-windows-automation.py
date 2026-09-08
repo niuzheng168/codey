@@ -12,6 +12,7 @@ from ctypes import wintypes
 from datetime import datetime, timezone
 import hashlib
 import json
+import ntpath
 import os
 from pathlib import Path
 import re
@@ -75,6 +76,30 @@ def ensure_standard_streams():
     for name, mode in [("stdin", "r"), ("stdout", "w"), ("stderr", "w")]:
         if getattr(sys, name) is None:
             setattr(sys, name, open(os.devnull, mode, encoding="utf-8"))
+
+
+def native_powershell(executable):
+    """Honor a configured native System32 host when Azure CLI Python is 32-bit."""
+    if os.name != "nt" or ctypes.sizeof(ctypes.c_void_p) != 4:
+        return executable
+    windows = os.environ.get("WINDIR", "")
+    if not ntpath.isabs(windows):
+        return executable
+    relative = ("WindowsPowerShell", "v1.0", "powershell.exe")
+    configured_native = ntpath.join(windows, "System32", *relative)
+    if ntpath.normcase(ntpath.normpath(executable)) != ntpath.normcase(configured_native):
+        return executable
+    native_alias = ntpath.join(windows, "Sysnative", *relative)
+    require(os.path.isfile(native_alias), "native_windows_powershell_missing")
+    return native_alias
+
+
+def powershell_child_environment():
+    # Let the selected host construct its compatible module paths. Inheriting a
+    # PowerShell 7 PSModulePath can break Windows PowerShell's Get-FileHash.
+    # This is child-local; do not change execution policy or user/machine state.
+    return {name: value for name, value in os.environ.items()
+            if name.casefold() != "psmodulepath"}
 
 
 def windows_context():
@@ -577,10 +602,11 @@ def supervise(config, runtime, component):
         # The existing launchers enforce SID, loopback binding, hashes, and port ownership.
         # Raw child output is deliberately discarded, not persisted as potentially sensitive logs.
         with subprocess.Popen([
-            config["powershellExe"], "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+            native_powershell(config["powershellExe"]), "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
             "-File", launcher, "-ConfigPath", config["runtimeConfig"],
         ], cwd=str(Path(launcher).parent), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW) as child:
+            stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW,
+            env=powershell_child_environment()) as child:
             started = time.monotonic()
             while child.poll() is None:
                 status(config, component, "supervising", launcherPid=child.pid, context=windows_context())

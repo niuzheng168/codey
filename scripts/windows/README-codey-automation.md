@@ -69,6 +69,13 @@ The worker uses Azure CLI's Python with `-X utf8 -I -B`. `pythonw.exe` has no
 console streams, so Azure CLI initialization receives null-device handles.
 No child stdout/stderr or credential-bearing exceptions are saved.
 
+When Azure CLI supplies a 32-bit Python, the worker resolves an explicitly
+configured System32 Windows PowerShell through its native-host alias instead
+of inadvertently starting SysWOW64 PowerShell. The launcher child also builds
+its own `PSModulePath`, rather than inheriting incompatible PowerShell 7 modules.
+These are process-local compatibility fixes: no execution policy, persistent
+environment, task principal, or network setting is changed.
+
 ## Renewal invariants
 
 The hourly task renews only when the current token has at most eight hours left.
