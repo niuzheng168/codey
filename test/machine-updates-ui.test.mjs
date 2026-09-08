@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
+import { settingsDom } from "./helpers/settings-dom.mjs";
 
 const source = await readFile(new URL("../public/machine-updates.js", import.meta.url), "utf8");
 const tick = () => new Promise(setImmediate);
@@ -25,34 +26,11 @@ function data() {
 }
 
 async function page({ failPlan = false, pendingPlan = null } = {}) {
-  const elements = new Map();
+  const { document, elements } = settingsDom();
   const requests = [];
   const timers = [];
   const redirects = [];
   const status = data();
-  function node(tag = "div", text = "") {
-    return {
-      tag, textContent: text, children: [], listeners: new Map(), value: "", disabled: false, open: false,
-      classList: { toggle() {} }, attributes: {},
-      append(...children) {
-        this.children.push(...children);
-        if (this.tag === "select" && !this.value && children[0]) this.value = children[0].value;
-      },
-      replaceChildren(...children) { this.children = []; if (this.tag === "select") this.value = ""; this.append(...children); },
-      addEventListener(name, listener) { this.listeners.set(name, listener); },
-      setAttribute(name, value) { this.attributes[name] = value; },
-      showModal() { this.open = true; }, close() { this.open = false; },
-      remove() {}, click() { return this.listeners.get("click")?.(); },
-      set innerHTML(_) { throw new Error("Untrusted update data must not be inserted as HTML"); },
-    };
-  }
-  const document = {
-    body: node("body"), hidden: false, createElement: node, addEventListener() {},
-    querySelector(selector) {
-      if (!elements.has(selector)) elements.set(selector, node(selector.endsWith("-release") ? "select" : "div"));
-      return elements.get(selector);
-    },
-  };
   runInNewContext(source, {
     document, clearTimeout() {},
     window: { confirm: () => true, location: { replace: (url) => redirects.push(url) },
@@ -78,7 +56,7 @@ async function page({ failPlan = false, pendingPlan = null } = {}) {
     },
   });
   await tick(); await tick();
-  return { elements, requests, timers, redirects, status,
+  return { elements, requests, timers, redirects, status, document,
     get: (suffix) => document.querySelector("#node-update-" + suffix) };
 }
 
@@ -90,8 +68,8 @@ test("machine update controls include single-node, selected/all batch, setup and
   assert.equal(rows[2].children[0].children[0].disabled, true);
   assert.equal(rows[3].children[0].children[0].disabled, true);
   assert.ok(rows[0].children.at(-1).children.some((button) => button.textContent === "更新此机器"));
-  assert.ok(rows[2].children.at(-1).children.some((button) => button.textContent === "接入升级器"));
-  assert.ok(!rows[3].children.at(-1).children.some((button) => button.textContent === "接入升级器"));
+  assert.ok(rows[2].querySelectorAll("button").some((button) => button.textContent === "接入升级器"));
+  assert.ok(!rows[3].querySelectorAll("button").some((button) => button.textContent === "接入升级器"));
   assert.equal(p.get("all").disabled, false);
   assert.equal(p.get("selected").disabled, true);
 });
@@ -145,4 +123,79 @@ test("the settings HTML loads the updater module and provides accessible confirm
   assert.match(html, /id="node-update-message"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.match(html, /<dialog id="node-update-confirm"[^>]*aria-labelledby="node-update-confirm-title"/);
   for (const id of ["selected", "all", "release", "cancel", "apply"]) assert.ok(html.includes(`id="node-update-${id}"`));
+});
+
+test("compact update rows keep maintenance actions in a collapsed, named disclosure", async () => {
+  const p = await page();
+  const rows = p.get("list").children;
+  const menu = rows[0].querySelector(".updater-menu");
+  assert.equal(menu.open, false);
+  assert.match(menu.querySelector("summary").getAttribute("aria-label"), /Alpha.*升级器管理/);
+  assert.deepEqual(menu.querySelectorAll("button").map((button) => button.textContent), ["重新接入升级器", "停用升级器"]);
+  assert.equal(rows[3].querySelector(".updater-menu"), null, "Protected local has no maintenance menu");
+  assert.equal(p.get("history").hidden, true);
+  assert.equal(p.get("count-label").textContent, "2");
+  assert.equal(p.get("count").hidden, false);
+  menu.open = true;
+  await p.get("refresh").click();
+  assert.equal(p.get("list").children[0].querySelector(".updater-menu").open, true);
+});
+
+test("active and failed jobs remain discoverable from the tab even while update history is collapsed", async () => {
+  const p = await page();
+  p.status.jobs = [{ nodeId: "alpha", releaseId: "release-one", state: "verifying" }];
+  await p.get("refresh").click();
+  assert.equal(p.get("history").hidden, false);
+  assert.equal(p.get("history").open, false);
+  assert.equal(p.get("count-label").textContent, "1 进行中");
+  assert.equal(p.get("count-compact").textContent, "1");
+  assert.match(p.get("job-count").textContent, /1 条.*1 进行中/);
+  p.status.jobs[0].state = "failed";
+  await p.get("refresh").click();
+  assert.equal(p.get("count-label").textContent, "1 待处理");
+  assert.equal(p.get("count").classList.contains("update-warning"), true);
+  p.status.jobs.push({ nodeId: "alpha", releaseId: "release-one", state: "succeeded" });
+  await p.get("refresh").click();
+  assert.equal(p.get("count-label").textContent, "2", "A later successful job resolves the historical failure badge");
+});
+
+test("disabled updating and an empty release catalog cannot leave actionable selections", async () => {
+  const p = await page();
+  const checkbox = p.get("list").children[0].querySelector("input");
+  checkbox.checked = true; checkbox.dispatch("change");
+  assert.equal(p.get("selected").disabled, false);
+  p.status.enabled = false;
+  await p.get("refresh").click();
+  assert.equal(p.get("selected").disabled, true);
+  assert.equal(p.get("all").disabled, true);
+  assert.equal(p.get("list").children[0].querySelector("input").checked, false);
+  p.status.releases = [];
+  await p.get("refresh").click();
+  assert.equal(p.get("release").disabled, true);
+  assert.equal(p.get("release").children[0].textContent, "暂无可用发行版");
+});
+
+test("switching into the update panel refreshes node membership without submitting an operation", async () => {
+  const p = await page();
+  p.status.nodes = p.status.nodes.slice(0, 2);
+  p.document.dispatchEvent(new CustomEvent("settings-panel-change", { detail: "machine-updates" }));
+  await tick();
+  assert.equal(p.get("list").children.length, 2);
+  assert.equal(p.requests.length, 2);
+  assert.ok(p.requests.every((request) => request.options.method === "GET"));
+});
+
+test("polling retains a maintenance menu's keyboard focus, while Escape closes it without mutating a machine", async () => {
+  const p = await page();
+  const menu = p.get("list").children[0].querySelector(".updater-menu");
+  menu.open = true;
+  menu.querySelector("summary").focus();
+  await p.get("refresh").click();
+  const refreshed = p.get("list").children[0].querySelector(".updater-menu");
+  assert.equal(refreshed.open, true);
+  assert.equal(p.document.activeElement, refreshed.querySelector("summary"));
+  p.document.getElementById("machine-updates").dispatch("keydown", { key: "Escape" });
+  assert.equal(refreshed.open, false);
+  assert.equal(p.document.activeElement, refreshed.querySelector("summary"));
+  assert.ok(p.requests.every((request) => request.options.method === "GET"));
 });

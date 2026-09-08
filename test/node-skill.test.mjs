@@ -237,7 +237,8 @@ test("add-machine and empty-node entry points only expose the verified automatic
   const script = await readFile(path.resolve("public/settings.js"), "utf8");
   const styles = await readFile(path.resolve("public/settings.css"), "utf8");
   const app = await readFile(path.resolve("public/app.js"), "utf8");
-  assert.match(settings, /<details id="add-node"[^>]* open>/);
+  assert.match(settings, /<dialog id="add-node"[^>]*aria-labelledby="add-node-title"/);
+  assert.doesNotMatch(settings.match(/<dialog id="add-node"[^>]*>/)[0], /\bopen\b/);
   assert.doesNotMatch(settings, /高级：手动注册与接入说明|manual-node-setup|create-node-form/);
   assert.ok(!settings.includes(download));
   assert.ok(!settings.includes(sumPath));
@@ -250,20 +251,22 @@ test("add-machine and empty-node entry points only expose the verified automatic
   assert.ok(settings.indexOf('id="machine-skill-form"') < settings.indexOf('id="add-prepared-machine-form"'));
 });
 
-test("add-node navigation waits for async node rendering and does not scroll ordinary settings visits", async () => {
+test("add-node navigation waits for async node rendering and does not open on ordinary settings visits", async () => {
   const source = await readFile(path.resolve("public/settings.js"), "utf8");
   for (const hash of ["#add-node", "#nodes", ""]) {
     const events = [];
     const nodes = new Map();
     const listeners = new Map();
     const element = () => ({
-      addEventListener() {}, append() {}, classList: { toggle() {} },
+      addEventListener() {}, append() {}, classList: { toggle() {} }, querySelectorAll() { return []; },
       replaceChildren() { events.push("nodes-rendered"); },
-      scrollIntoView(options) { assert.equal(options.block, "start"); events.push("scrolled"); },
+      showModal() { this.open = true; events.push("opened"); },
+      scrollIntoView() { throw new Error("Settings navigation must not scroll a long page"); },
     });
     const window = { location: { hash }, addEventListener(name, fn) { listeners.set(name, fn); } };
     const document = {
       createElement: element,
+      querySelectorAll() { return []; },
       querySelector(selector) {
         // The removed legacy form must not be needed to bootstrap settings.
         if (selector === "#create-node-form") return null;
@@ -284,12 +287,12 @@ test("add-node navigation waits for async node rendering and does not scroll ord
     assert.deepEqual(events, []);
     releaseResponse();
     await new Promise(setImmediate);
-    assert.deepEqual(events, hash === "#add-node" ? ["response", "nodes-rendered", "scrolled"] : ["response", "nodes-rendered"]);
+    assert.deepEqual(events, hash === "#add-node" ? ["response", "nodes-rendered", "opened"] : ["response", "nodes-rendered"]);
     if (hash === "#add-node") assert.equal(nodes.get("#add-node").open, true);
-    else assert.ok(!nodes.has("#add-node"));
+    else assert.ok(!nodes.get("#add-node").open);
     window.location.hash = "#add-node";
     listeners.get("hashchange")();
     assert.equal(nodes.get("#add-node").open, true);
-    assert.equal(events.at(-1), "scrolled");
+    assert.equal(events.at(-1), "opened");
   }
 });

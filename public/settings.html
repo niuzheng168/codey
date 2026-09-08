@@ -12,94 +12,166 @@
     <script type="module" src="/portal-session.js"></script>
   </head>
   <body>
-    <header>
-      <a href="/">← Codey</a>
+    <header class="portal-header">
+      <a class="back-link" href="/">← Codey</a>
       <div class="account-actions"><span id="portal-account-name"></span><button id="portal-logout" type="button" hidden>退出登录</button></div>
     </header>
     <main>
-      <h1>账号与节点</h1>
-      <p class="muted">节点归属由服务端绑定。这里只显示你的节点，管理员账号也不能借节点名称访问别人的数据。</p>
+      <div class="page-heading">
+        <h1>账号与节点</h1>
+        <p class="muted">管理你的机器、软件与账号。</p>
+      </div>
+
+      <div class="settings-tabs" role="tablist" aria-label="设置分类">
+        <button id="nodes-tab" type="button" role="tab" data-settings-panel="nodes" aria-controls="nodes" aria-selected="true">我的节点 <span id="nodes-count" class="tab-count">—</span></button>
+        <button id="updates-tab" type="button" role="tab" data-settings-panel="machine-updates" aria-controls="machine-updates" aria-selected="false" tabindex="-1">软件更新 <span id="node-update-count" class="tab-count" hidden><span id="node-update-count-label" class="count-label"></span><span id="node-update-count-compact" class="count-compact" aria-hidden="true"></span></span></button>
+        <button id="account-tab" type="button" role="tab" data-settings-panel="account" aria-controls="account" aria-selected="false" tabindex="-1">账号安全</button>
+        <button id="admin-tab" type="button" role="tab" data-settings-panel="admin-section" aria-controls="admin-section" aria-selected="false" tabindex="-1" hidden>用户管理</button>
+      </div>
       <p id="settings-message" role="status" aria-live="polite"></p>
 
-      <section id="nodes" aria-labelledby="nodes-heading">
-        <h2 id="nodes-heading">我的节点</h2>
-        <p class="muted">名称、地址和区域会保存到你的账号。移除节点不会关机或删除 VM 上的文件。</p>
-        <div id="my-nodes"><p class="muted">正在加载…</p></div>
-        <details id="add-node" class="new-node" open>
-          <summary>添加自己的节点</summary>
-          <div class="machine-setup-flow">
-            <h3>1. 下载机器自动配置 Skill</h3>
-            <p class="muted">先配置机器，最后再添加。轻量包包含你的临时机器身份、Codey 改版 CloudCLI / copilot-api 源码与安装脚本。Node 和软件依赖由命令自动下载、校验并安装，不再单独收集安装包或证书。</p>
-            <form id="machine-skill-form" action="/api/settings/machines/skill" method="post">
-              <button id="download-machine-skill" type="submit" disabled>↓ 下载 Config new Codey machine</button>
-            </form>
-            <p id="machine-download-message" role="status" aria-live="polite"></p>
-            <p id="machine-package-status" class="muted">正在检查完整依赖包…</p>
-            <h3>2. 在 Codex 中配置目标机器</h3>
-            <p class="muted">解压后让 Codex 使用 <code>config-new-codey-machine/SKILL.md</code>。当前面向 Azure Linux x64，需要联网安装依赖；Windows Codex 可作为控制端。Skill 配置服务、HTTPS、SSO 与 VNet；Azure 权限和模型登录仍需本人授权。包内含本次专属密钥，请勿分享。</p>
-            <h3>3. 配置完成后，验通并添加机器</h3>
-            <p class="muted">选择 Skill 生成的 <code>codey-machine.json</code>（不是 ZIP、SHA-256 或 enrollment）。门户实际验证私网与 Workspace 后才将机器加入列表。</p>
-            <form id="add-prepared-machine-form" class="form-grid">
-              <label>配置完成的机器文件<input id="prepared-machine-file" type="file" accept=".json,application/json" required /></label>
-              <button type="submit">验通并添加机器</button>
-            </form>
-            <div id="pending-machines"></div>
+      <section id="nodes" class="settings-panel" role="tabpanel" aria-labelledby="nodes-tab" tabindex="0">
+        <div class="panel-heading">
+          <div>
+            <h2 id="nodes-heading">我的节点</h2>
+            <p class="muted">查看连接配置，展开节点以编辑设置。</p>
           </div>
-        </details>
-        <section id="enrollment" hidden aria-label="本节点接入资料">
-          <h3>本节点接入资料</h3>
-          <p class="muted">只复制到你自己的节点，不要分享这些密钥。既有 zhn 节点无需改动；新节点的 Workspace 还需部署 CloudCLI 并由运维配置可信私网网关。</p>
-          <pre id="enrollment-value"></pre>
-          <button id="hide-enrollment" type="button">隐藏接入资料</button>
-        </section>
+          <button id="open-add-node" class="primary" type="button" aria-haspopup="dialog" aria-controls="add-node">＋ 添加节点</button>
+        </div>
+        <div id="my-nodes" class="node-list"><p class="muted">正在加载…</p></div>
+        <button id="pending-machines-shortcut" class="pending-shortcut" type="button" aria-haspopup="dialog" aria-controls="add-node" hidden></button>
+        <p class="panel-footnote">仅显示你的节点，归属由服务端隔离。移除只撤销门户访问，不会关机或删除机器上的文件。</p>
       </section>
 
-      <section id="machine-updates" aria-labelledby="machine-updates-heading">
-        <h2 id="machine-updates-heading">机器软件更新</h2>
-        <p class="muted">仅操作你拥有并已接入升级器的机器。先预览再确认；批量先灰度一台，成功后最多并行三台。本机保护节点不参与。</p>
-        <div class="update-controls">
-          <label>目标发行版<select id="node-update-release" disabled aria-label="目标节点发行版"></select></label>
-          <button id="node-update-refresh" type="button">刷新状态</button>
-          <button id="node-update-selected" type="button" disabled>更新选中机器</button>
+      <section id="machine-updates" class="settings-panel" role="tabpanel" aria-labelledby="updates-tab" tabindex="0" hidden>
+        <div class="panel-heading">
+          <div>
+            <h2 id="machine-updates-heading">机器软件更新</h2>
+            <p class="muted">先预览，再确认。仅更新你拥有的机器，本机保护节点不参与。</p>
+          </div>
+          <button id="node-update-refresh" class="quiet" type="button">刷新状态</button>
+        </div>
+        <div class="update-controls update-toolbar">
+          <label class="release-picker">目标发行版<select id="node-update-release" disabled aria-label="目标节点发行版"></select></label>
+          <button id="node-update-selected" class="primary" type="button" disabled>更新选中机器</button>
           <button id="node-update-all" type="button" disabled>更新全部可升级机器</button>
         </div>
         <p id="node-update-message" role="status" aria-live="polite" class="muted">正在读取升级状态…</p>
         <div id="node-update-list"></div>
-        <div id="node-update-jobs" aria-label="机器升级任务"></div>
+        <details id="node-update-history" class="secondary-details" hidden>
+          <summary>升级记录 <span id="node-update-job-count" class="muted"></span></summary>
+          <div id="node-update-jobs" aria-label="机器升级任务"></div>
+        </details>
+        <p class="panel-footnote">批量更新先灰度一台，成功后最多并行三台。升级器的接入与停用在各机器的“管理”中。</p>
       </section>
 
-      <dialog id="node-update-confirm" aria-labelledby="node-update-confirm-title">
+      <section id="account" class="settings-panel" role="tabpanel" aria-labelledby="account-tab" tabindex="0" hidden>
+        <div class="panel-heading">
+          <div>
+            <h2 id="password-heading">修改我的密码</h2>
+            <p class="muted">修改后，本账号的所有旧登录会话失效，不影响其他用户。</p>
+          </div>
+        </div>
+        <form id="password-form" class="account-form">
+          <label>当前密码<input name="currentPassword" type="password" autocomplete="current-password" maxlength="1024" required /></label>
+          <label>新密码<input name="newPassword" type="password" autocomplete="new-password" minlength="12" maxlength="1024" aria-describedby="password-help" required /></label>
+          <p id="password-help" class="muted">至少 12 个字符。修改成功后需要重新登录。</p>
+          <button class="primary" type="submit">修改密码并重新登录</button>
+        </form>
+      </section>
+
+      <section id="admin-section" class="settings-panel" role="tabpanel" aria-labelledby="admin-tab" tabindex="0" hidden>
+        <div class="panel-heading">
+          <div>
+            <h2 id="users-heading">用户管理 <span id="users-count" class="tab-count"></span></h2>
+            <p class="muted">仅管理员可创建和停用账号。</p>
+          </div>
+        </div>
+        <details id="create-user" class="secondary-details create-user">
+          <summary>＋ 创建用户</summary>
+          <form id="create-user-form" class="form-grid">
+            <label>用户名<input name="username" autocomplete="off" minlength="3" maxlength="32" pattern="[a-z][a-z0-9_-]{2,31}" placeholder="alice" required /></label>
+            <label>初始密码<input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" aria-describedby="new-user-help" required /></label>
+            <p id="new-user-help" class="muted form-note">密码至少 12 个字符。新账号没有节点，也不会继承你的节点或未共享会话。</p>
+            <button class="primary" type="submit">创建用户</button>
+          </form>
+        </details>
+        <div id="users-list"></div>
+        <p class="panel-footnote">Shared 为已登录用户共用的只读区；管理员可管理 Shared。管理员也不能借节点名称访问他人的数据。</p>
+      </section>
+
+      <dialog id="add-node" class="setup-dialog" aria-labelledby="add-node-title" aria-describedby="add-node-description">
+        <div class="dialog-heading">
+          <div>
+            <h2 id="add-node-title">添加自己的节点</h2>
+            <p id="add-node-description" class="muted">先配置机器，再验通添加。支持 Azure Linux x64。</p>
+          </div>
+          <button id="close-add-node" class="icon-button quiet" type="button" aria-label="关闭添加节点" autofocus>×</button>
+        </div>
+        <ol class="machine-setup-flow">
+          <li>
+            <span class="step-number" aria-hidden="true">1</span>
+            <div class="step-content">
+              <h3>下载机器配置 Skill</h3>
+              <p class="muted">包含临时机器身份、改版源码与安装脚本。Node 和软件依赖会自动下载安装。</p>
+              <form id="machine-skill-form" action="/api/settings/machines/skill" method="post">
+                <button id="download-machine-skill" type="submit" disabled>↓ 下载 Config new Codey machine</button>
+              </form>
+              <p id="machine-download-message" role="status" aria-live="polite"></p>
+              <p id="machine-package-status" class="muted">正在检查配置包…</p>
+            </div>
+          </li>
+          <li>
+            <span class="step-number" aria-hidden="true">2</span>
+            <div class="step-content">
+              <h3>在 Codex 中配置目标机器</h3>
+              <p class="muted">解压后，让 Codex 使用 <code>config-new-codey-machine/SKILL.md</code>，按指引完成配置。</p>
+              <details class="setup-help">
+                <summary>支持范围与安全说明</summary>
+                <p class="muted">目标机器需要联网安装依赖；Windows Codex 可作为控制端。Skill 配置服务、HTTPS、SSO 与 VNet，Azure 权限和模型登录仍需本人授权。无需另行收集安装包或证书。</p>
+                <p class="muted">每次下载预留一个七天有效的机器身份，尚不加入节点列表。包内含本次专属密钥，请勿分享。</p>
+              </details>
+            </div>
+          </li>
+          <li>
+            <span class="step-number" aria-hidden="true">3</span>
+            <div class="step-content">
+              <h3>验通并添加机器</h3>
+              <p class="muted">上传 Skill 生成的 <code>codey-machine.json</code>，不是 ZIP、SHA-256 或 enrollment。门户验证私网与 Workspace 后才加入列表。</p>
+              <form id="add-prepared-machine-form" class="import-form">
+                <label>配置完成的机器文件<input id="prepared-machine-file" type="file" accept=".json,application/json" required /></label>
+                <button class="primary" type="submit">验通并添加机器</button>
+              </form>
+              <p id="machine-activation-message" role="status" aria-live="polite"></p>
+            </div>
+          </li>
+        </ol>
+        <details id="pending-machine-details" class="secondary-details" hidden>
+          <summary>待配置身份 <span id="pending-machine-count" class="tab-count"></span></summary>
+          <div id="pending-machines"></div>
+        </details>
+        <p class="dialog-footnote">配置包含机器专属密钥，请仅在自己的机器上使用，不要分享。</p>
+      </dialog>
+
+      <dialog id="enrollment" aria-labelledby="enrollment-title">
+        <h2 id="enrollment-title">本节点接入资料</h2>
+        <p class="muted">只复制到你自己的节点，不要分享这些密钥。既有 zhn 节点无需改动；新节点的 Workspace 还需部署 CloudCLI 并由运维配置可信私网网关。</p>
+        <pre id="enrollment-value"></pre>
+        <button id="hide-enrollment" type="button" autofocus>隐藏接入资料</button>
+      </dialog>
+
+      <dialog id="node-update-confirm" aria-labelledby="node-update-confirm-title" aria-describedby="node-update-confirm-help">
         <h2 id="node-update-confirm-title">确认机器升级计划</h2>
         <p id="node-update-plan-note"></p>
         <div id="node-update-plan-targets"></div>
-        <p class="muted">升级会短暂停止受影响的服务，并验证 Codey/Codex 模型调用（可能产生少量用量）。请先结束原生 Codex 任务。离线/忙碌机器会等待；未知迁移不会被强行执行。</p>
+        <p id="node-update-confirm-help" class="muted">升级会短暂停止受影响的服务，并验证 Codey/Codex 模型调用（可能产生少量用量）。请先结束原生 Codex 任务。离线/忙碌机器会等待；未知迁移不会被强行执行。</p>
         <p id="node-update-plan-error" role="status" aria-live="polite"></p>
-        <div class="update-controls">
-          <button id="node-update-cancel" type="button">取消</button>
-          <button id="node-update-apply" type="button">确认升级</button>
+        <div class="dialog-actions">
+          <button id="node-update-cancel" type="button" autofocus>取消</button>
+          <button id="node-update-apply" class="primary" type="button">确认升级</button>
         </div>
       </dialog>
 
-      <section aria-labelledby="password-heading">
-        <h2 id="password-heading">修改我的密码</h2>
-        <p class="muted">修改后，本账号的所有旧登录会话失效。不会影响其他用户。</p>
-        <form id="password-form" class="form-grid">
-          <label>当前密码<input name="currentPassword" type="password" autocomplete="current-password" maxlength="1024" required /></label>
-          <label>新密码<input name="newPassword" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required /></label>
-          <button type="submit">修改密码并重新登录</button>
-        </form>
-      </section>
-
-      <section id="admin-section" hidden aria-labelledby="users-heading">
-        <h2 id="users-heading">用户管理</h2>
-        <p class="muted">仅管理员可创建和停用账号。新账号没有节点，也不会继承你的节点或未共享的会话。Shared 为已登录用户共用的只读区；管理员可管理 Shared。</p>
-        <form id="create-user-form" class="form-grid">
-          <label>用户名<input name="username" autocomplete="off" minlength="3" maxlength="32" pattern="[a-z][a-z0-9_-]{2,31}" placeholder="alice" required /></label>
-          <label>初始密码<input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required /></label>
-          <button type="submit">创建用户</button>
-        </form>
-        <div id="users-list"></div>
-      </section>
     </main>
   </body>
 </html>

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
+import { settingsDom } from "./helpers/settings-dom.mjs";
 
 const source = await readFile(new URL("../public/settings.js", import.meta.url), "utf8");
 const nodeId = `n-${"a".repeat(24)}`;
@@ -20,38 +21,14 @@ function archiveResponse({ type = "application/zip", body = "PK\u0003\u0004test 
 
 async function page({ download = async () => archiveResponse(), pending = [] } = {}) {
   const requests = [];
-  const downloads = [];
+  const { document, elements, downloads } = settingsDom();
   const objectUrls = [];
   const revoked = [];
   const timers = [];
   const redirects = [];
-  const elements = new Map();
-  const makeElement = (tag = "div") => ({
-    tag, children: [], listeners: new Map(), disabled: false, textContent: "",
-    classList: { toggle() {} },
-    addEventListener(name, listener) { this.listeners.set(name, listener); },
-    append(...children) { this.children.push(...children); },
-    replaceChildren() { this.children = []; },
-    remove() { this.removed = true; },
-    click() { downloads.push({ href: this.href, download: this.download }); },
-    querySelector(selector) {
-      if (selector === "button") return this.children.find((child) => child.tag === "button");
-      throw new Error(`Unexpected selector ${selector}`);
-    },
-  });
-  const document = {
-    body: makeElement("body"),
-    createElement: makeElement,
-    querySelector(selector) {
-      if (!elements.has(selector)) elements.set(selector, makeElement());
-      return elements.get(selector);
-    },
-  };
   const form = document.querySelector("#machine-skill-form");
   form.action = endpoint;
   const button = document.querySelector("#download-machine-skill");
-  button.tag = "button";
-  form.append(button);
   let settingsRequests = 0;
   runInNewContext(source, {
     document,

@@ -1,13 +1,78 @@
 const message = document.querySelector("#settings-message");
 const nodesRoot = document.querySelector("#my-nodes");
 const usersRoot = document.querySelector("#users-list");
-const adminSection = document.querySelector("#admin-section");
+const adminTab = document.querySelector("#admin-tab");
+const settingsTabs = [...document.querySelectorAll("[data-settings-panel]")];
+const addNodeDialog = document.querySelector("#add-node");
 const enrollment = document.querySelector("#enrollment");
 const enrollmentValue = document.querySelector("#enrollment-value");
 const pendingMachinesRoot = document.querySelector("#pending-machines");
 const machineDownloadMessage = document.querySelector("#machine-download-message");
 const machineSkillButtons = new Map();
 let machineSkillDownloading = false;
+let settingsReady = false;
+let activePanel = "nodes";
+
+function activatePanel(id, updateHistory = false) {
+  const next = settingsTabs.find((tab) => tab.dataset.settingsPanel === id && !tab.hidden)
+    || settingsTabs.find((tab) => tab.dataset.settingsPanel === "nodes");
+  if (!next) return;
+  const changed = activePanel !== next.dataset.settingsPanel;
+  activePanel = next.dataset.settingsPanel;
+  for (const tab of settingsTabs) {
+    const selected = tab === next;
+    tab.setAttribute("aria-selected", String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    document.getElementById(tab.dataset.settingsPanel).hidden = !selected;
+  }
+  if (updateHistory && window.location.hash !== `#${activePanel}`) {
+    window.history.pushState(null, "", `#${activePanel}`);
+  }
+  if (changed) document.dispatchEvent(new CustomEvent("settings-panel-change", { detail: activePanel }));
+}
+
+function followSettingsLocation() {
+  const id = window.location.hash.slice(1);
+  activatePanel(id === "add-node" ? "nodes" : id);
+  if (id === "add-node") {
+    // Preserve /settings#add-node without opening an empty, still-loading flow.
+    if (settingsReady && !addNodeDialog.open) addNodeDialog.showModal();
+  } else if (addNodeDialog.open) {
+    addNodeDialog.close();
+  }
+}
+
+function openAddNode() {
+  activatePanel("nodes");
+  if (window.location.hash !== "#add-node") window.history.pushState(null, "", "#add-node");
+  if (!addNodeDialog.open) addNodeDialog.showModal();
+}
+
+for (const tab of settingsTabs) {
+  tab.addEventListener("click", () => activatePanel(tab.dataset.settingsPanel, true));
+  tab.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const visible = settingsTabs.filter((item) => !item.hidden);
+    const index = visible.indexOf(tab);
+    const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? visible.length - 1
+      : (index + (event.key === "ArrowRight" ? 1 : -1) + visible.length) % visible.length;
+    const next = visible[nextIndex];
+    activatePanel(next.dataset.settingsPanel, true);
+    next.focus();
+  });
+}
+
+document.querySelector("#open-add-node").addEventListener("click", openAddNode);
+document.querySelector("#close-add-node").addEventListener("click", () => addNodeDialog.close());
+document.querySelector("#pending-machines-shortcut").addEventListener("click", () => {
+  openAddNode();
+  document.querySelector("#pending-machine-details").open = true;
+});
+addNodeDialog.addEventListener("close", () => {
+  if (window.location.hash === "#add-node") window.history.replaceState(null, "", "#nodes");
+  if (activePanel === "nodes") document.querySelector("#open-add-node").focus({ preventScroll: true });
+});
 
 function notice(text, error = false) {
   message.textContent = text;
@@ -17,6 +82,13 @@ function notice(text, error = false) {
 function machineDownloadNotice(text, error = false) {
   machineDownloadMessage.textContent = text;
   machineDownloadMessage.classList.toggle("error", error);
+}
+
+function machineActivationNotice(text, error = false) {
+  const status = document.querySelector("#machine-activation-message");
+  status.textContent = text;
+  status.classList.toggle("error", error);
+  notice(text, error);
 }
 
 function updateMachineSkillButtons() {
@@ -55,26 +127,51 @@ function field(label, name, value, type = "text") {
   return node;
 }
 
-async function operation(button, action) {
+async function operation(button, action, report = notice) {
+  if (button.disabled) return;
   button.disabled = true;
   try { await action(); }
-  catch (error) { notice(error.message, true); }
+  catch (error) { report(error.message, true); }
   finally { button.disabled = false; }
 }
 
 function renderNodes(nodes) {
+  const expanded = new Set([...nodesRoot.querySelectorAll(".node-card[open]")].map((card) => card.dataset.nodeId));
   nodesRoot.replaceChildren();
-  if (!nodes.length) nodesRoot.append(element("p", "还没有节点。添加并配置你自己的节点后，才会显示用量、节点会话和可用的 Workspace。", "muted"));
+  document.querySelector("#nodes-count").textContent = String(nodes.length);
+  if (!nodes.length) {
+    const empty = element("div", null, "empty-state");
+    empty.append(element("strong", "还没有节点"), element("p", "点击“添加节点”配置自己的机器，即可使用用量、节点会话和 Workspace。", "muted"));
+    nodesRoot.append(empty);
+  }
   for (const node of nodes) {
-    const card = element("article", null, "node-card");
-    card.append(element("h3", node.name), element("code", node.id, "node-id"));
-    card.append(element("p", `${node.vnetOnly ? "VNet 专用（无需浏览器证书）" : node.vnetAvailable ? "VNet 已配置" : "浏览器直连"} · ${node.workspaceAvailable ? "Workspace 已配置" : "Workspace 网关尚未配置"}`, "badges"));
-    const form = element("form", null, "form-grid");
-    form.append(field("名称", "name", node.name), field("HTTPS 地址", "endpoint", node.endpoint, "url"),
-      field("区域", "region", node.region), field("颜色", "accent", node.accent, "color"));
-    if (node.vnetOnly) form.querySelector('[name="endpoint"]').readOnly = true;
+    const card = element("details", null, "node-card");
+    card.dataset.nodeId = node.id;
+    card.open = expanded.has(node.id);
+    const summary = element("summary", null, "node-summary");
+    const identity = element("span", null, "node-identity");
+    identity.append(element("strong", node.name), element("span", node.region || "未设置区域", "node-region"));
+    const endpoint = element("span", node.endpoint, "node-endpoint");
+    endpoint.title = node.endpoint;
+    const badges = element("span", null, "badges");
+    const connection = element("span", node.vnetOnly ? "VNet 专用" : node.vnetAvailable ? "VNet 已配置" : "浏览器直连", "badge");
+    connection.title = node.vnetOnly ? "VNet 专用，无需浏览器证书" : connection.textContent;
+    badges.append(connection, element("span", node.workspaceAvailable ? "Workspace 已配置" : "Workspace 未配置",
+      `badge ${node.workspaceAvailable ? "configured" : "pending"}`));
+    summary.append(identity, endpoint, badges, element("span", "设置", "node-disclosure"));
+    card.append(summary);
+
+    const editor = element("div", null, "node-editor");
+    editor.append(element("p", `节点 ID · ${node.id}`, "node-id"));
+    const form = element("form", null, "node-form");
+    form.setAttribute("aria-label", `${node.name} 节点设置`);
+    const endpointField = field(node.vnetOnly ? "HTTPS 地址（VNet 专用，由机器配置提供）" : "HTTPS 地址", "endpoint", node.endpoint, "url");
+    endpointField.className = "node-endpoint-field";
+    if (node.vnetOnly) endpointField.querySelector("input").readOnly = true;
+    form.append(field("名称", "name", node.name), field("区域", "region", node.region),
+      field("颜色", "accent", node.accent, "color"), endpointField);
     const actions = element("div", null, "actions");
-    const save = element("button", "保存设置");
+    const save = element("button", "保存设置", "primary");
     save.type = "submit";
     actions.append(save);
     if (!node.managedLegacy) {
@@ -83,8 +180,7 @@ function renderNodes(nodes) {
       credentials.addEventListener("click", () => operation(credentials, async () => {
         const result = await api(`/api/settings/nodes/${node.id}/enrollment`, "POST");
         enrollmentValue.textContent = JSON.stringify(result, null, 2);
-        enrollment.hidden = false;
-        enrollment.scrollIntoView({ block: "nearest" });
+        enrollment.showModal();
       }));
       actions.append(credentials);
     }
@@ -95,7 +191,7 @@ function renderNodes(nodes) {
       void operation(remove, async () => {
         await api(`/api/settings/nodes/${node.id}`, "DELETE");
         enrollmentValue.textContent = "";
-        enrollment.hidden = true;
+        if (enrollment.open) enrollment.close();
         notice("已移除节点。");
         await load();
       });
@@ -109,9 +205,13 @@ function renderNodes(nodes) {
         await api(`/api/settings/nodes/${node.id}`, "PUT", values);
         notice("你的节点设置已保存。");
         await load();
+        nodesRoot.querySelectorAll(".node-card").forEach((item) => {
+          if (item.dataset.nodeId === node.id) item.querySelector("summary").focus();
+        });
       });
     });
-    card.append(form);
+    editor.append(form);
+    card.append(editor);
     nodesRoot.append(card);
   }
 }
@@ -119,6 +219,7 @@ function renderNodes(nodes) {
 async function renderUsers() {
   const { users } = await api("/api/admin/users");
   usersRoot.replaceChildren();
+  document.querySelector("#users-count").textContent = String(users.length);
   for (const user of users) {
     const row = element("div", null, "user-row");
     row.append(element("span", `${user.username} · ${user.role === "admin" ? "管理员" : "用户"} · ${user.enabled ? "已启用" : "已停用"}`));
@@ -146,8 +247,14 @@ async function load() {
   machineSkillButtons.clear();
   machineSkillButtons.set(document.querySelector("#download-machine-skill"), Boolean(setup?.enabled));
   document.querySelector("#machine-package-status").textContent = setup?.enabled
-    ? `Linux x64 轻量包约 ${Math.ceil(setup.bytes / 1024 / 1024)} MB · 自动安装 Node ${setup.node} · CloudCLI ${setup.cloudcli} · copilot-api ${setup.copilotApi}。每次下载预留一个七天有效的身份，尚不加入节点列表。`
+    ? `约 ${Math.ceil(setup.bytes / 1024 / 1024)} MB · Node ${setup.node} · CloudCLI ${setup.cloudcli} · copilot-api ${setup.copilotApi}`
     : setup?.reason || "完整机器配置包尚未发布；旧版说明 ZIP 不能替代依赖包。";
+  const pendingCount = result.pendingMachines?.length || 0;
+  document.querySelector("#pending-machine-details").hidden = !pendingCount;
+  document.querySelector("#pending-machine-count").textContent = String(pendingCount);
+  const pendingShortcut = document.querySelector("#pending-machines-shortcut");
+  pendingShortcut.hidden = !pendingCount;
+  pendingShortcut.textContent = `${pendingCount} 个待配置身份 · 继续添加或管理`;
   pendingMachinesRoot.textContent = "";
   for (const pending of result.pendingMachines ?? []) {
     const row = element("div", null, "user-row pending-machine");
@@ -169,14 +276,18 @@ async function load() {
         await api(`/api/settings/machines/${pending.id}`, "DELETE");
         await load();
         notice("已取消待配置身份。");
-      });
+        machineDownloadNotice("已取消待配置身份。");
+      }, machineDownloadNotice);
     });
     row.append(cancel);
     pendingMachinesRoot.append(row);
   }
   updateMachineSkillButtons();
-  adminSection.hidden = result.user.role !== "admin";
-  if (!adminSection.hidden) await renderUsers();
+  adminTab.hidden = result.user.role !== "admin";
+  if (adminTab.hidden && activePanel === "admin-section") activatePanel("nodes", true);
+  settingsReady = true;
+  followSettingsLocation();
+  if (!adminTab.hidden) await renderUsers();
 }
 
 async function downloadMachineSkill(event) {
@@ -257,12 +368,14 @@ document.querySelector("#add-prepared-machine-form").addEventListener("submit", 
         Object.hasOwn(machine, "clientSigningKey") || Object.hasOwn(machine, "workspaceSsoKey")) {
       throw new Error("请选择配置完成的机器文件，不是 enrollment 或校验值");
     }
-    notice("正在从门户验证 VNet、HTTPS、Usage/History、Workspace SSO 和 WebSocket…");
+    machineActivationNotice("正在从门户验证 VNet、HTTPS、Usage/History、Workspace SSO 和 WebSocket…");
     const { node } = await api(`/api/settings/machines/${machine.nodeId}/activate`, "POST", machine);
     form.reset();
     await load();
+    addNodeDialog.close();
+    document.querySelector("#machine-activation-message").textContent = "";
     notice(`机器已验通并添加：${node.name}。现在可以使用 VNet 用量、History 和 Workspace。模型尚未登录时，请完成本人的 provider 授权。`);
-  });
+  }, machineActivationNotice);
 });
 
 document.querySelector("#create-user-form").addEventListener("submit", (event) => {
@@ -273,6 +386,9 @@ document.querySelector("#create-user-form").addEventListener("submit", (event) =
   void operation(form.querySelector("button"), async () => {
     const { user } = await api("/api/admin/users", "POST", data);
     form.reset();
+    const details = document.querySelector("#create-user");
+    details.open = false;
+    details.querySelector("summary").focus();
     notice(`用户 ${user.username} 已创建，初始节点列表为空。`);
     await renderUsers();
   });
@@ -296,17 +412,12 @@ document.querySelector("#password-form").addEventListener("submit", (event) => {
 
 document.querySelector("#hide-enrollment").addEventListener("click", () => {
   enrollmentValue.textContent = "";
-  enrollment.hidden = true;
+  enrollment.close();
 });
+// Escape and the explicit close button must both remove credentials from the DOM.
+enrollment.addEventListener("close", () => { enrollmentValue.textContent = ""; });
 
-function revealAddNode() {
-  if (window.location.hash !== "#add-node") return;
-  const section = document.querySelector("#add-node");
-  section.open = true;
-  section.scrollIntoView({ block: "start" });
-}
-
-window.addEventListener("hashchange", revealAddNode);
-// The existing node cards are asynchronous. Native fragment scrolling can run
-// before they expand the page, leaving the requested form below the viewport.
-void load().then(revealAddNode).catch((error) => notice(error.message, true));
+window.addEventListener("hashchange", followSettingsLocation);
+window.addEventListener("popstate", followSettingsLocation);
+followSettingsLocation();
+void load().catch((error) => notice(error.message, true));

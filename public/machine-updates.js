@@ -48,7 +48,7 @@ if (root) {
   const target = () => current?.releases.find((release) => release.id === $("release").value);
   function eligibility(node) {
     const release = target();
-    if (node.protected || !node.enrolled || !node.report || node.activeJob || !release) return false;
+    if (!current?.enabled || node.protected || !node.enrolled || !node.report || node.activeJob || !release) return false;
     if (node.report.platform !== release.platform || node.report.highestSequence > release.sequence || node.report.blockedReason) return false;
     if (release.migrations.some((id) => !node.report.readyMigrations.includes(id))) return false;
     if (Object.entries(release.components).some(([name, item]) => !item.nodeMajors.includes(node.report.components[name]?.nodeMajor))) return false;
@@ -63,9 +63,22 @@ if (root) {
     $("selected").disabled = working || !selected.size;
     $("all").disabled = working || !eligible.length;
     $("release").disabled = working || !current?.releases.length;
+    $("refresh").disabled = working;
+    $("selected").textContent = selected.size ? `更新选中 (${selected.size})` : "更新选中机器";
     $("apply").disabled = working || !plan?.targets.some((node) => node.eligible);
+    const active = current?.jobs.filter((job) => !terminal.has(job.state)).length || 0;
+    const latestJobs = new Map((current?.jobs || []).map((job) => [job.nodeId, job]));
+    const attention = [...latestJobs.values()].filter((job) =>
+      ["failed", "rolled_back", "needs_action", "needs_migration"].includes(job.state)).length;
+    $("count").hidden = !active && !attention && !eligible.length;
+    $("count-label").textContent = active ? `${active} 进行中` : attention ? `${attention} 待处理` : String(eligible.length);
+    $("count-compact").textContent = String(active || attention || eligible.length);
+    $("count").title = active ? `${active} 个升级任务进行中` : attention ? `${attention} 台机器需要检查升级记录` : `${eligible.length} 台机器可升级`;
+    $("count").classList.toggle("update-warning", Boolean(attention));
+    $("job-count").textContent = `${current?.jobs.length || 0} 条${active ? ` · ${active} 进行中` : ""}${attention ? ` · ${attention} 待处理` : ""}`;
   }
   async function bootstrap(node) {
+    if (working) return;
     const warning = node.enrolled
       ? "重新接入会撤销该升级器的旧凭据。只在这台机器的 OS owner 下重新安装，不会更新应用。继续？"
       : "下载包含此机器专用的升级器凭据，请勿分享。需在机器上由 OS owner 安装；此操作不会更新应用。继续？";
@@ -95,32 +108,54 @@ if (root) {
     finally { working = false; await refresh(false); }
   }
   function render() {
+    const focusedId = root.contains(document.activeElement) ? document.activeElement?.id : null;
+    const openMenus = new Set([...root.querySelectorAll(".updater-menu[open]")].map((menu) => menu.dataset.nodeId));
+    controls();
     $("list").replaceChildren();
+    if (!current.nodes.length) $("list").append(element("p", "还没有可管理的机器，请先在“我的节点”中添加。", "empty-state muted"));
     for (const node of current.nodes) {
       const row = element("div", null, "node-update-row");
       const label = element("label", null, "node-update-select");
       const check = element("input"); check.type = "checkbox"; check.checked = selected.has(node.id);
+      check.setAttribute("id", `node-update-check-${node.id}`);
       check.disabled = working || !eligibility(node);
       check.setAttribute("aria-label", `选择 ${node.name} 更新`);
       check.addEventListener("change", () => { check.checked ? selected.add(node.id) : selected.delete(node.id); controls(); });
       label.append(check, element("strong", node.name));
       const components = node.report?.components;
-      row.append(label, element("span",
-        `CloudCLI ${components?.cloudcli?.version || "未知"} · copilot-api ${components?.copilotApi?.version || "未知"} · ${node.connected ? "升级器在线" : node.enrolled ? "离线/等待首次连接" : "未接入"}`, "muted"));
-      if (node.reason) row.append(element("span", labels[node.reason] || node.reason, "muted"));
-      if (node.activeJob) row.append(element("span", labels[node.activeJob.state] || node.activeJob.state, "update-badge"));
-      const actions = element("div", null, "update-controls");
+      const info = element("div", null, "node-update-info");
+      info.append(element("span", `CloudCLI ${components?.cloudcli?.version || "未知"} · copilot-api ${components?.copilotApi?.version || "未知"}`, "muted"));
+      const status = element("span", null, "update-status");
+      status.append(element("span", node.connected ? "升级器在线" : node.enrolled ? "离线/等待首次连接" : "未接入", "muted"));
+      if (node.reason) status.append(element("span", labels[node.reason] || node.reason, "muted"));
+      if (node.activeJob) status.append(element("span", labels[node.activeJob.state] || node.activeJob.state, "update-badge"));
+      info.append(status);
+      row.append(label, info);
+      const actions = element("div", null, "update-actions");
       const update = element("button", "更新此机器"); update.type = "button"; update.disabled = working || !eligibility(node);
+      update.setAttribute("id", `node-update-button-${node.id}`);
       update.addEventListener("click", () => preview([node.id]));
       actions.append(update);
       if (!node.protected) {
+        const menu = element("details", null, "updater-menu");
+        menu.dataset.nodeId = node.id;
+        menu.open = openMenus.has(node.id);
+        const summary = element("summary", "管理");
+        summary.setAttribute("id", `node-update-menu-${node.id}`);
+        summary.setAttribute("aria-label", `${node.name} 的升级器管理`);
+        const items = element("div", null, "updater-menu-items");
         const install = element("button", node.enrolled ? "重新接入升级器" : "接入升级器");
+        install.setAttribute("id", `node-update-install-${node.id}`);
         install.type = "button"; install.disabled = working || !current.enabled || Boolean(node.activeJob);
-        install.addEventListener("click", () => bootstrap(node)); actions.append(install);
+        install.addEventListener("click", () => { menu.open = false; return bootstrap(node); });
+        items.append(install);
         if (node.enrolled) {
-          const revoke = element("button", "停用升级器"); revoke.type = "button"; revoke.disabled = working;
+          const revoke = element("button", "停用升级器", "danger"); revoke.type = "button"; revoke.disabled = working;
+          revoke.setAttribute("id", `node-update-revoke-${node.id}`);
           revoke.addEventListener("click", async () => {
+            if (working) return;
             if (!window.confirm("撤销此升级器凭据并取消未开始的任务？不会关机或删除服务。正在切换的机器需等本地事务恢复后检查。")) return;
+            menu.open = false;
             working = true; controls();
             try {
               await api(`/api/settings/updates/revoke/${encodeURIComponent(node.id)}`, { confirmation: "disable-node-updater" });
@@ -128,18 +163,22 @@ if (root) {
             } catch (error) { notice(error.message, true); }
             finally { working = false; await refresh(false); }
           });
-          actions.append(revoke);
+          items.append(revoke);
         }
+        menu.append(summary, items);
+        actions.append(menu);
       }
       row.append(actions); $("list").append(row);
     }
     $("jobs").replaceChildren();
+    $("history").hidden = !current.jobs.length;
     for (const job of [...current.jobs].reverse().slice(0, 30)) {
       const row = element("p", `${current.nodes.find((node) => node.id === job.nodeId)?.name || job.nodeId} · ${job.releaseId} · ${labels[job.state] || job.state}${job.code && job.code !== "ok" ? " · " + (labels[job.code] || job.code) : ""}`,
         ["failed", "rolled_back", "needs_action", "needs_migration"].includes(job.state) ? "update-warning" : "muted");
       $("jobs").append(row);
     }
     controls();
+    if (focusedId) document.getElementById(focusedId)?.focus({ preventScroll: true });
   }
   async function refresh(showMessage = true) {
     clearTimeout(timer);
@@ -150,6 +189,10 @@ if (root) {
       for (const release of current.releases) {
         const option = element("option", `${release.id} · ${Object.entries(release.components).map(([name, item]) => `${name} ${item.version}`).join(" / ")}`);
         option.value = release.id; $("release").append(option);
+      }
+      if (!current.releases.length) {
+        const option = element("option", "暂无可用发行版");
+        option.value = ""; $("release").append(option);
       }
       if (current.releases.some((release) => release.id === value)) $("release").value = value;
       render();
@@ -182,6 +225,7 @@ if (root) {
       notice(`已提交 ${result.jobs.length} 台机器的升级任务；这不代表升级已完成。`);
       $("confirm").close(); plan = null;
       await refresh(false);
+      $("history").open = true;
     } catch (error) { $("plan-error").textContent = error.message; }
     finally { working = false; controls(); }
   });
@@ -189,6 +233,22 @@ if (root) {
   $("all").addEventListener("click", () => preview(current.nodes.filter(eligibility).map((node) => node.id)));
   $("refresh").addEventListener("click", () => refresh());
   $("release").addEventListener("change", render);
+  $("confirm").addEventListener("close", () => { plan = null; controls(); });
+  document.addEventListener("settings-panel-change", (event) => {
+    if (event.detail === "machine-updates" && !working) void refresh(false);
+  });
+  document.addEventListener("click", (event) => {
+    for (const menu of root.querySelectorAll(".updater-menu[open]")) {
+      if (!menu.contains(event.target)) menu.open = false;
+    }
+  });
+  root.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    for (const menu of root.querySelectorAll(".updater-menu[open]")) {
+      menu.open = false;
+      menu.querySelector("summary").focus();
+    }
+  });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) void refresh(false); });
   void refresh();
 }
