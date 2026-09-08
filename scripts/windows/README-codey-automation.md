@@ -40,6 +40,22 @@ The original owner's existing Dev Tunnels and Azure CLI sign-ins must work.
 Microsoft/organization policies can still require the owner to sign in again;
 the scripts do not bypass MFA or copy another account's authentication cache.
 
+## Native desktop session history on Windows
+
+The Workspace launcher sets `CODEY_CODEX_EXECUTABLE` from the existing reviewed
+`runtime.codexExe`. Native desktop histories can then be read by that CLI over
+temporary **stdio**, without a Unix daemon, extra listener, or new network rule.
+The reader permits only initialization, `thread/read`, and `thread/loaded/list`;
+it verifies the requested ID, complete turn data, and an empty loaded-thread
+list before returning. It never resumes/starts/forks a thread or treats a partial
+JSONL export as complete. Missing/incompatible readers fail explicitly.
+
+This is a history-reading adapter, not permission to take over native desktop
+turns. Native execution/fork ownership guards remain unchanged. Activating a
+prepared backend/launcher update requires a separately approved Workspace-only
+restart and an atomic update of its pinned launcher/configuration references.
+Do not restart the protected copilot-api or the existing tunnel for this change.
+
 ## Installation and validation
 
 Run `install-codey-windows-automation.ps1 -ConfigPath <absolute-path>` to validate
