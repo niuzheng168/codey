@@ -892,6 +892,8 @@ export function createMultiUserPortalServer(options) {
     // Updater credentials are independent of Portal cookies, model keys and SSO.
     // This handler authenticates and scopes every request itself.
     if (options.machineUpdates && await options.machineUpdates.handleAgent(req, res)) return;
+    // The Mac renewal endpoint has its own purpose-separated, node-only auth.
+    if (options.machineSetup?.tunnels && await options.machineSetup.tunnels.handle(req, res)) return;
     if (passwordAuthenticator && await passwordAuthenticator.handle(req, res)) return;
     if (passwordAuthenticator && ["/api/health", "/healthz", "/readyz"].includes(url.pathname) &&
         ["GET", "HEAD"].includes(req.method)) {

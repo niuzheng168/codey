@@ -5,8 +5,8 @@
 
 ## 用户流程
 
-1. 本人登录，分别选择 **Windows** 或 **Linux** 个性化轻量 Skill；macOS 入口仅展示
-   “规划中”。包内有预留机器身份、两个 Codey fork 的
+1. 本人登录，选择 **Windows**、**Linux** 或 **macOS Apple Silicon/Intel** 个性化轻量 Skill。
+   包内有预留机器身份、两个 Codey fork 的
    源码/lockfile/许可证、准确版本及校验值、网络和安装脚本。
    **不需要把所有 binary 打包**：Node 从官方发行地址自动下载并核验 SHA-256，
    Bun/npm 依赖按锁文件在独立 release 内安装，Codex 随 CloudCLI 的依赖安装。
@@ -34,12 +34,17 @@ Windows 的未完成安装必须先人工审查，不自动覆盖；成功安装
 | --- | --- | --- |
 | Windows x64 | `scripts/setup-windows.ps1` | 原 owner 登录后运行的隐藏监督进程；不要求无人登录运行 |
 | Linux x64 | `scripts/setup-linux.sh` | systemd 用户服务；旧 Python 入口保留兼容 |
-| macOS | 尚未实现 | 规划中，不回退到其他平台 |
+| macOS Apple Silicon / Intel | `scripts/setup-macos.sh` | 本人 launchd 服务、独立 Codex 后端及私有 DevTunnel |
 
-两个入口默认只输出计划。Windows 执行需显式 `-Apply -NetworkApproved`，Linux 需
+所有入口默认只输出计划。Windows 执行需显式 `-Apply -NetworkApproved`，Linux/macOS 需
 `--apply`；Azure 网络脚本另行确认。Windows 安装器不改防火墙、执行策略或全局
 Node/Python/Codex，也不停止占用端口的已有服务。Windows 包必须使用 `win-x64.zip`
 Node 发行物，Linux 包使用 `linux-x64.tar.xz`；预留、重下和添加都绑定同一平台。
+
+Mac 跳过 Azure VNet/VM 配置，使用各自的 `darwin-arm64.tar.gz` / `darwin-x64.tar.gz`
+Node 发行物和第三份最小权限的隧道续期 key。复用现有本机 Codex/模型代理，新增的
+服务只监听回环地址；门户验通私有隧道后激活。完整生命周期与部署/回退约束见
+[macOS 节点](./codey-macos-nodes.md)。节点后台不需要 Azure 部署登录。
 
 Windows 首次完整安装需要 Python 3.12+、原生 OpenSSL 和必要依赖构建工具。
 新任务使用 InteractiveToken/LeastPrivilege、登录触发器，不使用 boot/SYSTEM/S4U。
@@ -87,13 +92,15 @@ SSO assertion 或模型密钥，失败不沿用在线结果。显示“Workspace
 ```sh
 python3 scripts/build-machine-bundle.py --platform linux-x64 --output /path/to/new-linux-release
 python3 scripts/build-machine-bundle.py --platform windows-x64 --output /path/to/new-windows-release
+python3 scripts/build-machine-bundle.py --platform macos-arm64 --output /path/to/new-mac-arm-release
+python3 scripts/build-machine-bundle.py --platform macos-x64 --output /path/to/new-mac-intel-release
 ```
 
 开发验证可显式加 `--allow-reviewed-diff` 纳入已审查的 **tracked diff**，manifest
 记录 patch SHA；新源文件须先纳入 Git。生产发布优先使用干净提交。
 这一步只生成几 MB 的源码包和清单；实际 runtime/npm 安装与构建发生在目标机。
 
-在既有持久卷按平台发布固定三个文件（保留旧 release 供正在下载的用户使用）：
+在既有持久卷按平台发布清单和源码包；Mac 另含数据桥源码包（保留旧 release 供正在下载的用户使用）：
 
 ```text
 /data/machine-bundles/
@@ -108,6 +115,13 @@ python3 scripts/build-machine-bundle.py --platform windows-x64 --output /path/to
       cloudcli-source.tar.gz
       copilot-api-source.tar.gz
     active.json               # Windows 独立指针，不复用 Linux manifest/runtime
+  platforms/macos-arm64/       # macos-x64 使用同样的独立目录结构
+    releases/machine-<digest>/
+      manifest.json
+      cloudcli-source.tar.gz
+      copilot-api-source.tar.gz
+      portal-node-source.tar.gz
+    active.json
 ```
 
 Portal 固定文件名、限制大小、拒绝 symlink/path traversal，下载流重新校验 CRC/SHA。
@@ -133,6 +147,8 @@ PORTAL_MACHINE_NETWORK_CONFIG=/data/machine-network.json
 Windows 使用同源 POST `/api/settings/machines/skill?platform=windows-x64`；
 Linux 保持无参数旧入口兼容，也接受 `platform=linux-x64`。
 平台查询不赋予调用方选择 owner、node ID 或 key 的权限。
+Mac 使用 `platform=macos-arm64` 或 `platform=macos-x64`，只需私有 DevTunnel，
+不读取或要求 Azure VNet 配置；详细运维边界见 [Mac 节点说明](./codey-macos-nodes.md)。
 后续依赖包发布可切换 `active.json`；已有机器不被自动升级或重启。
 
 ## 验证

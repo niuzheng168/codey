@@ -4,6 +4,7 @@ import { isIP } from "node:net";
 import path from "node:path";
 import { issueClientTicket } from "./client-ticket.mjs";
 import { nodeTlsOptions } from "./machine-identity.mjs";
+import { DevTunnelTransport } from "./devtunnel-transport.mjs";
 
 const NODE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const USAGE_PATHS = new Set([
@@ -102,7 +103,9 @@ function send(res, status, value, head = false) {
 // Only server-deployed private targets are accepted. A user's editable browser
 // node URL, query string, Cookie, and Authorization never select an upstream.
 export class NodeDataGateway {
-  constructor(config, { requestImpl = https.request, timeoutMs = 15000, maxResponseBytes = MAX_RESPONSE_BYTES, nodePolicy } = {}) {
+  constructor(config, { requestImpl = https.request, timeoutMs = 15000, maxResponseBytes = MAX_RESPONSE_BYTES, nodePolicy,
+    tunnelTransportFactory = (node, ca) => new DevTunnelTransport(node.devTunnel, nodeTlsOptions(node, ca),
+      { getToken: node.getTunnelToken }) } = {}) {
     this.config = config;
     this.nodes = new Map(config.nodes.map((node) => [node.id, node]));
     this.requestImpl = requestImpl;
@@ -110,6 +113,8 @@ export class NodeDataGateway {
     this.maxResponseBytes = maxResponseBytes;
     this.activeRequests = 0;
     this.nodePolicy = nodePolicy;
+    this.tunnelTransportFactory = tunnelTransportFactory;
+    this.tunnelTransports = new Map();
   }
 
   setMachineNodes(nodes) {
@@ -119,6 +124,23 @@ export class NodeDataGateway {
       result.set(node.id, node);
     }
     this.nodes = result;
+  }
+
+  upstreamOptions(node) {
+    const options = nodeTlsOptions(node, this.config.ca);
+    if (node.devTunnel) {
+      if (typeof node.getTunnelToken !== "function") throw new Error("Missing node-scoped tunnel credential provider");
+      if (!this.tunnelTransports.has(node.id)) {
+        this.tunnelTransports.set(node.id, this.tunnelTransportFactory(node, this.config.ca));
+      }
+      options.agent = this.tunnelTransports.get(node.id).agent;
+    }
+    return options;
+  }
+
+  async close() {
+    await Promise.allSettled([...this.tunnelTransports.values()].map(transport => transport.dispose()));
+    this.tunnelTransports.clear();
   }
 
   endpoint(nodeId, allowedIds) {
@@ -208,7 +230,7 @@ export class NodeDataGateway {
       try {
         request = this.requestImpl(target, {
           method: "GET",
-          ...nodeTlsOptions(node, this.config.ca),
+          ...this.upstreamOptions(node),
           headers: { accept: "application/json", authorization: `Bearer ${ticket}` },
         }, (response) => {
           response.on("error", finish);

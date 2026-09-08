@@ -13,7 +13,7 @@ import { NodePolicy } from "../src/node-policy.mjs";
 import { PasswordAuthenticator, hashPassword } from "../src/password-auth.mjs";
 import { SettingsApi } from "../src/settings-api.mjs";
 import { createMultiUserPortalServer } from "../src/server.mjs";
-import { MachineSetup, loadMachineBundle, machineNetworkConfig, machineReleaseId, MACHINE_SKILL_FILES } from "../src/machine-setup.mjs";
+import { MachineSetup, loadMachineBundle, machineNetworkConfig, machineReleaseId, MACHINE_SKILL_FILES, machineArtifacts } from "../src/machine-setup.mjs";
 import { machineIdentity, machineServerName, privateMachineIp } from "../src/machine-identity.mjs";
 import { NodeDataGateway } from "../src/node-data-gateway.mjs";
 import { CloudCliGateway } from "../src/cloudcli-gateway.mjs";
@@ -21,6 +21,7 @@ import { crc32, zipStream } from "../src/zip-stream.mjs";
 import { fetchNodeJson } from "../public/node-transport.js";
 import { MachineUpdates } from "../src/machine-updates.mjs";
 import { MACHINE_PLATFORMS } from "../src/machine-platforms.mjs";
+import { signMachineTunnelRequest } from "../src/machine-tunnel.mjs";
 
 const run = promisify(execFile);
 const origin = "https://codey.example.test";
@@ -49,7 +50,7 @@ async function temporary(t) {
 async function bundle(root, platform = "linux-x64") {
   await mkdir(root, { recursive: true });
   const artifacts = [];
-  for (const file of ["cloudcli-source.tar.gz", "copilot-api-source.tar.gz"]) {
+  for (const file of machineArtifacts(platform)) {
     const bytes = Buffer.from(`test fixture ${file}\n`);
     await writeFile(path.join(root, file), bytes);
     artifacts.push({ file, size: bytes.length, crc32: crc32(bytes), sha256: createHash("sha256").update(bytes).digest("hex") });
@@ -59,8 +60,8 @@ async function bundle(root, platform = "linux-x64") {
     node: "24.20.0", cloudcli: { version: "test-cloudcli" }, copilotApi: { version: "test-copilot" }, artifacts,
     bunBuildTool: "1.4.2", dependencyMode: "install-on-target",
     nodeDistribution: {
-      file: platform === "windows-x64" ? "node-v24.20.0-win-x64.zip" : "node-v24.20.0-linux-x64.tar.xz",
-      url: `https://nodejs.org/dist/v24.20.0/node-v24.20.0-${platform === "windows-x64" ? "win-x64.zip" : "linux-x64.tar.xz"}`,
+      file: `node-v24.20.0-${MACHINE_PLATFORMS.find(item => item.id === platform).nodeSuffix}`,
+      url: `https://nodejs.org/dist/v24.20.0/node-v24.20.0-${MACHINE_PLATFORMS.find(item => item.id === platform).nodeSuffix}`,
       sha256: (platform === "windows-x64" ? "b" : "a").repeat(64),
     },
   };
@@ -157,8 +158,69 @@ async function fixture(t) {
       cookie: user, origin, ...(value !== undefined ? { "content-type": "application/json" } : {}), ...headers,
     }, ...(value !== undefined ? { body: JSON.stringify(value) } : {}),
   });
-  return { root, accounts, policy, auth, credential, member, cookie, admin, manifest, bundleRoot, machineSetup, data, workspace, probes, request, master, ticketMaster };
+  return { root, base, accounts, policy, auth, credential, member, cookie, admin, manifest, bundleRoot, machineSetup, data, workspace, probes, request, master, ticketMaster };
 }
+
+test("Mac native packages carry their own architecture/runtime/key, need no VNet, and activate only after scoped tunnel proof", async t => {
+  const f = await fixture(t);
+  f.machineSetup.network = null;
+  f.machineSetup.tunnels.verifyAccess = async () => {};
+  for (const [index, platform] of ["macos-arm64", "macos-x64"].entries()) {
+    await bundle(path.join(f.bundleRoot, "platforms", platform), platform);
+    const response = await f.request(`/api/settings/machines/skill?platform=${platform}`, { method: "POST" });
+    assert.equal(response.status, 200);
+    assert.ok(response.headers.get("content-disposition").includes(`-${platform}-n-`));
+    const files = unzip(Buffer.from(await response.arrayBuffer()));
+    for (const file of ["setup-macos.sh", "configure-macos.py", "macos-service.py"]) {
+      assert.ok(files.has(`config-new-codey-machine/scripts/${file}`));
+    }
+    assert.ok(files.has("config-new-codey-machine/assets/portal-node-source.tar.gz"));
+    assert.ok(!files.has("config-new-codey-machine/scripts/setup-windows.ps1"));
+    assert.ok(!files.has("config-new-codey-machine/scripts/setup-linux.sh"));
+    assert.ok(![...files.keys()].some(name => name.includes("assets/codey-updater/")));
+    const enrollment = JSON.parse(files.get("config-new-codey-machine/assets/enrollment.json"));
+    assert.deepEqual(enrollment.network, { mode: "devtunnel" });
+    assert.equal(enrollment.platform, platform);
+    assert.match(enrollment.tunnelUpdateKey, /^[A-Za-z0-9_-]{43}$/);
+    assert.notEqual(enrollment.tunnelUpdateKey, enrollment.workspaceSsoKey);
+    const repeated = await f.request(`/api/settings/machines/${enrollment.nodeId}/skill`, { method: "POST" });
+    const again = JSON.parse(unzip(Buffer.from(await repeated.arrayBuffer())).get("config-new-codey-machine/assets/enrollment.json"));
+    assert.equal(again.nodeId, enrollment.nodeId);
+    assert.equal(again.tunnelUpdateKey, enrollment.tunnelUpdateKey);
+    assert.equal((await f.request(`/api/settings/machines/${enrollment.nodeId}/skill`, { method: "POST", user: f.admin })).status, 404);
+
+    const vm = await machineFile(f.root, enrollment.nodeId);
+    const { privateIp, vmResourceId, ...fields } = vm;
+    const coordinates = { tunnelId: `mac-fixture-${index}`, clusterId: "jpe1" };
+    const machine = { ...fields, platform, networkMode: "devtunnel", devTunnel: coordinates };
+    assert.equal((await f.request(`/api/settings/machines/${enrollment.nodeId}/activate`, { method: "POST", value: machine })).status, 409);
+    for (const illegal of [{ privateIp }, { vmResourceId }, { connectToken: "must-not-upload" }]) {
+      assert.throws(() => machineIdentity({ ...machine, ...illegal }, enrollment.nodeId));
+    }
+    const now = Date.now(), nonce = randomBytes(16).toString("base64url");
+    const connectToken = ["e30", Buffer.from(JSON.stringify({
+      ...coordinates, scp: "connect", exp: Math.floor(now / 1000) + 72000,
+    })).toString("base64url"), "c2ln"].join(".");
+    const body = JSON.stringify({ ...coordinates, connectToken });
+    const pathname = `/api/machine-tunnels/${enrollment.nodeId}/token`;
+    const signature = signMachineTunnelRequest(enrollment.tunnelUpdateKey, pathname, body, now, nonce);
+    const agent = await fetch(f.base + pathname, { method: "POST", body, headers: {
+      "content-type": "application/json", authorization: `CodeyTunnel ${now}:${nonce}:${signature}`,
+    } });
+    assert.equal(agent.status, 200, "The agent endpoint authenticates without Portal cookies or Azure permissions");
+    const activation = await f.request(`/api/settings/machines/${enrollment.nodeId}/activate`, { method: "POST", value: machine });
+    assert.equal(activation.status, 201);
+    const node = (await activation.json()).node;
+    assert.equal(node.platform, platform);
+    assert.equal(node.networkMode, "devtunnel");
+    assert.equal(node.vnetOnly, true, "Never try browser loopback for a remotely consumed Mac node");
+    assert.equal(f.workspace.match(`/cloudcli/${node.id}/`).devTunnel.port, 3001);
+    assert.equal(f.data.nodes.get(node.id).devTunnel.port, 8443);
+    assert.ok(!JSON.stringify(node).includes(connectToken));
+    assert.ok(!JSON.stringify(await f.policy.records()).includes(connectToken));
+  }
+  assert.equal(f.probes.length, 2);
+});
 
 test("complete skill download reserves only this user's identity, includes dependencies and no global or provider credentials", async (t) => {
   const f = await fixture(t);
@@ -217,12 +279,13 @@ test("complete skill download reserves only this user's identity, includes depen
   assert.equal((await f.request(`/api/settings/machines/${enrollment.nodeId}/skill`, { method: "POST", user: f.admin })).status, 404);
 });
 
-test("Windows and Linux have separate native downloads; macOS is planned and never falls back", async (t) => {
+test("platform downloads are distinct and missing Mac/Windows releases never fall back to Linux", async (t) => {
   const f = await fixture(t);
   const initial = (await (await f.request("/api/settings")).json()).machineSetup;
   assert.equal(initial.platforms.find((item) => item.platform === "linux-x64").enabled, true);
   assert.equal(initial.platforms.find((item) => item.platform === "windows-x64").enabled, false);
-  assert.equal(initial.platforms.find((item) => item.platform === "macos").planned, true);
+  assert.equal(initial.platforms.find((item) => item.platform === "macos-arm64").enabled, false);
+  assert.equal(initial.platforms.find((item) => item.platform === "macos-x64").enabled, false);
   for (const value of ["macos", "darwin", "../linux-x64", ""]) {
     assert.equal((await f.request("/api/settings/machines/skill?platform=" + encodeURIComponent(value),
       { method: "POST" })).status, 400);

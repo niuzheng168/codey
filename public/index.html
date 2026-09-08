@@ -56,7 +56,7 @@
     </header>
 
     <main class="page-shell">
-      <span id="node-connection-help" class="sr-only">默认浏览器直连。勾选后 Usage 通过 ACA / VNet 连接远程节点，不访问本机；Workspace 始终走 VNet。</span>
+      <span id="node-connection-help" class="sr-only">默认浏览器直连。勾选后 Usage 通过 ACA / VNet 连接远程节点，不访问本机；Workspace 始终走云端网关，使用 VNet 或私有 DevTunnel。</span>
       <div id="usage-view">
         <section class="hero" aria-labelledby="page-heading">
           <div>
@@ -219,10 +219,10 @@
       <section id="workspace-view" class="workspace-view" hidden>
         <div class="workspace-hero">
           <div>
-            <p class="eyebrow">VNET CLOUDCLI WORKSPACE</p>
+            <p class="eyebrow">CODEY CLOUDCLI WORKSPACE</p>
             <h1>CloudCLI</h1>
             <p class="hero-copy">
-            Codey 完成登录和节点授权，然后通过 Azure VNet 打开节点上运行的
+            Codey 完成登录和节点授权，然后通过 Azure VNet 或私有 DevTunnel 打开节点上运行的
               CloudCLI。使用当前 Codey 会话，无需再次登录节点。
             </p>
           </div>

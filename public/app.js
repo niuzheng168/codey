@@ -194,7 +194,7 @@ const state = {
 };
 
 function connectionModeSuffix() {
-  if (state.activeView === "workspace") return " · ACA → VNet";
+  if (state.activeView === "workspace") return " · ACA → 节点";
   return state.directMode
     ? state.connectionMode === "vnet" ? " · ACA → VNet" : " · 浏览器直连"
     : " · ACA";

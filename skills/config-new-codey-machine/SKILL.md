@@ -1,11 +1,11 @@
 ---
 name: config-new-codey-machine
-description: "配置新的 Codey 节点：按 Windows/Linux 分别使用原生安装脚本和本人下载的完整包，安装独立 CloudCLI/copilot-api/Node、HTTPS/SSO，产出机器文件后由门户验通添加。默认先计划，网络/防火墙须单独确认；Windows 登录后运行，Linux 使用 systemd 用户服务；macOS 规划中。不覆盖既有身份、任务或服务。"
+description: "配置新的 Codey 节点：Windows/Linux 使用原生 Azure VNet 安装包；macOS Apple Silicon/Intel 使用独立 CloudCLI、HTTPS 数据服务及私有 DevTunnel。默认先计划，产出无密钥机器文件后由门户验通添加。Mac 保留现有 Codex/模型代理，launchd 登录后运行并仅续期本节点令牌。不覆盖既有身份、任务或服务。"
 ---
 
 # Configure a new Codey machine
 
-遵循顺序：**下载本人完整包 → 配置目标机器与 VNet → 页面验通并添加**。
+遵循顺序：**下载本人对应平台完整包 → 配置目标机器及 VNet/DevTunnel → 页面验通并添加**。
 下载只预留七天有效的机器身份，不会把未部署的机器放进节点列表。
 修复后重试时可在“待配置身份”重新下载，保留同一 ID/key/有效期；不要不断创建新身份
 和重复的 Azure 网络资源。已成功配置的机器不能借重试包自动升级。
@@ -26,13 +26,14 @@ description: "配置新的 Codey 节点：按 Windows/Linux 分别使用原生�
 | --- | --- | --- | --- |
 | Windows x64 | `scripts/setup-windows.ps1` | 原 owner 的 InteractiveToken 登录任务，隐藏监督进程 | 原生脚本；必须使用已发布的 Windows 完整包 |
 | Linux x64 | `scripts/setup-linux.sh` | systemd 用户服务及独立签名升级器 | 原生脚本；现有 Linux 包保持兼容 |
-| macOS | 无 | 后续单独实现 | 规划中，禁止回退到 Linux/Windows 脚本 |
+| macOS Apple Silicon / Intel | `scripts/setup-macos.sh` | 本人 launchd 登录服务及私有 DevTunnel | 分架构完整包；不回退到 Linux/Windows |
 
-门户分别发布两个平台的依赖清单和包。尚未发布 Windows 包时，其下载按钮必须
+门户分别发布 Windows、Linux、macOS Apple Silicon/Intel 的依赖清单和包。尚未发布某平台包时，其下载按钮必须
 明确不可用，不能给用户 Linux 包、只有说明的 ZIP 或旧的工作站安装器。
 旧 `/bootstrap/*` / `install-codex-workstation.*` 配置工作站，不是这个完整节点流程。
 重下载待配置身份保留原平台、ID/key 和有效期，不能借重试更换操作系统。
-此流程目前使用 Azure VNet；既有 Windows Dev Tunnel 节点不需重新运行首次安装。
+Windows/Linux 使用 Azure VNet；macOS 使用自己的 DevTunnel，跳过下方 Azure 网络步骤。
+既有 Windows DevTunnel 节点不需重新运行首次安装，也不轮换其密钥或重启其服务。
 
 这是**轻量联网安装包**，不把 Node 等所有 binary 塞进 ZIP。脚本将它们安装到独立
 release 目录，不改系统 Node/npm、nvm default 或已有服务；目标需可访问官方 Node、
@@ -48,7 +49,7 @@ npm registry 及锁文件引用的依赖源。Bun 只用于构建，服务使用
 
 只确认目标 VM/OS owner 与可用管理方式；若当前就在目标 VM，可由 IMDS 发现资源 ID。
 同一完整包只用于**一台**目标机，不能把包转给其他账号或反复换机器。
-目标为 Azure Linux x64 或 Windows x64。Linux 的 Ubuntu 24.04 / Python 3.12
+目标为 Azure Linux x64、Windows x64 或 macOS。Linux 的 Ubuntu 24.04 / Python 3.12
 路径已有部署验证；Windows 安装器需要 Python 3.12+、原生 OpenSSL 和依赖构建工具。
 必须如实记录 Windows 的首次干净机器安装验收，不能把语法/规划测试当成完成安装。
 控制端系统不等于目标系统：Windows/macOS 上的 Codex 仍可管理 Linux 目标。
@@ -65,6 +66,9 @@ Azure 网络权限与 Codey 登录权限不同。复用用户已有 `az` 登录�
 二进制包。需要管理员权限安装系统工具时说明影响并取得授权。
 
 ## 1. 自动准备 VNet
+
+**本节仅用于 Windows/Linux。Mac 不需要 Azure VM resource ID、VNet、入站防火墙规则，
+也不允许用伪造的 VM 信息绕过平台校验。Mac 直接使用下面的 macOS 步骤。**
 
 先在拥有 Azure 权限的控制端运行网络计划；替换下面的路径/VM ID：
 
@@ -92,6 +96,60 @@ Azure 资源和两条限源端口规则都有节点专属名字；输出对应 `
 验证相同 SHA-256，传输完成撤销临时权限。不要把 enrollment/key 放到公共 URL。
 
 ## 2. 使用匹配的原生入口安装
+
+### macOS
+
+使用本人下载的 Apple Silicon 或 Intel 完整包；不能在两种架构之间互换包。
+本机需要已登录/可用的 Codex 和现有 `127.0.0.1:4141` 模型代理；这是为了复用已有
+工作站，而不是覆盖其 provider、登录、模型目录或全局运行环境。缺少模型身份时先由
+本人正常配置，不复制其他机器的凭据。脚本自动发现 Codex 中 `cat <key-file>` 的
+现有凭据引用；其他配置可显式提供 `--usage-key-file`，但不把密钥内容放进参数。
+
+普通工具为 Python 3.12+、OpenSSL 3、Xcode Command Line Tools 和 DevTunnel。
+缺失时先按官方方式安装这些普通工具；可使用现有 Homebrew，不能用 sudo 运行节点。
+完成 `devtunnel user login`；这是独立登录，**不要求 Mac 节点拥有 Azure 部署权限**。
+只创建绑定此次随机节点 ID 的私有隧道和 HTTPS 3001/8443 端口，不允许匿名访问。
+
+```text
+bash scripts/setup-macos.sh --name "Mac"
+bash scripts/setup-macos.sh --name "Mac" --apply
+```
+
+默认先输出计划；可使用 `--codex-bin`、`--devtunnel-bin`、`--openssl-bin`、
+`--workspace-root` 指定已审查的本机路径。若公司网络要求使用已批准的 HTTPS npm
+镜像，用 `--npm-registry <无凭据HTTPS地址>` 指定；只在独立 release 中改写 tarball
+位置，保留所有锁定版本及 integrity，不关闭 TLS/摘要校验、不放宽全局 npm 策略。
+
+安装边界：
+
+- 服务和固定 Node runtime 位于 `~/.local/share/codey-machine-macos/<nodeId>`；
+  独立 DB、TLS leaf/key、enrollment、私有日志位于
+  `~/.config/codey-machine-macos/<nodeId>`，目录 0700、敏感文件 0600。
+- 只新建 CloudCLI 与 HTTPS 只读数据服务，监听 `127.0.0.1:3001/8443`。
+  数据服务带本人已有代理 key 读取本机用量，读取本机 Codex 历史；不向其他地址转发该 key，
+  不重启或修改 `4141`、Codex、其他节点、SSH、系统代理/路由或防火墙。
+- Codey 使用同一个已发布的共享 Workspace UI；此 Mac 只构建独立后端。
+- 本人 launchd 登录后运行 codex、workspace、data、tunnel 和 renewal；Mac 需开机、保持
+  登录和联网。不会禁止休眠、修改电源策略或安装 root/system 服务。
+- 续期使用第三份仅绑定本节点的 `tunnelUpdateKey`，不是模型、数据 ticket 或 SSO key。
+  它只能提交同一 tunnel ID 的 connect-only 令牌，不能启用节点、改证书、换归属或管理
+  Azure。门户验证真实 DevTunnel 服务，令牌加密存入签名状态；不写入公开机器文件，
+  不转发到浏览器，不每次续期发布 ACA revision。
+- DevTunnel 账号/MFA 仍可能要求本人重新登录。续期失败只报告并退避，不开放匿名访问。
+  节点取消/移除或 owner 停用后，续期请求拒绝；用户退出 Codey 后不能继续访问 Workspace。
+- 成功安装重跑只验收，不重启或升级。失败保留审计与同一隧道 ID；审查后使用
+  `--retry-failed`，禁止重新下载/创建一堆身份或接管未识别的既有服务。
+
+自检通过生成 `output/codey-machine.json`，其中只有节点 ID、平台、公开 TLS 证书、
+隧道坐标和名称；不含 connect token、更新 key 或本机 provider key。回页面“验通并添加”，
+由 ACA 验证真实隧道、TLS、Usage/History、SSO 和 WebSocket 后才算接入。
+本机自检不代表云端可达，也不代表模型推理已经验证；交付时另做独立测试任务/项目。
+
+原生桌面正在占用的 Codex 会话不允许强行接管、删锁或静默 fork；新增节点并不改变
+此所有权保护。现有桌面会话与新建 Codey 任务的执行能力须分别验收。
+Codey 新任务使用独立的 Codex app-server 与本人专属 Unix socket；它不替换桌面进程
+或默认控制 socket。配置的后端不可用时明确失败，不自动改用旧 exec SDK。
+使用已安装的 Codex 原生可执行文件，共享本人已有登录/config；原生历史仍按只读规则读取。
 
 ### Windows
 
@@ -170,10 +228,10 @@ Azure Run Command 默认 root：只在 root 层完成经授权的 linger，再�
 把这个文件交给同一用户，在 Codey“添加机器 → 选择配置完成的机器文件 → 验通并添加”。
 不能上传完整 ZIP、SHA-256 文本或 `enrollment.json` 来代替机器文件。
 
-门户检查预留身份与当前 owner，并从 ACA 实际验证 TLS、Usage/History、SSO、
+门户检查预留身份、平台与当前 owner，并从 ACA 实际验证 VNet/DevTunnel、TLS、Usage/History、SSO、
 匿名拒绝与 WebSocket；失败保持未添加，成功才启用节点和两个动态私网网关，
 **无需每加一台机器重建/发布门户镜像**。其他用户，包括管理员，不能认领此 ID。
-新节点的 Usage/History 固定走 VNet，Workspace 使用门户统一托管的前端。
+新节点的 Usage/History 固定走已认证云端网关（VNet 或 DevTunnel），Workspace 使用门户统一托管的前端。
 
 Linux 添加后在“设置 → 机器软件更新”刷新，确认升级器已连接、ID/owner 与当前机器一致。
 以后在这里单机或批量预览、确认升级，不重新运行首次安装器、不重建机器身份。

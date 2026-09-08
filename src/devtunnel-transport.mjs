@@ -5,6 +5,12 @@ const TOKEN_ENV_PATTERN = /^CODEY_[A-Z0-9_]{1,100}$/;
 const TUNNEL_ID_PATTERN = /^[a-z0-9][a-z0-9-]{1,58}[a-z0-9]$/;
 const CLUSTER_ID_PATTERN = /^[a-z][a-z0-9]{1,15}$/;
 
+/** Shared by static gateways and owner-bound machine enrollment. */
+export function validDevTunnelCoordinates(value) {
+  return Boolean(value && TUNNEL_ID_PATTERN.test(value.tunnelId ?? "") &&
+    CLUSTER_ID_PATTERN.test(value.clusterId ?? ""));
+}
+
 function unavailable() {
   // SDK errors can contain authorization headers or relay URLs with credentials.
   const error = new Error("Authenticated Workspace tunnel is unavailable; check the host and connect-token expiry");
@@ -32,8 +38,12 @@ export function normalizeDevTunnel(raw, { upstream, tlsServerName, fingerprint }
 }
 
 export function readDevTunnelConnectToken(config, environment = process.env, now = Date.now()) {
+  return validateDevTunnelConnectToken(environment[config.connectTokenEnv], config, now);
+}
+
+/** Structural screening only; the Dev Tunnels service validates the signature. */
+export function validateDevTunnelConnectToken(token, config, now = Date.now()) {
   try {
-    const token = environment[config.connectTokenEnv];
     if (typeof token !== "string" || token.length > 8192 || !/^[\w-]+\.[\w-]+\.[\w-]+$/.test(token)) {
       throw unavailable();
     }
@@ -48,6 +58,35 @@ export function readDevTunnelConnectToken(config, environment = process.env, now
   } catch {
     throw unavailable();
   }
+}
+
+/** Validate a new enrollment/renewal against Microsoft's authenticated service. */
+export async function verifyDevTunnelAccess(config, token, { sdkFactory = loadSdk, timeoutMs = 10000 } = {}) {
+  validateDevTunnelConnectToken(token, config);
+  const sdk = await sdkFactory();
+  const management = new sdk.TunnelManagementHttpClient(
+    { name: "CodeyMachineEnrollment", version: "1.0" },
+    sdk.ManagementApiVersions.Version20230927preview,
+  );
+  management.enableEventsReporting = false;
+  const cancellation = new sdk.CancellationTokenSource();
+  const timer = setTimeout(() => cancellation.cancel(), timeoutMs);
+  try {
+    const tunnel = await management.getTunnel({
+      tunnelId: config.tunnelId, clusterId: config.clusterId,
+    }, { accessToken: token, includePorts: true }, cancellation.token);
+    if (!tunnel || tunnel.tunnelId !== config.tunnelId || tunnel.clusterId !== config.clusterId ||
+        ![3001, 8443].every(port => tunnel.ports?.some(item => item.portNumber === port && item.protocol === "https")) ||
+        tunnel.ports.some(item => ![3001, 8443].includes(item.portNumber))) {
+      throw unavailable();
+    }
+    // The Mac never creates anonymous/public access. Reject it if an operator
+    // subsequently weakens the tunnel or either required port's access policy.
+    const entries = [tunnel.accessControl, ...(tunnel.ports ?? []).map(port => port.accessControl)]
+      .flatMap(control => control?.entries ?? []);
+    if (entries.some(entry => entry.type === "anonymous" && !entry.isDeny)) throw unavailable();
+  } catch { throw unavailable(); }
+  finally { clearTimeout(timer); cancellation.dispose(); await management.dispose?.(); }
 }
 
 let sdkPromise;
@@ -112,7 +151,7 @@ export class DevTunnelTransport {
   }
 
   async #metadata(cancellation) {
-    const token = this.#getToken();
+    const token = await this.#getToken();
     const tunnel = await this.#management.getTunnel({
       tunnelId: this.#config.tunnelId, clusterId: this.#config.clusterId,
     }, { accessToken: token, includePorts: true }, cancellation);

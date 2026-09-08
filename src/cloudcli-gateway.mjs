@@ -214,7 +214,8 @@ export function resolveCloudCliGatewayConfig(
 
 export class CloudCliGateway {
   constructor(config, { sessionAuthenticator, nodePolicy, accessLeaseMs = 5000, ui,
-    tunnelTransportFactory = (node, ca) => new DevTunnelTransport(node.devTunnel, nodeTlsOptions(node, ca)),
+    tunnelTransportFactory = (node, ca) => new DevTunnelTransport(node.devTunnel, nodeTlsOptions(node, ca),
+      node.getTunnelToken ? { getToken: node.getTunnelToken } : {}),
     healthProbe = readWorkspaceHealth, healthClock = Date.now, healthTtlMs = 30_000,
   } = {}) {
     this.config = config;

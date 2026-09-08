@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "platform": "linux-x64",
-  "platforms": ["windows-x64", "linux-x64"],
-  "plannedPlatforms": ["macos"],
-  "reviewedAt": "2026-09-07",
+  "platforms": ["windows-x64", "linux-x64", "macos-arm64", "macos-x64"],
+  "plannedPlatforms": [],
+  "reviewedAt": "2026-09-08",
   "node": "24.20.0",
   "bunBuildTool": "1.4.2",
   "cloudcliRepository": "https://github.com/niuzheng168/claudecodeui.git",

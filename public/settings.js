@@ -195,7 +195,8 @@ function renderNodes(nodes) {
     const endpoint = element("span", origin, "node-endpoint");
     endpoint.title = origin;
     const badges = element("span", null, "badges");
-    const connection = element("span", node.vnetOnly ? "VNet 专用" : node.vnetAvailable ? "VNet 已配置" : "浏览器直连", "badge");
+    const connection = element("span", node.networkMode === "devtunnel" ? "DevTunnel 专用"
+      : node.vnetOnly ? "VNet 专用" : node.vnetAvailable ? "VNet 已配置" : "浏览器直连", "badge");
     connection.title = node.vnetOnly ? "VNet 专用，无需浏览器证书" : connection.textContent;
     badges.append(connection, element("span", node.workspaceAvailable ? "Workspace 已配置" : "Workspace 未配置",
       `badge ${node.workspaceAvailable ? "configured" : "pending"}`));
@@ -293,15 +294,22 @@ async function load() {
   const linuxSetup = setup?.platforms?.find((item) => item.platform === "linux-x64")
     ?? (setup?.platform !== "windows-x64" ? setup : null);
   const windowsSetup = setup?.platforms?.find((item) => item.platform === "windows-x64");
+  const macSetup = setup?.platforms?.find((item) => item.platform === "macos-arm64");
+  const intelSetup = setup?.platforms?.find((item) => item.platform === "macos-x64");
   machineSkillButtons.clear();
   machineSkillButtons.set(document.querySelector("#download-machine-skill"), Boolean(linuxSetup?.enabled));
   machineSkillButtons.set(document.querySelector("#download-machine-windows-skill"), Boolean(windowsSetup?.enabled));
+  machineSkillButtons.set(document.querySelector("#download-machine-macos-skill"), Boolean(macSetup?.enabled));
+  machineSkillButtons.set(document.querySelector("#download-machine-macos-intel-skill"), Boolean(intelSetup?.enabled));
   for (const [id, entry, label] of [
     ["machine-package-status", linuxSetup, "Linux"],
     ["machine-windows-package-status", windowsSetup, "Windows"],
+    ["machine-macos-status", macSetup, "macOS · Apple Silicon"],
+    ["machine-macos-intel-status", intelSetup, "macOS · Intel"],
   ]) {
     document.querySelector(`#${id}`).textContent = entry?.enabled
-      ? `${label} · 约 ${Math.ceil(entry.bytes / 1024 / 1024)} MB · Node ${entry.node} · CloudCLI ${entry.cloudcli} · copilot-api ${entry.copilotApi}`
+      ? `${label} · 约 ${Math.ceil(entry.bytes / 1024 / 1024)} MB · Node ${entry.node} · CloudCLI ${entry.cloudcli} · ${
+        String(entry.platform).startsWith("macos-") ? "复用本机模型代理" : `copilot-api ${entry.copilotApi}`}`
       : entry?.reason || `${label} 完整机器配置包尚未发布；不会使用其他平台的包代替。`;
   }
   const pendingCount = result.pendingMachines?.length || 0;
@@ -314,7 +322,8 @@ async function load() {
   for (const pending of result.pendingMachines ?? []) {
     const row = element("div", null, "user-row pending-machine");
     const platform = pending.platform ?? "linux-x64";
-    const available = platform === "linux-x64" ? linuxSetup : platform === "windows-x64" ? windowsSetup : null;
+    const available = setup?.platforms?.find((item) => item.platform === platform)
+      ?? (platform === "linux-x64" ? linuxSetup : null);
     row.append(element("span", `${pending.id} · ${platform} · ${pending.expired ? "已过期" : "待配置，尚未添加"}`, "muted"));
     const retryForm = element("form");
     retryForm.action = `/api/settings/machines/${pending.id}/skill`;
@@ -375,12 +384,15 @@ async function downloadMachineSkill(event) {
       throw new Error(result?.error || `HTTP ${response.status}`);
     }
     const filename = response.headers.get("content-disposition")
-      ?.match(/^attachment;\s*filename="(config-new-codey-machine(?:-windows)?-n-[a-f0-9]{24}\.zip)"$/i)?.[1];
-    const expectedWindows = form.dataset.machinePlatform === "windows-x64";
+      ?.match(/^attachment;\s*filename="(config-new-codey-machine(?:-windows|-macos-arm64|-macos-x64)?-n-[a-f0-9]{24}\.zip)"$/i)?.[1];
+    const selectedPlatform = form.dataset.machinePlatform || "linux-x64";
+    const expectedPrefix = selectedPlatform === "linux-x64" ? "config-new-codey-machine-n-"
+      : selectedPlatform === "windows-x64" ? "config-new-codey-machine-windows-n-"
+        : `config-new-codey-machine-${selectedPlatform}-n-`;
     if (response.headers.get("content-type")?.split(";")[0].trim() !== "application/zip" || !filename) {
       throw new Error("服务器未返回有效的 ZIP 配置包，请刷新页面后重试");
     }
-    if (filename.startsWith("config-new-codey-machine-windows-") !== expectedWindows) {
+    if (!filename.startsWith(expectedPrefix)) {
       throw new Error("服务器返回的配置包平台与所选系统不一致；不会安装其他平台的包");
     }
     const blob = await response.blob();
@@ -418,6 +430,8 @@ async function downloadMachineSkill(event) {
 
 document.querySelector("#machine-skill-form").addEventListener("submit", downloadMachineSkill);
 document.querySelector("#machine-windows-skill-form").addEventListener("submit", downloadMachineSkill);
+document.querySelector("#machine-macos-skill-form").addEventListener("submit", downloadMachineSkill);
+document.querySelector("#machine-macos-intel-skill-form").addEventListener("submit", downloadMachineSkill);
 
 document.querySelector("#add-prepared-machine-form").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -429,11 +443,12 @@ document.querySelector("#add-prepared-machine-form").addEventListener("submit", 
     try { machine = JSON.parse(await file.text()); }
     catch { throw new Error("机器文件不是有效 JSON"); }
     if (machine?.schema !== 1 || !/^n-[a-f0-9]{24}$/.test(machine.nodeId ?? "") ||
-        typeof machine.tlsCertificate !== "string" || typeof machine.privateIp !== "string" ||
-        Object.hasOwn(machine, "clientSigningKey") || Object.hasOwn(machine, "workspaceSsoKey")) {
+        typeof machine.tlsCertificate !== "string" ||
+        (machine.networkMode === "devtunnel" ? typeof machine.devTunnel?.tunnelId !== "string" : typeof machine.privateIp !== "string") ||
+        ["clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey", "connectToken"].some(key => Object.hasOwn(machine, key))) {
       throw new Error("请选择配置完成的机器文件，不是 enrollment 或校验值");
     }
-    machineActivationNotice("正在从门户验证 VNet、HTTPS、Usage/History、Workspace SSO 和 WebSocket…");
+    machineActivationNotice("正在从门户验证 VNet/DevTunnel、HTTPS、Usage/History、Workspace SSO 和 WebSocket…");
     const { node } = await api(`/api/settings/machines/${machine.nodeId}/activate`, "POST", machine);
     form.reset();
     await load();

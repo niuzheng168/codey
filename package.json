@@ -24,7 +24,7 @@
     "skill:build": "node scripts/build-node-skill.mjs",
     "skill:check": "node scripts/build-node-skill.mjs --check",
     "machine:build": "python3 scripts/build-machine-bundle.py",
-    "machine:check": "node --check src/machine-platforms.mjs && node --check src/machine-identity.mjs && node --check src/machine-setup.mjs && node --check src/machine-verification.mjs && node --check src/zip-stream.mjs",
+    "machine:check": "node --check src/machine-platforms.mjs && node --check src/machine-identity.mjs && node --check src/machine-setup.mjs && node --check src/machine-verification.mjs && node --check src/machine-tunnel.mjs && node --check src/devtunnel-transport.mjs && node --check src/zip-stream.mjs",
     "updates:check": "node --check src/machine-updates.mjs && node --check src/node-update-release.mjs && node --check public/machine-updates.js && node --check scripts/publish-node-update.mjs && node --check node-updater/probe.mjs",
     "updates:test": "node --test test/node-updates.test.mjs test/machine-updates-ui.test.mjs test/node-update-publisher.test.mjs",
     "updates:test:linux": "python3 -m unittest discover -s test -p test_node_updater.py",

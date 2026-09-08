@@ -351,7 +351,7 @@ class WindowsInstallerTests(unittest.TestCase):
             root = Path(directory)
             with self.assertRaises(windows.SetupError):
                 windows.within(root / "../outside", root)
-            self.assertEqual(windows.within(root / "release", root), root / "release")
+            self.assertEqual(windows.within(root / "release", root), (root / "release").resolve())
 
     def test_supervisor_refuses_foreign_owner_elevation_no_login_and_unpinned_runtime(self):
         for context in [

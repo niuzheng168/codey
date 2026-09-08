@@ -5,6 +5,8 @@ import { SignedStore, requestError } from "./signed-store.mjs";
 import { workspaceNodeKey } from "./workspace-sso.mjs";
 import { machineServerName } from "./machine-identity.mjs";
 import { machinePlatform } from "./machine-platforms.mjs";
+import { machineTunnelKey, sealMachineTunnelToken, openMachineTunnelToken } from "./machine-tunnel.mjs";
+import { validateDevTunnelConnectToken } from "./devtunnel-transport.mjs";
 
 const NODE_ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const allowedFields = new Set(["name", "region", "endpoint", "accent"]);
@@ -38,7 +40,7 @@ function nodeSettings(body, previous = {}) {
 function publicNode(record) {
   const { id, name, region, endpoint, accent } = record;
   return { id, name, region, endpoint, accent, ...(record.machine
-    ? { vnetOnly: true, platform: record.machine.platform ?? "linux-x64" } : {}) };
+    ? { vnetOnly: true, platform: record.machine.platform ?? "linux-x64", networkMode: record.machine.networkMode } : {}) };
 }
 
 export class NodePolicy {
@@ -221,7 +223,12 @@ export class NodePolicy {
       // The TLS-verified endpoint is authoritative. vmResourceId is descriptive
       // client metadata: using it as a global claim would let one user squat
       // another user's Azure resource ID without controlling that VM.
-      if (data.nodes.some((item) => item.enabled && item.machine?.privateIp === machine.privateIp)) {
+      if (machine.networkMode === "devtunnel") {
+        if (!node.tunnel || node.tunnel.tunnelId !== machine.devTunnel.tunnelId ||
+            node.tunnel.clusterId !== machine.devTunnel.clusterId || node.tunnel.expiresAt <= now + 5000) {
+          throw requestError("请先由本机脚本建立并验证自己的 DevTunnel", 409);
+        }
+      } else if (data.nodes.some((item) => item.enabled && item.machine?.privateIp === machine.privateIp)) {
         throw requestError("此私网服务入口已添加为节点，不能再次认领", 409);
       }
       Object.assign(node, {
@@ -255,7 +262,13 @@ export class NodePolicy {
   async enrollment(principal, nodeId, origin) {
     const node = await this.owned(principal.id, nodeId);
     if (node.keyMode !== "isolated") throw requestError("既有节点的部署密钥不通过网页提供", 403);
-    return this.enrollmentValues(principal, nodeId, origin);
+    return {
+      ...this.enrollmentValues(principal, nodeId, origin),
+      ...(node.machine?.networkMode === "devtunnel" ? {
+        tunnelUpdateKey: this.tunnelUpdateKey(nodeId),
+        note: "仅用于此 Mac。隧道更新 key 只能续期本节点 connect 令牌，不具有门户登录或 Azure 部署权限。",
+      } : {}),
+    };
   }
 
   enrollmentValues(principal, nodeId, origin) {
@@ -265,5 +278,49 @@ export class NodePolicy {
       workspaceSsoKey: workspaceNodeKey(this.master, nodeId),
       note: "只用于本节点。需在您自己的机器配置对应 node ID、密钥、HTTPS 证书；Workspace 还需部署 CloudCLI 并添加受信任的私网网关配置。",
     };
+  }
+
+  /** Only reserved, unexpired or enabled Mac identities may renew a tunnel. */
+  async tunnelMachine(nodeId, now = Date.now()) {
+    const node = (await this.records()).data.nodes.find(item => item.id === nodeId);
+    if (!node || !String(node.setup?.platform).startsWith("macos-") ||
+        !(node.enabled || (node.setup.status === "reserved" && node.setup.expiresAt > now))) {
+      throw requestError("Machine authentication failed", 401);
+    }
+    return node;
+  }
+
+  tunnelUpdateKey(nodeId) { return machineTunnelKey(this.master, nodeId); }
+
+  async updateMachineTunnel(nodeId, input, now = Date.now()) {
+    validateDevTunnelConnectToken(input.connectToken, input, now);
+    const claims = JSON.parse(Buffer.from(input.connectToken.split(".")[1], "base64url"));
+    const expiresAt = claims.exp * 1000;
+    const sealedToken = sealMachineTunnelToken(this.master, nodeId, input.connectToken);
+    return this.store.mutate(data => {
+      const node = data.nodes.find(item => item.id === nodeId);
+      if (!node || !String(node.setup?.platform).startsWith("macos-") ||
+          !(node.enabled || (node.setup.status === "reserved" && node.setup.expiresAt > now))) {
+        throw requestError("Machine authentication failed", 401);
+      }
+      if (node.tunnel && (node.tunnel.tunnelId !== input.tunnelId ||
+          node.tunnel.clusterId !== input.clusterId || expiresAt < node.tunnel.expiresAt)) {
+        throw requestError("Tunnel rebinding or credential rollback is not allowed", 409);
+      }
+      if (data.nodes.some(item => item.id !== nodeId &&
+          (item.enabled || (item.setup?.status === "reserved" && item.setup.expiresAt > now)) &&
+          item.tunnel?.tunnelId === input.tunnelId && item.tunnel?.clusterId === input.clusterId)) {
+        throw requestError("Tunnel is already bound to another machine", 409);
+      }
+      node.tunnel = { tunnelId: input.tunnelId, clusterId: input.clusterId, sealedToken, expiresAt, updatedAt: now };
+      return { ok: true, nodeId, expiresAt };
+    });
+  }
+
+  async machineTunnelToken(nodeId) {
+    const node = await this.tunnelMachine(nodeId);
+    if (!node.tunnel) throw new Error("Machine tunnel is not configured");
+    const token = openMachineTunnelToken(this.master, nodeId, node.tunnel.sealedToken);
+    return validateDevTunnelConnectToken(token, node.tunnel);
   }
 }

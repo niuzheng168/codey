@@ -131,6 +131,9 @@ WantedBy=default.target
 完整包。Windows 使用原 owner 登录任务，不使用 systemd/WSL、不覆盖既有服务；
 首次干净 Windows 安装仍须单独验收 native PTY/SQLite、登录自启和 ACA 访问，
 不能把语法/规划测试当作安装验证。包未发布时不回退到 Linux 或本篇手动说明 ZIP。
-macOS 仍为规划中。只做 `8443` 直连无需部署 CloudCLI。
+macOS 使用门户分别发布的 Apple Silicon/Intel 完整包与 `scripts/setup-macos.sh`；
+使用私有 DevTunnel，不套用 Linux VNet/systemd 步骤。它保留现有 Codex/模型代理，
+创建本人 launchd 服务和独立的 Codey Codex 后端，并用本节点专用 key 自动续期。
+普通的只读 `8443` 浏览器直连仍无需部署 CloudCLI。
 
 网络放行与 ACA 上游配置继续 [VNet](vnet.md)，最终按 [验收](verification.md) 检查。

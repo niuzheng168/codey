@@ -1,4 +1,4 @@
 interface:
   display_name: "Config new Codey machine"
-  short_description: "完整依赖配置新机器与 Azure 私网，验收后回 Codey 页面添加"
-  default_prompt: "使用 $config-new-codey-machine 与本人完整配置包，识别目标 Windows/Linux 后选择对应原生入口；先检查已有服务并展示网络计划，获得明确确认后执行，保留原任务和登录。macOS 尚未实现时明确说明，不回退到其他系统脚本。完成后生成门户验通所需的机器文件。"
+  short_description: "Windows/Linux 私网与 macOS 私有 DevTunnel 原生接入"
+  default_prompt: "使用 $config-new-codey-machine 与本人对应平台完整包。Windows/Linux 选择各自原生入口和 Azure 私网；macOS 按 Apple Silicon/Intel 选择 setup-macos.sh，复用现有 Codex/模型代理、配置私有 DevTunnel 和本人 launchd 服务。先检查已有服务并展示计划，确认后执行，不接管桌面会话、不改原有身份或服务。使用本节点专用 key 续期，不要求节点后台的 Azure 部署权限。完成真实自检后生成无密钥机器文件，再由门户验通添加。"

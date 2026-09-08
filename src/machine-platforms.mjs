@@ -15,8 +15,16 @@ export const MACHINE_PLATFORMS = Object.freeze([
     files: ["scripts/setup-linux.sh"],
   }),
   Object.freeze({
-    id: "macos", name: "macOS", entrypoint: null, updater: false, implemented: false,
-    description: "规划中 · 尚未提供完整机器配置安装器", files: [],
+    id: "macos-arm64", name: "macOS · Apple Silicon", entrypoint: "scripts/setup-macos.sh",
+    nodeSuffix: "darwin-arm64.tar.gz", updater: false, implemented: true, tunnel: true,
+    description: "macOS Apple Silicon · 本人 launchd 服务 · 私有 DevTunnel · 不改现有 Codex/模型代理",
+    files: ["scripts/setup-macos.sh", "scripts/configure-macos.py", "scripts/macos-service.py"],
+  }),
+  Object.freeze({
+    id: "macos-x64", name: "macOS · Intel", entrypoint: "scripts/setup-macos.sh",
+    nodeSuffix: "darwin-x64.tar.gz", updater: false, implemented: true, tunnel: true,
+    description: "macOS Intel · 本人 launchd 服务 · 私有 DevTunnel · 不改现有 Codex/模型代理",
+    files: ["scripts/setup-macos.sh", "scripts/configure-macos.py", "scripts/macos-service.py"],
   }),
 ]);
 

@@ -4,8 +4,9 @@ import { issueClientTicket } from "./client-ticket.mjs";
 import { issueWorkspaceAssertion } from "./workspace-sso.mjs";
 import { requestError } from "./signed-store.mjs";
 import { nodeTlsOptions } from "./machine-identity.mjs";
+import { DevTunnelTransport } from "./devtunnel-transport.mjs";
 
-function probe(machine, port, pathname, headers, { requestImpl, timeoutMs, websocket = false }) {
+function probe(machine, port, pathname, headers, { requestImpl, timeoutMs, websocket = false, agents }) {
   return new Promise((resolve, reject) => {
     let request, peer, finished = false;
     const finish = (error, result) => {
@@ -19,8 +20,12 @@ function probe(machine, port, pathname, headers, { requestImpl, timeoutMs, webso
     const timer = setTimeout(() => finish(new Error("Private machine probe timed out")), timeoutMs);
     timer.unref?.();
     try {
-      request = requestImpl(new URL(`https://${machine.privateIp}:${port}${pathname}`), {
-        method: "GET", ...nodeTlsOptions(machine), agent: false, headers,
+      const host = machine.networkMode === "devtunnel" ? "127.0.0.1" : machine.privateIp;
+      if (machine.networkMode === "devtunnel" && !agents?.get(port)?.agent) {
+        throw new Error("A DevTunnel probe must not fall back to local TCP");
+      }
+      request = requestImpl(new URL(`https://${host}:${port}${pathname}`), {
+        method: "GET", ...nodeTlsOptions(machine), agent: agents?.get(port)?.agent ?? false, headers,
       }, (response) => {
         if (websocket) { response.resume(); finish(new Error("Workspace WebSocket was not accepted")); return; }
         const chunks = [];
@@ -53,15 +58,23 @@ function probe(machine, port, pathname, headers, { requestImpl, timeoutMs, webso
   });
 }
 
-export async function verifyMachine(machine, { principal, master, clientKey, requestImpl = https.request, timeoutMs = 10000 }) {
-  const options = { requestImpl, timeoutMs };
+export async function verifyMachine(machine, { principal, master, clientKey, requestImpl = https.request, timeoutMs = 15000,
+  getTunnelToken, tunnelTransportFactory = (config, tlsOptions, options) => new DevTunnelTransport(config, tlsOptions, options) }) {
+  const agents = new Map();
+  if (machine.networkMode === "devtunnel") {
+    if (typeof getTunnelToken !== "function") throw requestError("请先提交本节点的 DevTunnel 连接凭据", 409);
+    for (const port of [3001, 8443]) {
+      agents.set(port, tunnelTransportFactory({ ...machine.devTunnel, port }, nodeTlsOptions(machine), { getToken: getTunnelToken }));
+    }
+  }
+  const options = { requestImpl, timeoutMs, agents };
   const ticket = issueClientTicket({ signingKey: clientKey, nodeId: machine.id, principalId: principal.id, ttlSeconds: 60 });
   const dataHeaders = { accept: "application/json", authorization: `Bearer ${ticket.token}` };
   const workspaceHeaders = (pathname) => ({
     accept: "application/json",
     "x-codey-workspace-assertion": issueWorkspaceAssertion({
       master, nodeId: machine.id, principal, method: "GET",
-      target: new URL(`https://${machine.privateIp}:3001${pathname}`),
+      target: new URL(`https://${machine.networkMode === "devtunnel" ? "127.0.0.1" : machine.privateIp}:3001${pathname}`),
     }),
   });
   try {
@@ -85,6 +98,8 @@ export async function verifyMachine(machine, { principal, master, clientKey, req
     }, { ...options, websocket: true });
     return { https: true, usage: true, history: true, workspaceSso: true, websocket: true, anonymousDenied: true };
   } catch {
-    throw requestError("私网验收未通过：请确认 Skill 已完成 VNet、8443/3001 服务和本节点证书配置；机器尚未添加", 502);
-  }
+    throw requestError(machine.networkMode === "devtunnel"
+      ? "DevTunnel 验收未通过：请确认 Mac 隧道在线、令牌有效、8443/3001 服务及本节点证书正确；机器尚未添加"
+      : "私网验收未通过：请确认 Skill 已完成 VNet、8443/3001 服务和本节点证书配置；机器尚未添加", 502);
+  } finally { await Promise.allSettled([...agents.values()].map(transport => transport.dispose())); }
 }

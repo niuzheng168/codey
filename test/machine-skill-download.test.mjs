@@ -94,11 +94,11 @@ test("machine skill submits an authenticated same-origin POST without navigating
   assert.deepEqual(p.revoked, ["blob:test-download"]);
 });
 
-test("Windows has its own download action and filename; macOS stays unavailable", async () => {
+test("Windows has its own download action and filename; unpublished Mac packages stay unavailable", async () => {
   const entry = { enabled: true, bytes: 4194304, node: "24.20.0", cloudcli: "1.37.2", copilotApi: "2.5.1" };
   const machineSetup = { ...entry, platforms: [
     { ...entry, platform: "windows-x64" }, { ...entry, platform: "linux-x64" },
-    { platform: "macos", enabled: false, planned: true },
+    { platform: "macos-arm64", enabled: false }, { platform: "macos-x64", enabled: false },
   ] };
   const windowsName = `config-new-codey-machine-windows-${nodeId}.zip`;
   const p = await page({ machineSetup, download: async () => archiveResponse({ name: windowsName }) });
@@ -112,6 +112,27 @@ test("Windows has its own download action and filename; macOS stays unavailable"
   await wrong.submit(wrong.elements.get("#machine-windows-skill-form")).finished;
   assert.equal(wrong.downloads.length, 0);
   assert.match(wrong.elements.get("#machine-download-message").textContent, /平台.*不一致/);
+});
+
+test("each published Mac architecture has a native download and rejects the other architecture's package", async () => {
+  const entry = { enabled: true, bytes: 4194304, node: "24.20.0", cloudcli: "1.37.2", copilotApi: "2.5.1" };
+  const machineSetup = { ...entry, platforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]
+    .map(platform => ({ ...entry, platform })) };
+  for (const [platform, selector] of [
+    ["macos-arm64", "#machine-macos-skill-form"], ["macos-x64", "#machine-macos-intel-skill-form"],
+  ]) {
+    const name = `config-new-codey-machine-${platform}-${nodeId}.zip`;
+    const p = await page({ machineSetup, download: async () => archiveResponse({ name }) });
+    await p.submit(p.elements.get(selector)).finished;
+    assert.equal(p.requests[0].url, `${endpoint}?platform=${platform}`);
+    assert.equal(p.downloads[0].download, name);
+    const wrong = await page({ machineSetup, download: async () => archiveResponse({
+      name: `config-new-codey-machine-${platform === "macos-arm64" ? "macos-x64" : "macos-arm64"}-${nodeId}.zip`,
+    }) });
+    await wrong.submit(wrong.elements.get(selector)).finished;
+    assert.equal(wrong.downloads.length, 0);
+    assert.match(wrong.elements.get("#machine-download-message").textContent, /平台.*不一致/);
+  }
 });
 
 test("re-downloading a pending identity uses the same handler and disables all download buttons in flight", async () => {

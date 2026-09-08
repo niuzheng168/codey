@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import http from "node:http";
+import https from "node:https";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -96,7 +97,8 @@ async function proxyUsage(req, res, url, options) {
   try {
     const target = new URL(`${url.pathname}${url.search}`, options.upstream);
     const response = await options.fetchImpl(target, {
-      headers: { accept: "application/json" },
+      headers: { accept: "application/json", ...(options.upstreamKeyFile
+        ? { authorization: `Bearer ${readSecret(options.upstreamKeyFile, "Local usage API key")}` } : {}) },
       redirect: "error",
       signal: controller.signal,
     });
@@ -139,6 +141,15 @@ export function createRelayServer(options = {}) {
   const upstream = new URL(
     options.upstream ?? process.env.CODEY_RELAY_UPSTREAM ?? "http://127.0.0.1:4141",
   );
+  const upstreamKeyFile = options.upstreamKeyFile ?? process.env.CODEY_RELAY_UPSTREAM_KEY_FILE;
+  if (upstreamKeyFile && (!["127.0.0.1", "localhost", "[::1]"].includes(upstream.hostname) ||
+      !["http:", "https:"].includes(upstream.protocol) || upstream.username || upstream.password ||
+      upstream.search || upstream.hash || upstream.pathname !== "/")) {
+    throw new Error("A local provider credential can only be forwarded to an explicit loopback usage service");
+  }
+  const certificate = options.tlsCertificate ?? process.env.CODEY_RELAY_TLS_CERT;
+  const privateKey = options.tlsPrivateKey ?? process.env.CODEY_RELAY_TLS_KEY;
+  if (Boolean(certificate) !== Boolean(privateKey)) throw new Error("Node TLS requires both certificate and private key");
   const sessionRoot = path.resolve(
     required(
       options.sessionRoot ?? process.env.CODEY_RELAY_SESSION_ROOT,
@@ -169,7 +180,7 @@ export function createRelayServer(options = {}) {
       { sessionApiKey: "", httpOnly: false },
     );
 
-  return http.createServer(async (req, res) => {
+  const handler = async (req, res) => {
     const url = new URL(req.url ?? "/", "http://relay.local");
     if (!applyCors(req, res, allowedOrigin)) {
       sendJson(res, 403, { error: "Origin is not allowed" });
@@ -229,6 +240,7 @@ export function createRelayServer(options = {}) {
           fetchImpl,
           requestTimeoutMs,
           upstream,
+          upstreamKeyFile,
         });
         return;
       }
@@ -257,12 +269,15 @@ export function createRelayServer(options = {}) {
       sendJson(res, 200, result);
     } catch (error) {
       const status = Number.isInteger(error?.status) ? error.status : 500;
-      if (status >= 500) console.error("Codey node relay request failed:", error);
+      if (status >= 500) console.error("Codey node relay request failed");
       sendJson(res, status, {
         error: status < 500 ? error.message : "Node relay request failed",
       });
     }
-  });
+  };
+  return certificate
+    ? https.createServer({ cert: readFileSync(certificate), key: readFileSync(privateKey), minVersion: "TLSv1.2" }, handler)
+    : http.createServer(handler);
 }
 
 async function main() {
@@ -273,7 +288,7 @@ async function main() {
   }
   const server = createRelayServer();
   server.listen(port, host, () => {
-    console.log(`Codey node relay: http://${host}:${port}`);
+    console.log(`Codey node relay: ${process.env.CODEY_RELAY_TLS_CERT ? "https" : "http"}://${host}:${port}`);
   });
 }
 

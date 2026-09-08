@@ -9,13 +9,17 @@ import { verifyMachine } from "./machine-verification.mjs";
 import { requestError } from "./signed-store.mjs";
 import { zipStream } from "./zip-stream.mjs";
 import { MACHINE_PLATFORMS, machinePlatform } from "./machine-platforms.mjs";
+import { MachineTunnelService } from "./machine-tunnel.mjs";
 
 export const MACHINE_SKILL = "config-new-codey-machine";
 export const MACHINE_SKILL_FILES = Object.freeze([
   "SKILL.md", "agents/openai.yaml", "dependencies.json",
   "scripts/configure-machine.py", "scripts/azure-vnet.py", "references/verification.md",
 ]);
-const ARTIFACTS = ["cloudcli-source.tar.gz", "copilot-api-source.tar.gz"];
+export const machineArtifacts = (platform) => [
+  "cloudcli-source.tar.gz", "copilot-api-source.tar.gz",
+  ...(machinePlatform(platform).tunnel ? ["portal-node-source.tar.gz"] : []),
+];
 const defaultSkillRoot = fileURLToPath(new URL(`../skills/${MACHINE_SKILL}/`, import.meta.url));
 const json = (res, status, value) => {
   const bytes = Buffer.from(JSON.stringify(value));
@@ -48,6 +52,7 @@ export function machineReleaseId(manifest) {
 
 export async function loadMachineBundle(root, platformId = "linux-x64") {
   const platform = machinePlatform(platformId);
+  const ARTIFACTS = machineArtifacts(platformId);
   // Keep the existing Linux release layout/backlinks; each additional platform
   // has its own immutable active pointer and cannot fall back to Linux assets.
   if (platformId !== "linux-x64") {
@@ -116,6 +121,7 @@ export class MachineSetup {
     machineUpdates, skillRoot = defaultSkillRoot, verify = verifyMachine }) {
     Object.assign(this, { nodePolicy, accounts, authenticator, origin, bundleRoot, cloudCliGateway, nodeDataGateway, cloudCliUi, skillRoot, verify });
     this.machineUpdates = machineUpdates;
+    this.tunnels = new MachineTunnelService({ nodePolicy, accounts });
     this.network = network ? machineNetworkConfig(network) : null;
     this.verifying = 0;
     this.downloading = 0;
@@ -135,7 +141,7 @@ export class MachineSetup {
     const definition = machinePlatform(platformId);
     const identity = { platform: platformId, name: definition.name, entrypoint: definition.entrypoint,
       updaterSupported: definition.updater, description: definition.description };
-    if (!this.bundleRoot || !this.network || !this.cloudCliGateway || !this.nodeDataGateway || !this.cloudCliUi) {
+    if (!this.bundleRoot || (!definition.tunnel && !this.network) || !this.cloudCliGateway || !this.nodeDataGateway || !this.cloudCliUi) {
       return { ...identity, enabled: false, reason: "运维尚未发布完整机器配置包或启用共享 Workspace UI / 私网配置" };
     }
     if (definition.updater && this.machineUpdates && !this.machineUpdates.catalog.configured) {
@@ -157,7 +163,9 @@ export class MachineSetup {
     this.refreshing = (async () => {
       const snapshot = await this.nodePolicy.records();
       if (this.gatewayRevision === snapshot.revision) return;
-      const nodes = snapshot.data.nodes.filter((node) => node.enabled && node.machine).map(preparedGateways);
+      const nodes = snapshot.data.nodes.filter((node) => node.enabled && node.machine).map(node => preparedGateways(node, {
+        getTunnelToken: () => this.nodePolicy.machineTunnelToken(node.id),
+      }));
       this.nodeDataGateway?.setMachineNodes(nodes.map((node) => node.data));
       this.cloudCliGateway?.setMachineNodes(nodes.map((node) => node.workspace));
       this.gatewayRevision = snapshot.revision;
@@ -191,7 +199,10 @@ export class MachineSetup {
     const node = reserved ?? await this.nodePolicy.reserveMachine(req.codeyPrincipal.id, Date.now(), platformId);
     const enrollment = {
       schema: 1, ...this.nodePolicy.enrollmentValues(req.codeyPrincipal, node.id, this.origin),
-      expiresAt: node.setup.expiresAt, releaseId: manifest.releaseId, platform: platformId, network: this.network,
+      expiresAt: node.setup.expiresAt, releaseId: manifest.releaseId, platform: platformId,
+      ...(definition.tunnel ? { network: { mode: "devtunnel" }, tunnelUpdateKey: this.nodePolicy.tunnelUpdateKey(node.id) }
+        : { network: this.network }),
+      ...(definition.tunnel ? { note: "仅用于此 Mac 的私有 DevTunnel 节点；不需要 Azure VM 或节点后台的 Azure 部署权限。" } : {}),
     };
     if (definition.updater && this.machineUpdates) {
       entries.push(...(await this.machineUpdates.newMachineEntries(req.codeyPrincipal.id, node.id))
@@ -205,7 +216,8 @@ export class MachineSetup {
     const zip = zipStream(entries);
     res.writeHead(200, {
       "content-type": "application/zip", "content-length": zip.length,
-      "content-disposition": `attachment; filename="${MACHINE_SKILL}${platformId === "linux-x64" ? "" : "-windows"}-${node.id}.zip"`,
+      "content-disposition": `attachment; filename="${MACHINE_SKILL}${platformId === "linux-x64" ? "" :
+        platformId === "windows-x64" ? "-windows" : `-${platformId}`}-${node.id}.zip"`,
       "cache-control": "private, no-store", vary: "Cookie", "x-content-type-options": "nosniff",
       "referrer-policy": "no-referrer",
     });
@@ -260,6 +272,10 @@ export class MachineSetup {
       if (machine.platform !== (reserved.setup.platform ?? "linux-x64")) {
         throw requestError("机器文件的平台与下载时预留的平台不一致");
       }
+      if (machine.networkMode === "devtunnel" && (!reserved.tunnel ||
+          reserved.tunnel.tunnelId !== machine.devTunnel.tunnelId || reserved.tunnel.clusterId !== machine.devTunnel.clusterId)) {
+        throw requestError("请先由此 Mac 的安装脚本提交并验证本节点隧道", 409);
+      }
       if (this.verifying >= 4) throw requestError("正在验收其他机器，请稍后重试", 429);
       this.verifying++;
       try {
@@ -267,6 +283,7 @@ export class MachineSetup {
         const verification = await this.verify(machine, {
           principal: req.codeyPrincipal, master: this.nodePolicy.master,
           clientKey: this.nodePolicy.isolatedKey(nodeId),
+          getTunnelToken: () => this.nodePolicy.machineTunnelToken(nodeId),
         });
         if (res.destroyed || (this.authenticator && !(await this.authenticator.principal(req, { touch: false })))) {
           throw requestError("登录已失效或验收已取消，机器尚未添加", 401);
