@@ -150,7 +150,191 @@ def check_nsg_scope(nsg, node_vnet_id, node_nic_id):
                 raise SetupError("NSG is shared with a NIC in another VNet; do not change it automatically")
 
 
-def discover(enrollment, vm_id):
+def effective_networks(rule, side, tags):
+    values = rule.get(side + "AddressPrefixes") or [rule.get(side + "AddressPrefix")]
+    networks = []
+    for value in values:
+        expanded = tags.get(value, [value])
+        if not isinstance(expanded, list) or not expanded:
+            raise SetupError("Effective NSG address/tag expansion is incomplete")
+        for prefix in expanded:
+            try:
+                network = ipaddress.ip_network("0.0.0.0/0" if prefix == "*" else prefix)
+            except (ValueError, TypeError):
+                raise SetupError(f"Cannot resolve effective NSG address/tag: {value}")
+            if network.version == 4:
+                networks.append(network)
+    return list(ipaddress.collapse_addresses(networks))
+
+
+def effective_ports(rule, side):
+    values = rule.get(side + "PortRanges") or [rule.get(side + "PortRange")]
+    ranges = []
+    for value in values:
+        if value == "*":
+            ranges.append((0, 65535))
+            continue
+        if not isinstance(value, str) or not re.fullmatch(r"\d{1,5}(?:-\d{1,5})?", value):
+            raise SetupError("Cannot resolve effective NSG port range")
+        low, high = map(int, value.split("-")) if "-" in value else (int(value), int(value))
+        if not 0 <= low <= high <= 65535:
+            raise SetupError("Invalid effective NSG port range")
+        ranges.append((low, high))
+    return sorted(ranges)
+
+
+def effective_allows(group, sources, destination, administrative=False):
+    """Conservatively prove the whole ACA CIDR, not a sampled source IP."""
+    rules, tags = group.get("effectiveSecurityRules"), group.get("tagMap", {})
+    if not isinstance(rules, list) or not rules or not isinstance(tags, dict):
+        raise SetupError("Effective security policy is incomplete; preserve the subnet and stop")
+    address = ipaddress.ip_address(destination)
+    checks = []
+    for port in map(int, PORTS):
+        relevant = []
+        for rule in rules:
+            if rule.get("direction") == "Outbound":
+                continue
+            if rule.get("direction") != "Inbound":
+                raise SetupError("Unknown effective security rule direction")
+            protocol = rule.get("protocol", "").lower()
+            if protocol in ("udp", "icmp", "esp", "ah"):
+                continue
+            if protocol not in ("tcp", "all", "*"):
+                raise SetupError("Unknown effective security rule protocol")
+            if not any(low <= port <= high for low, high in effective_ports(rule, "destination")):
+                continue
+            if not any(address in network for network in effective_networks(rule, "destination", tags)):
+                continue
+            # An administrative AlwaysAllow can bypass the NIC deny rule, even
+            # for a source other than ACA. Never accept that as normal Allow.
+            if rule.get("access") not in ("Allow", "Deny"):
+                raise SetupError("Effective security policy can bypass NIC enforcement or has an unknown access action")
+            relevant.append(rule)
+        try:
+            relevant.sort(key=lambda rule: int(rule["priority"]))
+        except (KeyError, TypeError, ValueError):
+            raise SetupError("Effective security rule priority is missing or invalid")
+        for source in sources:
+            network = ipaddress.ip_network(source)
+            if network.version != 4:
+                raise SetupError("NIC-only enforcement requires IPv4 ACA sources")
+            matched = None
+            for rule in relevant:
+                addresses = effective_networks(rule, "source", tags)
+                if not any(network.overlaps(other) for other in addresses):
+                    continue
+                ranges = effective_ports(rule, "source")
+                if not any(high >= 1 for _, high in ranges):
+                    continue
+                if rule["access"] == "Deny":
+                    raise SetupError(f"Preserved security policy blocks ACA {source} to {destination}:{port}: {rule.get('name')}")
+                cursor = 1
+                for low, high in ranges:
+                    if low > cursor:
+                        break
+                    cursor = max(cursor, high + 1)
+                if cursor > 65535 and any(network.subnet_of(other) for other in addresses):
+                    matched = rule.get("name", "Allow")
+                    break
+            # Unmatched admin traffic proceeds to NSGs; unmatched NSG traffic
+            # is not proof of permission. Partial allows deliberately fail closed.
+            if matched is None and not administrative:
+                raise SetupError(f"Cannot prove preserved subnet allows the full ACA source {source} to {destination}:{port}")
+            checks.append({"source": source, "destination": destination, "port": port,
+                           "rule": matched or "no blocking administrative rule"})
+    return checks
+
+
+def dedicated_nic_nsg(nsg, nic_id):
+    p = properties(nsg)
+    if (p.get("subnets") or
+            {item["id"].lower() for item in p.get("networkInterfaces", [])} != {nic_id.lower()}):
+        raise SetupError("NIC-only enforcement needs an existing NSG dedicated to this one NIC")
+
+
+def effective_nic_checks(topology):
+    nic_id, subnet_id = topology["nic"]["id"], topology["nodeSubnet"]["id"]
+    parts = nic_id.split("/")
+    response = az("network", "nic", "list-effective-nsg", "--subscription", parts[2],
+                  "-g", parts[4], "-n", topology["nic"]["name"])
+    groups = response.get("value") if isinstance(response, dict) else None
+    if not isinstance(groups, list) or response.get("nextLink"):
+        raise SetupError("Expected the complete effective NSG policy for this NIC")
+    expected = {
+        topology["nsgs"][0]["id"].lower(): ("networkInterface", nic_id),
+        topology["preservedNsgs"][0]["id"].lower(): ("subnet", subnet_id),
+    }
+    seen, checks = set(), []
+    for group in groups:
+        resource = group.get("networkSecurityGroup", {}).get("id", "").lower()
+        association = group.get("association", {})
+        if resource in expected:
+            kind, target = expected[resource]
+            if (resource in seen or set(association) != {kind}
+                    or association[kind].get("id", "").lower() != target.lower()):
+                raise SetupError("Effective NSG association does not match the target NIC/subnet")
+            seen.add(resource)
+            if kind == "networkInterface":
+                continue  # The explicit allow/deny pair will enforce this layer.
+            administrative = False
+        elif not resource and set(association) == {"networkManager"} and association["networkManager"].get("id"):
+            administrative = True
+        else:
+            raise SetupError("Unexpected effective security layer; operator review is required")
+        checks.append({
+            "resource": resource or association["networkManager"]["id"],
+            "administrative": administrative,
+            "checks": effective_allows(group, prefixes(topology["portalSubnet"]),
+                                       topology["privateIp"], administrative),
+        })
+    if seen != set(expected):
+        raise SetupError("Effective policy omitted the target NIC or preserved subnet NSG")
+    return checks
+
+
+def select_nsg_enforcement(topology, enforcement):
+    if enforcement not in ("all", "nic"):
+        raise SetupError("Unknown NSG enforcement strategy")
+    topology["nsgEnforcement"], topology["preservedNsgs"] = enforcement, []
+    if enforcement == "nic":
+        if topology["mode"] != "same-vnet":
+            raise SetupError("NIC-only enforcement is supported only within the same VNet")
+        nic_id = properties(topology["nic"]).get("networkSecurityGroup", {}).get("id", "")
+        subnet_id = properties(topology["nodeSubnet"]).get("networkSecurityGroup", {}).get("id", "")
+        if not nic_id or not subnet_id or nic_id.lower() == subnet_id.lower():
+            raise SetupError("NIC-only enforcement needs distinct existing NIC and subnet NSGs")
+        by_id = {nsg["id"].lower(): nsg for nsg in topology["nsgs"]}
+        selected, preserved = by_id[nic_id.lower()], by_id[subnet_id.lower()]
+        dedicated_nic_nsg(selected, topology["nic"]["id"])
+        if not preserved.get("etag"):
+            raise SetupError("Preserved subnet NSG needs an ETag for drift checks")
+        topology["nsgs"], topology["preservedNsgs"] = [selected], [preserved]
+        topology["preservedPolicyChecks"] = effective_nic_checks(topology)
+    for nsg in topology["nsgs"]:
+        check_nsg_scope(nsg, topology["nodeVnet"]["id"], topology["nic"]["id"])
+        rule_priorities(nsg, topology["nodeId"])
+    return topology
+
+
+def check_nic_snapshot(topology):
+    """Recheck bindings and the untouched subnet before and after NIC writes."""
+    nic = arm(topology["nic"]["id"])
+    subnet = arm(topology["nodeSubnet"]["id"])
+    configs = [item for item in properties(nic).get("ipConfigurations", [])
+               if item.get("name") == topology["ipConfig"]["name"]]
+    if (len(configs) != 1 or properties(configs[0]).get("privateIPAddress") != topology["privateIp"]
+            or properties(configs[0]).get("subnet", {}).get("id", "").lower() != subnet["id"].lower()
+            or properties(nic).get("networkSecurityGroup", {}).get("id", "").lower() != topology["nsgs"][0]["id"].lower()
+            or properties(subnet).get("networkSecurityGroup", {}).get("id", "").lower() != topology["preservedNsgs"][0]["id"].lower()):
+        raise SetupError("NIC/IP/subnet security bindings changed; review the plan again")
+    for original in topology["preservedNsgs"]:
+        current = arm(original["id"])
+        if current.get("etag") != original["etag"]:
+            raise SetupError("Preserved subnet NSG changed during this plan; no subnet rule will be overwritten")
+
+
+def discover(enrollment, vm_id, nsg_enforcement="all"):
     node_id = enrollment.get("nodeId", "")
     if not NODE_ID.fullmatch(node_id):
         raise SetupError("Invalid reserved machine identity")
@@ -198,18 +382,15 @@ def discover(enrollment, vm_id):
     nsgs = [arm(resource) for resource in sorted(nsg_ids - {None})]
     if not nsgs:
         raise SetupError("VM needs an existing NSG; do not silently replace its NIC/subnet security boundary")
-    for nsg in nsgs:
-        check_nsg_scope(nsg, node_vnet_id, nic["id"])
-        rule_priorities(nsg, node_id)
     if mode == "private-link" and not properties(config).get("publicIPAddress") and not properties(node_subnet).get("natGateway"):
         raise SetupError("Verify an explicit VM egress path before adding a Standard LB backend; default outbound must not be disrupted")
-    return {
+    return select_nsg_enforcement({
         "nodeId": node_id, "vm": vm, "nic": nic, "ipConfig": config,
         "nodeSubnet": node_subnet, "nodeVnet": node_vnet,
         "portalSubnet": portal_subnet, "portalVnet": portal_vnet,
         "endpointSubnet": endpoint_subnet, "nsgs": nsgs, "mode": mode, "conflicts": conflicts,
         "privateIp": properties(config)["privateIPAddress"],
-    }
+    }, nsg_enforcement)
 
 
 class Apply:
@@ -350,8 +531,14 @@ class Apply:
         return endpoint_ip, nat_ips + [PROBE_SOURCE]
 
     def secure_ports(self, sources):
+        nic_only = self.t.get("nsgEnforcement") == "nic"
+        if nic_only:
+            check_nic_snapshot(self.t)
+            self.t["preservedPolicyChecks"] = effective_nic_checks(self.t)
         for old in self.t["nsgs"]:
             nsg = arm(old["id"])
+            if nic_only:
+                dedicated_nic_nsg(nsg, self.t["nic"]["id"])
             allow, deny = rule_priorities(nsg, self.id)
             for label, access, priority, addresses in [
                 ("allow", "Allow", allow, sources), ("deny", "Deny", deny, ["*"]),
@@ -371,6 +558,8 @@ class Apply:
                         raise SetupError(f"Existing Codey NSG rule differs; review instead of overwriting: {rule_id}")
                 else:
                     self.create(rule_id, body, child=True)
+        if nic_only:
+            check_nic_snapshot(self.t)
 
     def run(self):
         t = self.t
@@ -387,6 +576,9 @@ class Apply:
             "region": t["vm"]["location"], "name": t["vm"]["name"],
             "allowedSources": sources, "azureStateFile": str(self.state_file),
         }
+        if t.get("nsgEnforcement") == "nic":
+            result.update(nsgEnforcement="nic", nsgIds=[nsg["id"] for nsg in t["nsgs"]],
+                          preservedNsgIds=[nsg["id"] for nsg in t["preservedNsgs"]])
         self.output.write_text(json.dumps(result, indent=2) + "\n")
         print(json.dumps({"ok": True, "networkMode": t["mode"], "machineNetworkFile": str(self.output),
                           "resourcesCreated": len(self.state["resourcesCreated"]),
@@ -398,6 +590,8 @@ def main():
     parser.add_argument("--enrollment", required=True)
     parser.add_argument("--vm-id")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--nsg-enforcement", choices=("all", "nic"), default="all",
+                        help="Explicit reviewed same-VNet mode: enforce on a dedicated NIC NSG and preserve the subnet NSG")
     parser.add_argument("--apply", action="store_true", help="Authorize node-scoped resources/NSG rules shown by the plan")
     args = parser.parse_args()
     enrollment = json.loads(Path(args.enrollment).read_text())
@@ -412,13 +606,17 @@ def main():
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(request, timeout=5) as response:
             vm_id = response.read().decode().strip()
-    topology = discover(enrollment, vm_id)
+    topology = discover(enrollment, vm_id, args.nsg_enforcement)
     summary = {
         "nodeId": topology["nodeId"], "vmResourceId": vm_id, "mode": topology["mode"],
         "privateIp": topology["privateIp"], "overlappingExistingPeers": topology["conflicts"],
         "changes": (["dedicated /28 subnet", "Standard internal LB", "NIC backend membership", "Private Link Service", "Private Endpoint"]
                     if topology["mode"] == "private-link" else ["reuse private routing / create missing peering directions"]),
         "nsgChanges": "Only 8443/3001 to this VM: allow exact private sources, deny other sources",
+        "nsgEnforcement": topology["nsgEnforcement"],
+        "nsgTargets": [nsg["id"] for nsg in topology["nsgs"]],
+        "preservedNsgs": [nsg["id"] for nsg in topology["preservedNsgs"]],
+        "preservedPolicyChecks": topology.get("preservedPolicyChecks", []),
         "unchanged": ["VM IP", "public IP", "SSH rules", "default routes", "existing peerings/services"],
         "cost": "Private Link / Standard LB / peering can incur Azure charges; review before --apply",
     }

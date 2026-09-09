@@ -30,6 +30,52 @@ VNET = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/test/
 
 
 class NetworkTests(unittest.TestCase):
+    def effective_rule(self, **changes):
+        return {
+            "name": "allow-aca", "priority": 100, "direction": "Inbound", "protocol": "Tcp",
+            "sourceAddressPrefix": "VirtualNetwork", "destinationAddressPrefix": "10.1.0.4",
+            "sourcePortRange": "*", "destinationPortRange": "*", "access": "Allow", **changes,
+        }
+
+    def test_nic_only_proof_covers_the_entire_aca_source_and_both_ports(self):
+        group = {"tagMap": {"VirtualNetwork": ["10.0.0.0/24"]},
+                 "effectiveSecurityRules": [self.effective_rule()]}
+        checks = network.effective_allows(group, ["10.0.0.0/24"], "10.1.0.4")
+        self.assertEqual({item["port"] for item in checks}, {3001, 8443})
+        self.assertTrue(all(item["rule"] == "allow-aca" for item in checks))
+        for change in ({"sourceAddressPrefix": "10.0.0.0/25"}, {"sourcePortRange": "1024-65535"},
+                       {"destinationPortRange": "3001"}):
+            group["effectiveSecurityRules"] = [self.effective_rule(**change)]
+            with self.subTest(change=change), self.assertRaises(network.SetupError):
+                network.effective_allows(group, ["10.0.0.0/24"], "10.1.0.4")
+
+    def test_nic_only_never_bypasses_a_preserved_deny_or_administrative_always_allow(self):
+        for access in ("Deny", "AlwaysAllow"):
+            group = {"tagMap": {"VirtualNetwork": ["10.0.0.0/24"]},
+                     "effectiveSecurityRules": [
+                         self.effective_rule(name="higher-priority", priority=90, access=access),
+                         self.effective_rule(),
+                     ]}
+            with self.subTest(access=access), self.assertRaises(network.SetupError):
+                network.effective_allows(group, ["10.0.0.0/24"], "10.1.0.4", administrative=True)
+
+    def test_nic_only_unknown_tags_and_incomplete_policy_fail_closed(self):
+        for group in ({}, {"effectiveSecurityRules": []},
+                      {"tagMap": {}, "effectiveSecurityRules": [self.effective_rule()]},
+                      {"tagMap": {"VirtualNetwork": []}, "effectiveSecurityRules": [self.effective_rule()]}):
+            with self.subTest(group=group), self.assertRaises(network.SetupError):
+                network.effective_allows(group, ["10.0.0.0/24"], "10.1.0.4")
+
+    def test_nic_only_requires_a_dedicated_existing_nic_nsg(self):
+        network.dedicated_nic_nsg({"properties": {"networkInterfaces": [{"id": "target-nic"}]}}, "target-nic")
+        for properties in ({}, {"subnets": [{"id": "subnet"}], "networkInterfaces": [{"id": "target-nic"}]},
+                           {"networkInterfaces": [{"id": "target-nic"}, {"id": "other-nic"}]}):
+            with self.subTest(properties=properties), self.assertRaises(network.SetupError):
+                network.dedicated_nic_nsg({"properties": properties}, "target-nic")
+        with patch.object(network, "arm") as arm, self.assertRaises(network.SetupError):
+            network.select_nsg_enforcement({"mode": "private-link"}, "nic")
+        arm.assert_not_called()
+
     def test_windows_azure_cli_uses_its_installed_python_without_shell_interpolation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

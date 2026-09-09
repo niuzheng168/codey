@@ -101,9 +101,25 @@ lacks the queue API must fail explicitly before submitting input.
 
 ## Full Windows package acceptance
 
+**2026-09-09: owner-confirmed native Windows Dev Box acceptance completed.**
+The previously separate fresh-machine test reached successful Codey enrollment
+and conversation after the browser-authentication, qualified-tunnel-ID/resume,
+quota-preflight and native-Codex-cache fixes. The owner explicitly authorized
+formal Windows downloads and an ACA Portal release. Publish the accepted
+`machine-10485734a5f19881` runtime with installer helpers containing commit
+`5d2f231` or later, not the old candidate's installer scripts. New installations
+pin Codex and allowlisted companions in a node-owned directory.
+
+This is the owner's functional acceptance, not a claim that a new sign-out,
+reboot, forced disconnect or real model probe was performed by the publisher.
+Those lifecycle checks remain separate evidence; do not disrupt an active user
+to manufacture them. Candidate-only account/computer restrictions must not
+leak into the formal package, while normal node ownership, authentication and
+TLS checks remain mandatory.
+
 A manually enrolled, already provisioned Dev Box is not evidence that the
-downloadable full installer works on a clean machine. Keep its download disabled
-until a separate clean Windows acceptance run proves:
+downloadable full installer works on a clean machine. For future Windows
+runtime candidates, require a separate fresh-machine acceptance covering:
 
 1. Owner-bound package download, dry run, and native dependency installation
    without overwriting existing global Node/Codex/provider settings.
