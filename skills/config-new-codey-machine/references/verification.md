@@ -43,6 +43,12 @@
 - SSH 超时：保持 SSH/公网规则不变；用用户已授权的 Azure 管理渠道。
 - 地址重叠：PLS 路径，不强行 peering、不改 VM IP/默认路由。
 - `installation.json` ID/release 不匹配、端口/服务被占：停止，不重装未知环境。
+- Windows 在隧道绑定时失败、完整 build/TLS/enrollment 已存在但尚未创建 runtime/任务：
+  使用同一身份/release 的修正版完整包，先 `setup-windows.ps1 -Resume` 只读验核，
+  再按授权使用 `-Resume -Apply -NetworkApproved`。核对仍为原 tunnel ID/cluster，
+  Node/后端 build、enrollment、ticket 与 TLS 原字节未变，未重跑下载/npm/构建或创建新隧道。
+  CLI 的 qualified tunnel ID 与独立 cluster 字段必须一致；不能手改 journal 或跳过身份检查。
+  已有 runtime、任务/worker 或激活文件不在此恢复窗口内；成功重跑仍只验收。
 - Windows 防火墙阻止私网访问：先审核精确来源/IP/端口并获得用户确认，不自动放行；
   现有 Dev Tunnel 节点不用这个首次 VNet 安装器重装。
 - 本机通过、门户添加失败：VNet 包检查 PE/LB/NSG/UDR/ACA egress；DevTunnel 包检查

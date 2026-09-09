@@ -13,6 +13,8 @@ description: "配置新的 Codey 节点：Windows/macOS 通过私有 DevTunnel �
 **用户可以只把本包的 `SKILL.md` 交给自己的 AI 助手。** 助手应读取本包材料、
 在目标机检查计划并在授权范围内调用匹配的原生入口，不要求用户改成手动逐条运行命令。
 脚本是 Skill 的实现，不是另一套接入流程；不要根据一条错误自行重写脚本或绕过校验。
+如果包内有 `LOCAL-RESUME.json`，这是**同一节点的本地恢复包**：先阅读下方 Windows
+恢复步骤，只能使用 `-Resume`，不能按首次安装命令开始。它不需要发布 ACA，也不预留新身份。
 
 ## 包中已有的材料
 
@@ -212,6 +214,48 @@ Workspace/data 只监听 `127.0.0.1:3001/8443`；不打开入站规则、22/4141
 隧道确实断开一段时间才重启自己的 host；状态未知/MFA 失败不会触发对其他进程的操作。
 失败仅撤销本次创建的精确任务，保留同一身份、隧道、私有构建日志和目录供审查。
 未完成安装不自动覆盖；成功重跑只验收，不重启或升级。
+
+#### Windows：恢复隧道绑定阶段的失败
+
+DevTunnel CLI `1.0.2030` 可返回 `tunnelId: "<id>.<cluster>"` 而不另给 `clusterId`。
+安装器同时接受这种格式与原来的两个独立字段；只拆分严格合法的 ID，**不猜测默认区域**。
+仍核对 ID 必须为 `codey-<本节点ID>`、description 必须为 `Codey Windows <本节点ID>`，
+以及 journal 中已保存的 cluster。两处 cluster 冲突、换节点/描述、错误端口都会拒绝。
+连接数检查也使用同样的规范化和双字段核对；未知/错误响应不是“已断线”。
+
+如果旧安装器因 `tunnel_not_bound_to_this_installation` 停止，已存在完整 build、
+TLS/enrollment 和 `tunnel.json`，但还没有 `runtime.json`、`bin`、任务或机器激活文件：
+使用**同一预留身份、同一 release 的修正版完整包**，解压到新目录，让 AI 助手继续本 Skill。
+不要取消/重建节点、删隧道、编辑 journal、改 receipt、清理缓存或重跑 npm build。
+
+先只读验核（原 owner、非管理员 PowerShell）：
+
+```powershell
+.\scripts\setup-windows.ps1 -Resume
+```
+
+确认计划显示 `builtRuntimeReused: true`、`newTunnelCreated: false` 和原隧道坐标后，
+在原来的接入授权范围内继续：
+
+```powershell
+.\scripts\setup-windows.ps1 -Resume -Apply -NetworkApproved
+```
+
+恢复时可以继续提供原来的 `-Name`、`-WorkspaceRoot` 或已安装工具路径；不要因此更换
+Codex HOME/可执行文件。旧计划未保存显示名时，保留原命令的 `-Name` 或使用计算机名。
+恢复检查包括 owner-only ACL、原始身份/三份凭据和 ticket 一致、同一完整 build receipt、
+缓存官方 Node ZIP 与原 `node.exe` 摘要、现有后端语法/原生模块 ABI、原 TLS leaf/key、
+空闲端口和无现有 Codey 任务/worker。不会把未知目录或半成品构建冒充可复用 runtime。
+
+预检仅查询原隧道，不写 journal、不安装/更新 DevTunnel、不弹出登录。
+如账号已过期，先由本人正常完成登录，再重试；不以匿名访问或重建隧道绕过认证。
+Apply 仍只 `show` 原隧道、补齐缺少的 HTTPS `3001/8443`，不会发出 tunnel `create`。
+原 Node/CloudCLI build、enrollment、ticket、证书和私钥保持原字节；仅随后安装本节点
+四个登录任务、完成 TLS/SSO 自检，才生成 `output/codey-machine.json`。原状态另存审计备份。
+
+这不是升级器或通用“强制继续”。已有 `runtime.json`、任务、worker、DB/锁或激活文件
+时必须停止审查，不接管它们。已经成功的安装即使再次指定 `-Resume`，仍只验收、不重启。
+交付时继续区分本机恢复、门户添加和真实续聊/附件验收，不能只靠状态文件宣称实机通过。
 
 旧的 VNet 个性化包仍使用 `-NetworkFile` 和原来两个服务的独立入口；不要把新的
 DevTunnel 包交给旧入口，也不要对已接入的工作机重跑首次安装器。

@@ -17,6 +17,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 
 SCRIPT = Path(__file__).resolve().parent
 SKILL = SCRIPT.parent
@@ -221,7 +222,7 @@ def logged_in(result):
     return result.returncode == 0 and "not logged in" not in text and "login required" not in text
 
 
-def prepare_devtunnel(args, home, sid):
+def prepare_devtunnel(args, home, sid, *, read_only=False):
     if args.devtunnel_executable:
         candidate = Path(args.devtunnel_executable)
     elif shutil.which("devtunnel.exe"):
@@ -229,6 +230,8 @@ def prepare_devtunnel(args, home, sid):
     else:
         root = home / ".local/share/codey-windows-bootstrap"
         if not root.exists():
+            if read_only:
+                raise Error("resume_requires_existing_devtunnel_executable")
             windows.private_directory(root, sid)
             tunnel.write_state(root / "bootstrap.json", {"schema": 1, "ownerSid": sid})
         if root.is_symlink() or not root.resolve().is_relative_to(home):
@@ -237,7 +240,11 @@ def prepare_devtunnel(args, home, sid):
         if marker.is_symlink() or not marker.is_file() or json.loads(marker.read_text()).get("ownerSid") != sid:
             raise Error("unrecognized_bootstrap_directory")
         candidate = root / "devtunnel.exe"
-        download("https://aka.ms/TunnelsCliDownload/win-x64", candidate, limit=96 * 1024 ** 2)
+        if read_only:
+            if not candidate.is_file():
+                raise Error("resume_requires_existing_devtunnel_executable")
+        else:
+            download("https://aka.ms/TunnelsCliDownload/win-x64", candidate, limit=96 * 1024 ** 2)
         # The official redirect is not version-pinned; require a valid Microsoft
         # signature before executing, then pin the actual bytes in this node.
         escaped = str(candidate).replace("'", "''")
@@ -250,6 +257,8 @@ def prepare_devtunnel(args, home, sid):
         raise Error("native_devtunnel_required")
     result = tunnel.cli(candidate, ["user", "show"], check=False)
     if not logged_in(result):
+        if read_only:
+            raise Error("devtunnel_owner_login_required_resume_does_not_change_login")
         # This is the only interactive step. Never log credentials/device codes
         # or run login in a scheduled task/background worker.
         print("DevTunnel requires your own Microsoft/Entra login. Complete the browser sign-in.", flush=True)
@@ -259,6 +268,132 @@ def prepare_devtunnel(args, home, sid):
         if not logged_in(tunnel.cli(candidate, ["user", "show"], check=False)):
             raise Error("devtunnel_owner_login_required")
     return candidate.resolve()
+
+
+def resume_file(file, root):
+    file, root = Path(file), Path(root).resolve()
+    if (not file.is_file() or file.is_symlink() or file.resolve() != file.absolute()
+            or not file.resolve().is_relative_to(root)):
+        raise Error("resume_input_missing_linked_or_outside_installation")
+    current = file.parent
+    while current != root:
+        if current.is_symlink() or current.is_junction():
+            raise Error("resume_input_has_linked_parent")
+        current = current.parent
+    return file
+
+
+def check_resume_owner_and_tasks(root, config_root, node_id, sid):
+    """Read-only checks; never stop a process or adopt/delete an existing task."""
+    values = [str(value).replace("'", "''") for value in (root, config_root, node_id, sid)]
+    script = r"""
+$ErrorActionPreference='Stop'
+$root='ROOT';$config='CONFIG';$node='NODE';$sid='SID'
+# OWNER RIGHTS denotes the object's owner, which is checked against $sid below;
+# it is not another user/group and can be present on directories created by Python.
+$allowed=@($sid,'S-1-3-4','S-1-5-18','S-1-5-32-544')
+foreach($path in @($root,$config)){
+  $acl=Get-Acl -LiteralPath $path
+  if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid){throw 'Different directory owner'}
+  foreach($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
+    if($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin $allowed){throw 'Directory is not owner-only'}
+  }
+}
+$scheduler=New-Object -ComObject Schedule.Service
+$scheduler.Connect()
+$names=@($scheduler.GetFolder('\').GetTasks(1) | Where-Object {$_.Name.StartsWith("Codey Node $node ",[StringComparison]::OrdinalIgnoreCase)})
+if($names.Count){throw 'Existing node tasks cannot be resumed or replaced'}
+$active=@(Get-CimInstance Win32_Process | Where-Object {
+  $_.Name -in @('node.exe','python.exe','pythonw.exe','devtunnel.exe') -and
+  (([string]$_.CommandLine).IndexOf($root+'\', [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+   (([string]$_.CommandLine).IndexOf($config+'\runtime.json', [StringComparison]::OrdinalIgnoreCase) -ge 0) -or
+   ($_.Name -eq 'devtunnel.exe' -and $_.CommandLine -match ('\bhost\s+codey-'+[regex]::Escape($node)+'(?:\.|\s|$)')))
+})
+if($active.Count){throw 'An existing node worker is active; no process was stopped'}
+@{ownerVerified=$true;tasksAbsent=$true;workersAbsent=$true}|ConvertTo-Json -Compress
+"""
+    for name, value in zip(("ROOT", "CONFIG", "NODE", "SID"), values):
+        script = script.replace("'" + name + "'", "'" + value + "'")
+    result = run([windows.native_powershell(), "-NoProfile", "-NonInteractive", "-Command", script], check=False)
+    if result.returncode:
+        raise Error("resume_requires_owner_only_directories_and_no_existing_node_tasks_or_workers")
+    value = json.loads(result.stdout)
+    if value != {"ownerVerified": True, "tasksAbsent": True, "workersAbsent": True}:
+        raise Error("resume_owner_and_task_probe_failed")
+
+
+def verify_resume_tls(openssl, cert, key, node_id):
+    dns = f"{node_id}.nodes.codey.internal"
+    run([openssl, "x509", "-in", cert, "-noout", "-checkend", "300"])
+    san = run([openssl, "x509", "-in", cert, "-noout", "-ext", "subjectAltName"]).stdout
+    constraints = run([openssl, "x509", "-in", cert, "-noout", "-ext", "basicConstraints"]).stdout
+    if re.findall(r"DNS:([A-Za-z0-9.-]+)", san) != [dns] or "CA:FALSE" not in constraints:
+        raise Error("resume_certificate_is_not_the_existing_node_leaf")
+    run([openssl, "verify", "-CAfile", cert, "-purpose", "sslserver", "-verify_hostname", dns, cert])
+    public = run([openssl, "x509", "-in", cert, "-pubkey", "-noout"]).stdout.strip()
+    private_public = run([openssl, "pkey", "-in", key, "-pubout"]).stdout.strip()
+    if not public or public != private_public:
+        raise Error("resume_certificate_and_private_key_do_not_match")
+
+
+def verify_resume(args, enrollment, manifest, state, root, config_root, openssl, devtunnel, context):
+    """Resume only a completed build that stopped before runtime/task registration."""
+    if (state.get("ready") is not False or state.get("platform") != "windows-x64"
+            or state.get("mode") != "private-devtunnel-existing-model"):
+        raise Error("resume_requires_a_recognized_unfinished_windows_installation")
+    if ((root / "bin").exists() or (config_root / "runtime.json").exists() or Path(args.out).exists()
+            or any((config_root / name).exists() for name in ("auth.db", "workspace.lock", "data.lock", "tunnel.lock", "renew.lock"))):
+        raise Error("resume_supports_pre_task_tunnel_binding_failures_only_no_existing_runtime_is_overwritten")
+    check_resume_owner_and_tasks(root, config_root, enrollment["nodeId"], context["sid"])
+    release = root / "releases" / manifest["releaseId"]
+    files = [resume_file(config_root / name, config_root) for name in (
+        "installation.json", "enrollment.json", "ticket.key", "node-cert.pem", "node-key.pem", "tunnel.json",
+    )]
+    saved = json.loads((config_root / "enrollment.json").read_text(encoding="utf-8-sig"))
+    if saved != enrollment or (config_root / "ticket.key").read_text(encoding="utf-8").strip() != enrollment["clientSigningKey"]:
+        raise Error("resume_enrollment_or_credential_mismatch_nothing_rotated")
+    receipt = resume_file(release / "release.json", root)
+    if json.loads(receipt.read_text(encoding="utf-8-sig")) != manifest:
+        raise Error("resume_completed_runtime_release_mismatch_no_rebuild")
+    files.append(receipt)
+    for name in ("node/node.exe", "cloudcli/dist-server/server/index.js", "portal-node/node-relay/server.mjs",
+                 "cloudcli/package.json", "cloudcli/package-lock.json",
+                 "cloudcli/node_modules/better-sqlite3/package.json", "cloudcli/node_modules/node-pty/package.json"):
+        files.append(resume_file(release / name, root))
+    archive = resume_file(root / manifest["nodeDistribution"]["file"], root)
+    if tunnel.digest(archive) != manifest["nodeDistribution"]["sha256"]:
+        raise Error("resume_cached_node_archive_checksum_mismatch")
+    node = release / "node/node.exe"
+    with zipfile.ZipFile(archive) as package, package.open(
+            manifest["nodeDistribution"]["file"].removesuffix(".zip") + "/node.exe") as stream:
+        if hashlib.file_digest(stream, "sha256").hexdigest() != tunnel.digest(node):
+            raise Error("resume_existing_node_executable_checksum_mismatch")
+    files.append(archive)
+    # Syntax/ABI checks reuse the pinned runtime; they do not run the server,
+    # npm, a build, a model call, a terminal or a persistent SQLite database.
+    env = {key: value for key, value in windows.child_environment().items() if key.upper() in (
+        "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA",
+    )}
+    env["PATH"] = str(node.parent)
+    for entry in (release / "cloudcli/dist-server/server/index.js", release / "portal-node/node-relay/server.mjs"):
+        run([node, "--check", entry], env=env)
+    run([node, "-e", "const D=require('better-sqlite3');const d=new D(':memory:');d.exec('select 1');d.close();require('node-pty')"],
+        cwd=release / "cloudcli", env=env)
+    cert, key = config_root / "node-cert.pem", config_root / "node-key.pem"
+    verify_resume_tls(openssl, cert, key, enrollment["nodeId"])
+    binding = tunnel.ensure_tunnel(devtunnel, enrollment, config_root, reuse_only=True, inspect_only=True)
+    return {
+        "binding": binding, "files": {str(file): tunnel.digest(file) for file in files},
+        "immutableFiles": {str(file): tunnel.digest(file) for file in files
+                           if file.name not in ("installation.json", "tunnel.json")},
+    }
+
+
+def assert_resume_files(hashes):
+    for name, expected in hashes.items():
+        file = Path(name)
+        if not file.is_file() or file.is_symlink() or tunnel.digest(file) != expected:
+            raise Error("resume_input_changed_existing_files_not_overwritten")
 
 
 def build_runtime(manifest, root, stage, log):
@@ -335,13 +470,29 @@ def configure(args):
     node_id = enrollment.get("nodeId", "")
     if not tunnel.NODE_ID.fullmatch(node_id):
         raise Error("personalized_windows_package_required")
+    recovery_file = SKILL / "LOCAL-RESUME.json"
+    if recovery_file.exists():
+        if recovery_file.is_symlink() or recovery_file.stat().st_size > 16384:
+            raise Error("invalid_local_resume_package")
+        recovery = json.loads(recovery_file.read_text(encoding="utf-8-sig"))
+        if (recovery.get("schema") != 1 or recovery.get("kind") != "windows-pre-task-resume"
+                or recovery.get("nodeId") != node_id or recovery.get("releaseId") != manifest["releaseId"]
+                or recovery.get("expectedComputerName", "").casefold() != computer.casefold()):
+            raise Error("local_resume_package_identity_mismatch")
+        if not getattr(args, "resume", False):
+            raise Error("this_recovery_package_requires_Resume_no_fresh_installation_attempted")
     home = Path.home().resolve()
     root = home / ".local/share/codey-machine-windows" / node_id
     config_root = home / ".config/codey-machine-windows" / node_id
-    if any(not folder.resolve().is_relative_to(home) or folder.is_symlink() for folder in (root, config_root)):
+    if any(not folder.resolve().is_relative_to(home) or folder.is_symlink() or folder.is_junction()
+           for folder in (root, config_root)):
         raise Error("installation_path_escaped_owner_home")
     state_file, runtime_file = config_root / "installation.json", config_root / "runtime.json"
+    if state_file.is_symlink() or runtime_file.is_symlink():
+        raise Error("linked_installation_state")
     state = json.loads(state_file.read_text(encoding="utf-8-sig")) if state_file.is_file() else None
+    if state is not None and not isinstance(state, dict):
+        raise Error("invalid_installation_state")
     if state and (state.get("nodeId") != node_id or state.get("ownerSid") != context["sid"]
                   or state.get("computerName") != computer or state.get("releaseId") != manifest["releaseId"]):
         raise Error("existing_installation_identity_or_release_mismatch")
@@ -358,12 +509,24 @@ def configure(args):
         print(json.dumps({"ok": True, "alreadyConfigured": True, "servicesRestarted": False,
                           "verification": verification, "output": args.out}))
         return
-    if state or root.exists() or config_root.exists():
+    resuming = bool(getattr(args, "resume", False))
+    if resuming and not state:
+        raise Error("resume_requires_existing_installation_no_new_identity_or_runtime_created")
+    if not resuming and (state or root.exists() or config_root.exists()):
         raise Error("unfinished_or_unrecognized_installation_requires_review_no_overwrite")
     codex_home = Path(os.environ.get("CODEX_HOME") or home / ".codex")
     if not codex_home.is_absolute():
         raise Error("existing_CODEX_HOME_must_be_absolute")
+    if resuming:
+        if str(codex_home) != state.get("codexHome"):
+            raise Error("resume_codex_home_mismatch")
+        if not args.codex_executable:
+            args.codex_executable = state.get("codexExecutable")
+        if not args.openssl:
+            args.openssl = state.get("opensslExecutable")
     codex, openssl, pythonw = existing_tools(args, home)
+    if resuming and (str(codex) != state.get("codexExecutable") or str(openssl) != state.get("opensslExecutable")):
+        raise Error("resume_existing_owner_tools_must_match_original_plan")
     proof = gateway_proof()
     if proof["ownerSid"] != context["sid"]:
         raise Error("4141_process_belongs_to_another_owner")
@@ -372,13 +535,15 @@ def configure(args):
     usage_key = usage_key_file(args.usage_key_file, provider, codex_home)
     proxy_preflight = verify_usage(usage_key)
     workspace = Path(args.workspace_root or (home / "Documents" if (home / "Documents").is_dir() else home)).resolve()
-    name = args.name or computer
+    name = args.name or (state.get("name") if resuming else None) or computer
+    if resuming and state.get("name") and name != state["name"]:
+        raise Error("resume_machine_name_mismatch")
     if not name or len(name) > 80 or any(ord(char) < 32 for char in name):
         raise Error("invalid_machine_display_name")
     if not workspace.is_dir():
         raise Error("existing_workspace_directory_required")
     plan = {
-        "nodeId": node_id, "platform": "windows-x64", "mode": "private-devtunnel-existing-model",
+        "nodeId": node_id, "platform": "windows-x64", "mode": "private-devtunnel-existing-model", "name": name,
         "computerName": computer, "ownerSid": context["sid"], "releaseId": manifest["releaseId"],
         "protectedModelProcess": proof, "codexExecutable": str(codex), "codexHome": str(codex_home),
         "opensslExecutable": str(openssl), "privateListeners": ["127.0.0.1:3001", "127.0.0.1:8443"],
@@ -387,41 +552,62 @@ def configure(args):
         "firewallChanged": False, "azureArmPermissionsRequired": False, "existingModelServiceChanged": False,
         "logonOnly": True, "globalToolsChanged": False, "proxyPreflight": proxy_preflight,
     }
+    resume = None
+    if resuming:
+        if occupied:
+            raise Error("workspace_or_data_port_occupied_no_process_stopped")
+        devtunnel = prepare_devtunnel(args, home, context["sid"], read_only=True)
+        resume = verify_resume(args, enrollment, manifest, state, root, config_root, openssl, devtunnel, context)
+        plan.update({
+            "resume": True, "builtRuntimeReused": True, "existingCertificateAndKeysReused": True,
+            "existingTunnel": resume["binding"], "newTunnelCreated": False, "buildCommandsRun": False,
+            "networkChanges": "Reuse this exact private tunnel; create only missing HTTPS 3001/8443 ports after approval",
+        })
     if not args.apply:
         print(json.dumps(plan, indent=2))
         return
     if occupied:
         raise Error("workspace_or_data_port_occupied_no_process_stopped")
-    if shutil.disk_usage(home).free < 8 * 1024 ** 3:
+    if not resuming and shutil.disk_usage(home).free < 8 * 1024 ** 3:
         raise Error("eight_GiB_free_space_required")
-    devtunnel = prepare_devtunnel(args, home, context["sid"])
+    if not resuming:
+        devtunnel = prepare_devtunnel(args, home, context["sid"])
     if gateway_proof() != proof:
         raise Error("protected_model_process_changed_before_installation")
     config_text = (codex_home / "config.toml").read_bytes() if (codex_home / "config.toml").exists() else None
-    windows.private_directory(config_root, context["sid"])
-    windows.private_directory(root, context["sid"])
-    tunnel.write_state(state_file, {**plan, "ready": False})
+    if resuming:
+        check_resume_owner_and_tasks(root, config_root, node_id, context["sid"])
+        assert_resume_files(resume["files"])
+        tunnel.write_state(config_root / f"installation.before-resume-{time.time_ns()}.json", state)
+    else:
+        windows.private_directory(config_root, context["sid"])
+        windows.private_directory(root, context["sid"])
+        tunnel.write_state(state_file, {**plan, "ready": False})
     tasks_created = False
     try:
         releases = root / "releases"
-        releases.mkdir()
-        stage = windows.within(releases / (manifest["releaseId"] + ".prepare"), releases)
         release = windows.within(releases / manifest["releaseId"], releases)
-        stage.mkdir()
-        build_runtime(manifest, root, stage, config_root / "dependency-build.log")
-        os.replace(windows.within(stage, releases), windows.within(release, releases))
+        if not resuming:
+            releases.mkdir()
+            stage = windows.within(releases / (manifest["releaseId"] + ".prepare"), releases)
+            stage.mkdir()
+            build_runtime(manifest, root, stage, config_root / "dependency-build.log")
+            os.replace(windows.within(stage, releases), windows.within(release, releases))
         if gateway_proof() != proof:
             raise Error("protected_model_process_changed_during_build")
         cert, key = config_root / "node-cert.pem", config_root / "node-key.pem"
         dns = f"{node_id}.nodes.codey.internal"
-        run([openssl, "req", "-x509", "-newkey", "rsa:3072", "-noenc", "-days", "365",
-             "-keyout", key, "-out", cert, "-subj", f"/CN={dns}", "-addext", f"subjectAltName=DNS:{dns}",
-             "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "keyUsage=critical,digitalSignature,keyEncipherment",
-             "-addext", "extendedKeyUsage=serverAuth"], log=config_root / "dependency-build.log")
         enrollment_file = config_root / "enrollment.json"
-        tunnel.write_state(enrollment_file, enrollment)
-        (config_root / "ticket.key").write_text(enrollment["clientSigningKey"], encoding="utf-8")
-        binding = tunnel.ensure_tunnel(devtunnel, enrollment, config_root)
+        if not resuming:
+            run([openssl, "req", "-x509", "-newkey", "rsa:3072", "-noenc", "-days", "365",
+                 "-keyout", key, "-out", cert, "-subj", f"/CN={dns}", "-addext", f"subjectAltName=DNS:{dns}",
+                 "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "keyUsage=critical,digitalSignature,keyEncipherment",
+                 "-addext", "extendedKeyUsage=serverAuth"], log=config_root / "dependency-build.log")
+            tunnel.write_state(enrollment_file, enrollment)
+            (config_root / "ticket.key").write_text(enrollment["clientSigningKey"], encoding="utf-8")
+        binding = (tunnel.ensure_tunnel(devtunnel, enrollment, config_root, reuse_only=True,
+                                       expected_binding=resume["binding"]) if resuming
+                   else tunnel.ensure_tunnel(devtunnel, enrollment, config_root))
         binaries = root / "bin"
         binaries.mkdir()
         for name in ("windows-tunnel-service.py", "windows-tunnel-client.py", "windows-service.py"):
@@ -430,7 +616,7 @@ def configure(args):
         config = {
             "schema": 1, "kind": "windows-devtunnel", "nodeId": node_id, "ownerSid": context["sid"],
             "computerName": computer, "root": str(root), "configRoot": str(config_root),
-            "name": args.name or computer, "pythonwExe": str(pythonw), "nodeExe": str(node),
+            "name": name, "pythonwExe": str(pythonw), "nodeExe": str(node),
             "runnerPath": str(binaries / "windows-tunnel-service.py"),
             "ownerHelper": str(binaries / "windows-service.py"),
             "tunnelHelper": str(binaries / "windows-tunnel-client.py"),
@@ -470,6 +656,8 @@ def configure(args):
         after = (codex_home / "config.toml").read_bytes() if (codex_home / "config.toml").exists() else None
         if after != config_text:
             raise Error("owner_codex_configuration_changed_no_rollback_of_user_changes")
+        if resuming:
+            assert_resume_files(resume["immutableFiles"])
         export_machine(enrollment, config, args.out)
         tunnel.write_state(state_file, {**plan, "ready": True})
         print(json.dumps({
@@ -477,6 +665,7 @@ def configure(args):
             "existingCodexConfigUnchanged": True, "logonOnly": True, "firewallChanged": False,
             "portalActivationRequired": True, "realModelCallsTested": False, "reloginTested": False,
             "verification": verification,
+            "resumed": resuming, "builtRuntimeReused": resuming, "newTunnelCreated": False if resuming else None,
             "output": args.out, "runtimeConfig": str(runtime_file),
         }, indent=2))
     except BaseException:
@@ -501,6 +690,8 @@ if __name__ == "__main__":
     parser.add_argument("--workspace-root")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--network-approved", action="store_true")
+    parser.add_argument("--resume", action="store_true",
+                        help="Verify and resume an existing completed build that stopped before runtime/task registration")
     try:
         configure(parser.parse_args())
     except Exception as error:

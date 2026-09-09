@@ -320,7 +320,7 @@ class WindowsTunnelTests(unittest.TestCase):
     def test_tunnel_creation_journals_before_request_and_never_adds_anonymous_access(self):
         with tempfile.TemporaryDirectory() as directory:
             calls = []
-            value = {"tunnelId": "codey-test-windows", "clusterId": "jpe1",
+            value = {"tunnelId": "codey-" + ID, "clusterId": "jpe1",
                      "description": "Codey Windows " + ID, "ports": []}
 
             def runner(argv, **_kwargs):
@@ -330,7 +330,7 @@ class WindowsTunnelTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout=json.dumps({"tunnel": value}))
 
             binding = client.ensure_tunnel("devtunnel.exe", invitation(), directory, runner=runner)
-            self.assertEqual(binding, {"tunnelId": "codey-test-windows", "clusterId": "jpe1"})
+            self.assertEqual(binding, {"tunnelId": "codey-" + ID, "clusterId": "jpe1"})
             self.assertEqual(calls[0][1], "create")
             self.assertEqual([row[row.index("--port-number") + 1] for row in calls[1:]], ["3001", "8443"])
             value["ports"] = [{"portNumber": port, "protocol": "https"} for port in (3001, 8443)]
@@ -359,7 +359,7 @@ class WindowsTunnelTests(unittest.TestCase):
             with self.subTest(description=description, ports=ports), tempfile.TemporaryDirectory() as directory:
                 def runner(_argv, **_kwargs):
                     return SimpleNamespace(returncode=0, stdout=json.dumps({"tunnel": {
-                        "tunnelId": "codey-test-windows", "clusterId": "jpe1",
+                        "tunnelId": "codey-" + ID, "clusterId": "jpe1",
                         "description": description, "ports": ports,
                     }}))
                 with self.assertRaises(client.TunnelError):
@@ -369,7 +369,8 @@ class WindowsTunnelTests(unittest.TestCase):
         config = {"devtunnelExe": "devtunnel.exe", "tunnelId": "codey-test-windows", "clusterId": "jpe1"}
         for count, expected in [(0, 0), (1, 1), (None, None), (True, None), (-1, None), ("0", None)]:
             with self.subTest(count=count), patch.object(client, "cli", return_value=SimpleNamespace(
-                    stdout=json.dumps({"tunnel": {"tunnelId": config["tunnelId"], "hostConnections": count}}))):
+                    stdout=json.dumps({"tunnel": {"tunnelId": config["tunnelId"], "clusterId": config["clusterId"],
+                                                 "hostConnections": count}}))):
                 self.assertEqual(client.host_connections(config), expected)
         with patch.object(client, "cli", side_effect=client.TunnelError("authentication_failed")):
             self.assertIsNone(client.host_connections(config))

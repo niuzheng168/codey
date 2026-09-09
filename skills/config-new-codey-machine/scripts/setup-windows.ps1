@@ -8,6 +8,9 @@ model proxy and Codex installation. Legacy VNet packages still take NetworkFile.
 Default is a read-only plan. -Apply -NetworkApproved approves the private
 outbound tunnel and loopback listeners; firewall/network rules are not changed.
 Services start only while the original Windows owner is logged on.
+-Resume verifies and reuses a completed runtime that stopped at tunnel binding,
+before runtime configuration or tasks were created. It never rebuilds or creates
+a replacement tunnel. A successful installation remains verification-only.
 #>
 [CmdletBinding()]
 param(
@@ -22,6 +25,7 @@ param(
     [string]$UsageKeyFile = '',
     [string]$WorkspaceRoot = '',
     [string]$ExpectedComputerName = '',
+    [switch]$Resume,
     [switch]$Apply,
     [switch]$NetworkApproved
 )
@@ -59,7 +63,9 @@ if ($tunneled) {
     if ($UsageKeyFile) { $arguments += @('--usage-key-file', $UsageKeyFile) }
     if ($WorkspaceRoot) { $arguments += @('--workspace-root', $WorkspaceRoot) }
     if ($ExpectedComputerName) { $arguments += @('--expected-computer-name', $ExpectedComputerName) }
+    if ($Resume) { $arguments += '--resume' }
 } else {
+    if ($Resume) { throw '-Resume supports only unfinished Windows DevTunnel setup before task registration.' }
     if (-not $NetworkFile) { throw 'Legacy private-network packages require their reviewed NetworkFile.' }
     $arguments = @('-X', 'utf8', '-I', '-B', (Join-Path $PSScriptRoot 'configure-windows.py'),
         '--enrollment', $Enrollment, '--network-file', $NetworkFile, '--out', $Out)
