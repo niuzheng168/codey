@@ -280,11 +280,12 @@ export class NodePolicy {
     };
   }
 
-  /** Only reserved, unexpired or enabled Mac identities may renew a tunnel. */
+  /** Only reserved or enabled owner-bound Windows/Mac tunnel nodes may renew. */
   async tunnelMachine(nodeId, now = Date.now()) {
     const node = (await this.records()).data.nodes.find(item => item.id === nodeId);
-    if (!node || !String(node.setup?.platform).startsWith("macos-") ||
-        !(node.enabled || (node.setup.status === "reserved" && node.setup.expiresAt > now))) {
+    if (!node || !["windows-x64", "macos-arm64", "macos-x64"].includes(node.setup?.platform) ||
+        !((node.enabled && node.machine?.networkMode === "devtunnel") ||
+          (!node.enabled && node.setup.status === "reserved" && node.setup.expiresAt > now))) {
       throw requestError("Machine authentication failed", 401);
     }
     return node;
@@ -299,8 +300,9 @@ export class NodePolicy {
     const sealedToken = sealMachineTunnelToken(this.master, nodeId, input.connectToken);
     return this.store.mutate(data => {
       const node = data.nodes.find(item => item.id === nodeId);
-      if (!node || !String(node.setup?.platform).startsWith("macos-") ||
-          !(node.enabled || (node.setup.status === "reserved" && node.setup.expiresAt > now))) {
+      if (!node || !["windows-x64", "macos-arm64", "macos-x64"].includes(node.setup?.platform) ||
+          !((node.enabled && node.machine?.networkMode === "devtunnel") ||
+            (!node.enabled && node.setup.status === "reserved" && node.setup.expiresAt > now))) {
         throw requestError("Machine authentication failed", 401);
       }
       if (node.tunnel && (node.tunnel.tunnelId !== input.tunnelId ||

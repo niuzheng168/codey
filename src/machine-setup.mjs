@@ -129,10 +129,38 @@ export class MachineSetup {
     if (cloudCliGateway) cloudCliGateway.refreshMachines = () => this.refreshGateways();
   }
 
-  async availability(platformId) {
+  async selectedBundle(platformId, principalId) {
+    try {
+      return await loadMachineBundle(this.bundleRoot, platformId);
+    } catch (productionError) {
+      // A separately published acceptance package is visible only to the exact
+      // tester(s) named by the operator. It never enables general Windows downloads.
+      if (platformId !== "windows-x64" || !/^[a-z0-9-]{1,80}$/.test(principalId ?? "")) throw productionError;
+      const root = await realpath(this.bundleRoot);
+      const file = path.join(root, "acceptance.json");
+      const stat = await lstat(file);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4096 || await realpath(file) !== file) throw productionError;
+      const policy = JSON.parse(await readFile(file, "utf8"));
+      if (policy.schema !== 1 || policy.platform !== "windows-x64" ||
+          Object.keys(policy).some(key => !["schema", "platform", "owners", "expectedComputerName", "expiresAt"].includes(key)) ||
+          !Array.isArray(policy.owners) || !policy.owners.length || policy.owners.length > 8 ||
+          policy.owners.some(id => typeof id !== "string" || !/^[a-z0-9-]{1,80}$/.test(id)) || !policy.owners.includes(principalId) ||
+          !/^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/.test(policy.expectedComputerName ?? "") ||
+          !Number.isSafeInteger(policy.expiresAt) || policy.expiresAt <= Date.now() ||
+          policy.expiresAt > Date.now() + 7 * 86400000) throw productionError;
+      const previewRoot = path.join(root, "acceptance");
+      if (await realpath(previewRoot) !== previewRoot) throw productionError;
+      return {
+        ...await loadMachineBundle(previewRoot, platformId),
+        acceptance: { expectedComputerName: policy.expectedComputerName, expiresAt: policy.expiresAt },
+      };
+    }
+  }
+
+  async availability(platformId, principalId) {
     if (platformId === undefined) {
       const platforms = await Promise.all(MACHINE_PLATFORMS.map(async (definition) =>
-        definition.implemented ? { ...await this.availability(definition.id) }
+        definition.implemented ? { ...await this.availability(definition.id, principalId) }
           : { enabled: false, platform: definition.id, name: definition.name, planned: true, reason: definition.description }));
       const selected = platforms.find((entry) => entry.platform === "linux-x64" && entry.enabled)
         ?? platforms.find((entry) => entry.enabled) ?? platforms.find((entry) => entry.platform === "linux-x64");
@@ -148,12 +176,14 @@ export class MachineSetup {
       return { ...identity, enabled: false, reason: "请先配置节点升级器签名公钥，确保新机器可持续更新" };
     }
     try {
-      const { manifest, files } = await loadMachineBundle(this.bundleRoot, platformId);
+      const { manifest, files, acceptance } = await this.selectedBundle(platformId, principalId);
       await this.cloudCliUi.active?.();
       return {
         ...identity, enabled: true, platform: manifest.platform, releaseId: manifest.releaseId,
         bytes: files.reduce((sum, file) => sum + file.size, 0),
         node: manifest.node, cloudcli: manifest.cloudcli.version, copilotApi: manifest.copilotApi.version,
+        ...(acceptance ? { preview: true, expectedComputerName: acceptance.expectedComputerName,
+          previewExpiresAt: acceptance.expiresAt } : {}),
       };
     } catch { return { ...identity, enabled: false, reason: `${definition.name} 完整配置包尚未发布或不可用；不会退回其他平台或仅说明的 ZIP` }; }
   }
@@ -182,9 +212,9 @@ export class MachineSetup {
       throw requestError("待配置身份已绑定原平台，请下载同一平台的包", 409);
     }
     const definition = machinePlatform(platformId);
-    const available = await this.availability(platformId);
+    const available = await this.availability(platformId, req.codeyPrincipal.id);
     if (!available.enabled) throw requestError(available.reason, 503);
-    const { manifest, files } = await loadMachineBundle(this.bundleRoot, platformId);
+    const { manifest, files, acceptance } = await this.selectedBundle(platformId, req.codeyPrincipal.id);
     const skillRoot = await realpath(this.skillRoot);
     const entries = [];
     for (const name of [...MACHINE_SKILL_FILES, ...definition.files]) {
@@ -199,10 +229,12 @@ export class MachineSetup {
     const node = reserved ?? await this.nodePolicy.reserveMachine(req.codeyPrincipal.id, Date.now(), platformId);
     const enrollment = {
       schema: 1, ...this.nodePolicy.enrollmentValues(req.codeyPrincipal, node.id, this.origin),
-      expiresAt: node.setup.expiresAt, releaseId: manifest.releaseId, platform: platformId,
+      expiresAt: Math.min(node.setup.expiresAt, acceptance?.expiresAt ?? Infinity),
+      releaseId: manifest.releaseId, platform: platformId,
+      ...(acceptance ? { acceptance } : {}),
       ...(definition.tunnel ? { network: { mode: "devtunnel" }, tunnelUpdateKey: this.nodePolicy.tunnelUpdateKey(node.id) }
         : { network: this.network }),
-      ...(definition.tunnel ? { note: "仅用于此 Mac 的私有 DevTunnel 节点；不需要 Azure VM 或节点后台的 Azure 部署权限。" } : {}),
+      ...(definition.tunnel ? { note: "仅用于此机器的私有 DevTunnel 节点；保留现有模型代理，不需要节点后台的 Azure 部署权限。" } : {}),
     };
     if (definition.updater && this.machineUpdates) {
       entries.push(...(await this.machineUpdates.newMachineEntries(req.codeyPrincipal.id, node.id))
@@ -266,15 +298,18 @@ export class MachineSetup {
         return true;
       }
       if (!activate || req.method !== "POST") throw requestError("Method not allowed", 405);
-      const available = await this.availability(reserved.setup.platform ?? "linux-x64");
+      const available = await this.availability(reserved.setup.platform ?? "linux-x64", req.codeyPrincipal.id);
       if (!available.enabled) throw requestError(available.reason, 503);
       const machine = machineIdentity(await input(req), nodeId);
       if (machine.platform !== (reserved.setup.platform ?? "linux-x64")) {
         throw requestError("机器文件的平台与下载时预留的平台不一致");
       }
+      if (available.preview && machine.networkMode !== "devtunnel") {
+        throw requestError("Windows 验收包必须通过私有 DevTunnel 完成接入");
+      }
       if (machine.networkMode === "devtunnel" && (!reserved.tunnel ||
           reserved.tunnel.tunnelId !== machine.devTunnel.tunnelId || reserved.tunnel.clusterId !== machine.devTunnel.clusterId)) {
-        throw requestError("请先由此 Mac 的安装脚本提交并验证本节点隧道", 409);
+        throw requestError("请先由此机器的安装脚本提交并验证本节点隧道", 409);
       }
       if (this.verifying >= 4) throw requestError("正在验收其他机器，请稍后重试", 429);
       this.verifying++;

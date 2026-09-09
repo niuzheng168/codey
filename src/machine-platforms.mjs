@@ -3,10 +3,12 @@ import { requestError } from "./signed-store.mjs";
 export const MACHINE_PLATFORMS = Object.freeze([
   Object.freeze({
     id: "windows-x64", name: "Windows", entrypoint: "scripts/setup-windows.ps1",
-    nodeSuffix: "win-x64.zip", updater: false, implemented: true,
-    description: "Azure Windows x64 · 原用户登录后运行 · 网络与防火墙改动须另行确认",
+    nodeSuffix: "win-x64.zip", updater: false, implemented: true, tunnel: true, privateNetwork: true,
+    description: "Windows x64 · 私有 DevTunnel · 登录后运行 · 保留现有 Codex/模型代理",
     files: ["scripts/setup-windows.ps1", "scripts/configure-windows.py",
-      "scripts/windows-service.py", "scripts/windows-tasks.ps1"],
+      "scripts/windows-service.py", "scripts/windows-tasks.ps1",
+      "scripts/configure-windows-tunnel.py", "scripts/windows-tunnel-client.py",
+      "scripts/windows-tunnel-service.py", "scripts/windows-tunnel-tasks.ps1"],
   }),
   Object.freeze({
     id: "linux-x64", name: "Linux", entrypoint: "scripts/setup-linux.sh",

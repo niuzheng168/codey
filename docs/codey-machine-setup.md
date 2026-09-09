@@ -32,11 +32,13 @@ Windows 的未完成安装必须先人工审查，不自动覆盖；成功安装
 
 | 目标 | 包内入口 | 服务方式 |
 | --- | --- | --- |
-| Windows x64 | `scripts/setup-windows.ps1` | 原 owner 登录后运行的隐藏监督进程；不要求无人登录运行 |
+| Windows x64 | `scripts/setup-windows.ps1` | 私有 DevTunnel；原 owner 登录后运行，保留已有模型代理 |
 | Linux x64 | `scripts/setup-linux.sh` | systemd 用户服务；旧 Python 入口保留兼容 |
 | macOS Apple Silicon / Intel | `scripts/setup-macos.sh` | 本人 launchd 服务、独立 Codex 后端及私有 DevTunnel |
 
-所有入口默认只输出计划。Windows 执行需显式 `-Apply -NetworkApproved`，Linux/macOS 需
+所有入口默认只输出计划。Windows 新包复用同一 owner 的现有 copilot-api 和 Codex，
+不重装或重启 `4141`；仅新建 Workspace、HTTPS 数据转发、DevTunnel 及续期登录任务。
+Windows 执行需显式 `-Apply -NetworkApproved`，Linux/macOS 需
 `--apply`；Azure 网络脚本另行确认。Windows 安装器不改防火墙、执行策略或全局
 Node/Python/Codex，也不停止占用端口的已有服务。Windows 包必须使用 `win-x64.zip`
 Node 发行物，Linux 包使用 `linux-x64.tar.xz`；预留、重下和添加都绑定同一平台。
@@ -46,11 +48,27 @@ Node 发行物和第三份最小权限的隧道续期 key。复用现有本机 C
 服务只监听回环地址；门户验通私有隧道后激活。完整生命周期与部署/回退约束见
 [macOS 节点](./codey-macos-nodes.md)。节点后台不需要 Azure 部署登录。
 
-Windows 首次完整安装需要 Python 3.12+、原生 OpenSSL 和必要依赖构建工具。
+Windows 首次 Codey 接入需要 Python 3.12+、原生 OpenSSL、已可用的 Codex/模型代理和必要依赖构建工具。
+DevTunnel 缺失时可下载微软签名的 CLI 到独立目录；不会改全局 PATH 或防火墙。
+这条复用模式不等同于在裸 Windows 上安装并登录一个全新的模型服务。
 新任务使用 InteractiveToken/LeastPrivilege、登录触发器，不使用 boot/SYSTEM/S4U。
 Windows 没有 Linux 签名升级器；不为它分发 Linux 更新包或伪造心跳。
 脚本/规划测试已覆盖的平台不等于在干净机器完成实际安装；发布 Windows 完整包前
 还需验证依赖构建、PTY/SQLite、TLS/SSO、ACA 访问及重新登录自启。
+
+### Windows 受控验收包
+
+正式 Windows 包仍需实机通过后发布。可在已有机器包根目录放置运维管理的
+`acceptance.json`，包含 `schema: 1`、`platform: "windows-x64"`、精确 `owners` ID 列表、
+`expectedComputerName` 和不超过七天的 `expiresAt`。候选发行物独立放在
+`acceptance/platforms/windows-x64/releases/<releaseId>`，只在该目录维护 `active.json`。
+不得把候选指针写到正式的 `platforms/windows-x64/active.json`。
+
+只有指定账号能在设置中看到带目标机名称的“验收版”，下载保留正常的 owner/node/key
+隔离，并限制安装目标和有效期；管理员不继承另一账号的候选下载权。验收过期、策略
+缺失或发布物不完整即关闭候选入口，不影响已存在节点。正式平台包优先于候选包。
+验收版仍需从 ACA 实际证明私有隧道、TLS/SSO、数据接口及 WebSocket 才能激活，
+不能借旧 VNet 机器文件跳过隧道验收。真实桌面原会话续聊、图片和重新登录自启另记结果。
 
 ### 既有 Windows Dev Box 的名称与在线依据
 

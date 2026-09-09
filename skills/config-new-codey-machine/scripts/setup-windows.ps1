@@ -3,20 +3,25 @@
 .SYNOPSIS
 Plan or install a fresh owner-bound Windows Codey node, never a Linux/WSL node.
 .DESCRIPTION
-Uses the downloaded Windows package and reviewed Azure network file.
-Default is a read-only plan. -Apply -NetworkApproved explicitly approves the
-listed private listeners. This script never changes firewall/network rules.
+Uses the personalized Windows DevTunnel package while preserving an existing
+model proxy and Codex installation. Legacy VNet packages still take NetworkFile.
+Default is a read-only plan. -Apply -NetworkApproved approves the private
+outbound tunnel and loopback listeners; firewall/network rules are not changed.
 Services start only while the original Windows owner is logged on.
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$NetworkFile,
+    [string]$NetworkFile = '',
     [string]$Out = (Join-Path $PSScriptRoot '..\output\codey-machine.json'),
     [string]$Enrollment = (Join-Path $PSScriptRoot '..\assets\enrollment.json'),
     [string]$Name = '',
     [string]$PythonExe = '',
     [string]$OpenSslExe = '',
     [string]$CodexExe = '',
+    [string]$DevTunnelExe = '',
+    [string]$UsageKeyFile = '',
+    [string]$WorkspaceRoot = '',
+    [string]$ExpectedComputerName = '',
     [switch]$Apply,
     [switch]$NetworkApproved
 )
@@ -25,7 +30,15 @@ if ($env:OS -ne 'Windows_NT' -or -not [Environment]::Is64BitOperatingSystem) {
     throw 'This entry point requires native Windows x64. It does not use WSL or install on macOS.'
 }
 if ($Apply -and -not $NetworkApproved) {
-    throw 'Review the network file and private 3001/8443 listeners first; confirm explicitly with -NetworkApproved. No firewall rules will be changed.'
+    throw 'Review the private DevTunnel or VNet plan first; confirm with -NetworkApproved. No firewall rules will be changed.'
+}
+if ($ExpectedComputerName -and $env:COMPUTERNAME -ine $ExpectedComputerName) {
+    throw 'Wrong computer. No installation or environment change was attempted.'
+}
+$invitation = Get-Content -LiteralPath $Enrollment -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($invitation.acceptance.expectedComputerName -and
+    $env:COMPUTERNAME -ine $invitation.acceptance.expectedComputerName) {
+    throw 'This acceptance package is bound to a different computer. Do not use it on the existing working node.'
 }
 if (-not $PythonExe) {
     $command = Get-Command python.exe -ErrorAction SilentlyContinue
@@ -37,8 +50,20 @@ if (-not $PythonExe) {
 if (-not [IO.Path]::IsPathRooted($PythonExe) -or -not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) {
     throw 'PythonExe must name an existing absolute executable path.'
 }
-$arguments = @('-X', 'utf8', '-I', '-B', (Join-Path $PSScriptRoot 'configure-windows.py'),
-    '--enrollment', $Enrollment, '--network-file', $NetworkFile, '--out', $Out)
+$tunneled = $invitation.network.mode -eq 'devtunnel'
+if ($tunneled) {
+    if ($NetworkFile) { throw 'A private DevTunnel package must not use a VNet network file.' }
+    $arguments = @('-X', 'utf8', '-I', '-B', (Join-Path $PSScriptRoot 'configure-windows-tunnel.py'),
+        '--enrollment', $Enrollment, '--out', $Out)
+    if ($DevTunnelExe) { $arguments += @('--devtunnel-executable', $DevTunnelExe) }
+    if ($UsageKeyFile) { $arguments += @('--usage-key-file', $UsageKeyFile) }
+    if ($WorkspaceRoot) { $arguments += @('--workspace-root', $WorkspaceRoot) }
+    if ($ExpectedComputerName) { $arguments += @('--expected-computer-name', $ExpectedComputerName) }
+} else {
+    if (-not $NetworkFile) { throw 'Legacy private-network packages require their reviewed NetworkFile.' }
+    $arguments = @('-X', 'utf8', '-I', '-B', (Join-Path $PSScriptRoot 'configure-windows.py'),
+        '--enrollment', $Enrollment, '--network-file', $NetworkFile, '--out', $Out)
+}
 if ($Name) { $arguments += @('--name', $Name) }
 if ($OpenSslExe) { $arguments += @('--openssl', $OpenSslExe) }
 if ($CodexExe) { $arguments += @('--codex-executable', $CodexExe) }

@@ -308,8 +308,10 @@ async function load() {
     ["machine-macos-intel-status", intelSetup, "macOS · Intel"],
   ]) {
     document.querySelector(`#${id}`).textContent = entry?.enabled
-      ? `${label} · 约 ${Math.ceil(entry.bytes / 1024 / 1024)} MB · Node ${entry.node} · CloudCLI ${entry.cloudcli} · ${
-        String(entry.platform).startsWith("macos-") ? "复用本机模型代理" : `copilot-api ${entry.copilotApi}`}`
+      ? `${label}${entry.preview ? `【验收版，仅限 ${entry.expectedComputerName}】` : ""} · 约 ${
+        Math.ceil(entry.bytes / 1024 / 1024)} MB · Node ${entry.node} · CloudCLI ${entry.cloudcli} · ${
+        String(entry.platform).startsWith("macos-") || entry.platform === "windows-x64"
+          ? "复用本机模型代理" : `copilot-api ${entry.copilotApi}`}`
       : entry?.reason || `${label} 完整机器配置包尚未发布；不会使用其他平台的包代替。`;
   }
   const pendingCount = result.pendingMachines?.length || 0;

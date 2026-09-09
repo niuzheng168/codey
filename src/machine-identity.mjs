@@ -31,11 +31,15 @@ export function machineIdentity(input, expectedId, now = Date.now()) {
   if (!name || name.length > 80 || region.length > 120 || /[\x00-\x1f]/.test(String(input.name) + String(input.region ?? ""))) {
     throw requestError("机器名称或区域不正确");
   }
-  if (definition.tunnel) {
+  const useTunnel = definition.tunnel && input.networkMode === "devtunnel";
+  if (definition.tunnel && !definition.privateNetwork && !useTunnel) {
+    throw requestError("此平台的机器文件必须使用本节点的私有 DevTunnel");
+  }
+  if (useTunnel) {
     if (input.networkMode !== "devtunnel" || Object.hasOwn(input, "privateIp") || Object.hasOwn(input, "vmResourceId") ||
         !validDevTunnelCoordinates(input.devTunnel) ||
         Object.keys(input.devTunnel).some(key => !["tunnelId", "clusterId"].includes(key))) {
-      throw requestError("Mac 机器文件必须使用本节点的私有 DevTunnel，不接受地址、令牌或 Azure VM 字段");
+      throw requestError("机器文件必须使用本节点的私有 DevTunnel，不接受地址、令牌或 Azure VM 字段");
     }
   } else {
     if (input.devTunnel !== undefined || !privateMachineIp(input.privateIp)) {
@@ -77,7 +81,7 @@ export function machineIdentity(input, expectedId, now = Date.now()) {
     tlsServerName: serverName, ca: certificate.toString(),
     fingerprint: certificate.fingerprint256,
     networkMode: input.networkMode,
-    ...(definition.tunnel
+    ...(useTunnel
       ? { devTunnel: { tunnelId: input.devTunnel.tunnelId, clusterId: input.devTunnel.clusterId } }
       : { privateIp: input.privateIp, vmResourceId: input.vmResourceId }),
   };

@@ -1,6 +1,6 @@
 ---
 name: config-new-codey-machine
-description: "配置新的 Codey 节点：Windows/Linux 使用原生 Azure VNet 安装包；macOS Apple Silicon/Intel 使用独立 CloudCLI、HTTPS 数据服务及私有 DevTunnel。默认先计划，产出无密钥机器文件后由门户验通添加。Mac 保留现有 Codex/模型代理，launchd 登录后运行并仅续期本节点令牌。不覆盖既有身份、任务或服务。"
+description: "配置新的 Codey 节点：Windows/macOS 通过私有 DevTunnel 增加独立 CloudCLI 和 HTTPS 数据服务，保留现有 Codex/模型代理，原用户登录后运行并续期本节点令牌；Linux 使用 Azure VNet 完整安装。默认先计划，产出无密钥机器文件后由门户验通添加，不覆盖既有身份、任务或服务。"
 ---
 
 # Configure a new Codey machine
@@ -32,7 +32,8 @@ description: "配置新的 Codey 节点：Windows/Linux 使用原生 Azure VNet 
 明确不可用，不能给用户 Linux 包、只有说明的 ZIP 或旧的工作站安装器。
 旧 `/bootstrap/*` / `install-codex-workstation.*` 配置工作站，不是这个完整节点流程。
 重下载待配置身份保留原平台、ID/key 和有效期，不能借重试更换操作系统。
-Windows/Linux 使用 Azure VNet；macOS 使用自己的 DevTunnel，跳过下方 Azure 网络步骤。
+Windows/macOS 新包使用自己的私有 DevTunnel，跳过下方 Azure 网络步骤；Linux 使用 Azure VNet。
+原有 Windows VNet 包仅保留兼容入口，不自动迁移既有安装。
 既有 Windows DevTunnel 节点不需重新运行首次安装，也不轮换其密钥或重启其服务。
 
 这是**轻量联网安装包**，不把 Node 等所有 binary 塞进 ZIP。脚本将它们安装到独立
@@ -67,8 +68,8 @@ Azure 网络权限与 Codey 登录权限不同。复用用户已有 `az` 登录�
 
 ## 1. 自动准备 VNet
 
-**本节仅用于 Windows/Linux。Mac 不需要 Azure VM resource ID、VNet、入站防火墙规则，
-也不允许用伪造的 VM 信息绕过平台校验。Mac 直接使用下面的 macOS 步骤。**
+**本节用于 Linux 和旧 Windows VNet 包。新的 Windows/macOS DevTunnel 包不需要 Azure VM
+resource ID、VNet 或入站防火墙规则，也不允许用伪造的 VM 信息绕过平台校验。**
 
 先在拥有 Azure 权限的控制端运行网络计划；替换下面的路径/VM ID：
 
@@ -153,35 +154,51 @@ Codey 新任务使用独立的 Codex app-server 与本人专属 Unix socket；�
 
 ### Windows
 
-先完成同一身份的 Azure 网络计划/授权，把 `output/network.json` 交给目标 owner。
-在原用户、**非管理员** PowerShell 中先运行计划：
+新包复用原用户已有、可正常登录的 Codex 和 `4141` 模型代理，只新增 Workspace、
+HTTPS 数据转发、DevTunnel 和续期四个隐藏登录任务。已有 `4141` 进程必须是同一 owner
+的 copilot-api；脚本记录其 PID/路径/启动时间，绝不停止、重装或接管它。
+缺少已有模型服务时明确失败，不伪称“裸 Windows 的全套模型安装”已经验证。
+
+在新机原用户的**非管理员 PowerShell** 中、完整包根目录先运行计划：
 
 ```powershell
-.\scripts\setup-windows.ps1 -NetworkFile .\output\network.json -Name windows-devbox
+.\scripts\setup-windows.ps1 -Name windows-devbox
 ```
 
-检查计划中的端口冲突、私网监听地址、来源网段和磁盘/工具要求。获得明确网络确认后：
+计划只检查本机；确认仅新建本节点的私有隧道、两个 HTTPS 隧道端口及对应回环服务后：
 
 ```powershell
-.\scripts\setup-windows.ps1 -NetworkFile .\output\network.json -Name windows-devbox -Apply -NetworkApproved
+.\scripts\setup-windows.ps1 -Name windows-devbox -Apply -NetworkApproved
 ```
 
-可用 `-PythonExe`、`-OpenSslExe`、`-CodexExe` 指定已安装的绝对路径。脚本不升级
-全局工具、不改执行策略、不转入 WSL，不更改既有 Codex config/provider/login。
-原生 Codex 读取器优先由 owner 用 `-CodexExe` 指向已安装且验证过的 Desktop CLI；
-未指定时仅查本次发行包的原生可执行文件，不从任意 PATH 取替代程序。
+可用 `-PythonExe`、`-OpenSslExe`、`-CodexExe`、`-DevTunnelExe` 指定已安装的绝对路径；
+未指定时会发现原用户的 Desktop CLI 和 Git 自带的 OpenSSL。不会修改全局 PATH、
+执行策略、Node/Python/Codex 或既有 Codex config/provider/login。
+尚未安装 DevTunnel 时，从微软官方入口下载到独立 owner-only bootstrap 目录，
+执行前检查有效的 Microsoft Authenticode 签名；安装后固定实际二进制 SHA-256。
+本人在前台浏览器完成所需的 Entra 登录，后台任务不会弹登录或改用匿名隧道。
+服务不依赖节点持有 Azure ARM/RBAC 权限，续期经独立、仅限本节点的第三份 key。
 
-网络授权并不意味着脚本自动改防火墙。Windows 防火墙如需补规则，先单独展示并
-取得确认：仅允许 network.json 的 `allowedSources` 到本机指定私网 IP 的
-TCP 3001/8443；Private Link 还需审核 Azure LB 健康探测源。不要开放 4141/22、
-Internet/Any 或更改全局防火墙策略。权限不足不能偷偷切到管理员/SYSTEM。
+`-UsageKeyFile` 只接受已存在的本地用量凭据文件路径，不接受 key 内容；简单的原 Codex
+本地代理 `cat <key-file>` 引用可自动发现。外部模型 provider 的凭据不会转交本地代理。
+认证不足时在安装前明确停止；不生成替代 key，也不要求用户把密码/token 发给运维。
+`-WorkspaceRoot` 指定工作目录。`-ExpectedComputerName` 可额外防止在旧工作机误运行。
 
-Windows 独立目录是 `~/.local/share/codey-machine-windows` 与
-`~/.config/codey-machine-windows`，后者及发行目录 ACL 仅 owner/SYSTEM/Administrators。
-每节点创建两个唯一登录任务，使用 pythonw 隐藏监督独立 Node 服务，非登录期间不运行。
-受保护 copilot-api / 已用端口 / 未识别安装目录导致拒绝安装，不接管已有服务。
-失败仅撤销这次创建的精确任务，保留目录和 owner-only 构建日志；不递归清理旧目录。
-同一成功安装重跑只验收；首次安装器不是升级工具。
+验收版只对运维指定的账号开放，并在 `enrollment.json` 内绑定目标计算机名及有效期。
+入口和 Python 安装器都在任何写入前核对目标；这是防误操作，不是硬件远程证明。
+普通用户仍看到正式 Windows 包未发布，不能把候选包上线当成实机验收完成。
+
+独立文件位于 `~/.local/share/codey-machine-windows/<nodeId>` 和
+`~/.config/codey-machine-windows/<nodeId>`，ACL 仅 owner/SYSTEM/Administrators。
+四个任务使用 InteractiveToken/LeastPrivilege、登录触发器和 pythonw，不要求无人登录运行。
+Workspace/data 只监听 `127.0.0.1:3001/8443`；不打开入站规则、22/4141 或更改电源策略。
+每个监督器仅管理自己创建的 Job Object 子进程；不接管原 Desktop app-server。
+隧道确实断开一段时间才重启自己的 host；状态未知/MFA 失败不会触发对其他进程的操作。
+失败仅撤销本次创建的精确任务，保留同一身份、隧道、私有构建日志和目录供审查。
+未完成安装不自动覆盖；成功重跑只验收，不重启或升级。
+
+旧的 VNet 个性化包仍使用 `-NetworkFile` 和原来两个服务的独立入口；不要把新的
+DevTunnel 包交给旧入口，也不要对已接入的工作机重跑首次安装器。
 
 Windows **尚不安装 Linux 签名升级器**。可达性由门户通过已验证 TLS 的 Workspace
 健康接口检测；“Workspace 在线”与“有升级器心跳”是两件事。不要伪造心跳、填入

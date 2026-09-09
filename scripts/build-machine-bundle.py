@@ -119,7 +119,7 @@ def build(args):
         "dependencyMode": "install-on-target",
     }
     artifacts = ["cloudcli-source.tar.gz", "copilot-api-source.tar.gz"]
-    if args.platform.startswith("macos-"):
+    if args.platform.startswith("macos-") or args.platform == "windows-x64":
         runtime = work / "portal-node"
         info["portalRuntime"] = portal_runtime(runtime, args.allow_reviewed_diff)
         archive_tree(runtime, output / "portal-node-source.tar.gz")

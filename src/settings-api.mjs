@@ -99,7 +99,7 @@ export class SettingsApi {
             ...node, vnetAvailable: Boolean(this.nodeDataGateway?.endpoint(node.id, ids)),
             workspaceAvailable: workspaces.has(node.id),
           })),
-          machineSetup: this.machineSetup ? await this.machineSetup.availability() : { enabled: false },
+          machineSetup: this.machineSetup ? await this.machineSetup.availability(undefined, principal.id) : { enabled: false },
           pendingMachines: await this.nodePolicy.pendingMachines(principal.id),
         });
         return true;

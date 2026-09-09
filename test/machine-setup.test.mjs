@@ -161,21 +161,23 @@ async function fixture(t) {
   return { root, base, accounts, policy, auth, credential, member, cookie, admin, manifest, bundleRoot, machineSetup, data, workspace, probes, request, master, ticketMaster };
 }
 
-test("Mac native packages carry their own architecture/runtime/key, need no VNet, and activate only after scoped tunnel proof", async t => {
+test("Windows and Mac native packages need no VNet and activate only after scoped tunnel proof", async t => {
   const f = await fixture(t);
   f.machineSetup.network = null;
   f.machineSetup.tunnels.verifyAccess = async () => {};
-  for (const [index, platform] of ["macos-arm64", "macos-x64"].entries()) {
+  for (const [index, platform] of ["macos-arm64", "macos-x64", "windows-x64"].entries()) {
     await bundle(path.join(f.bundleRoot, "platforms", platform), platform);
     const response = await f.request(`/api/settings/machines/skill?platform=${platform}`, { method: "POST" });
     assert.equal(response.status, 200);
-    assert.ok(response.headers.get("content-disposition").includes(`-${platform}-n-`));
+    assert.ok(response.headers.get("content-disposition").includes(`-${platform === "windows-x64" ? "windows" : platform}-n-`));
     const files = unzip(Buffer.from(await response.arrayBuffer()));
-    for (const file of ["setup-macos.sh", "configure-macos.py", "macos-service.py"]) {
+    for (const file of platform === "windows-x64"
+      ? ["setup-windows.ps1", "configure-windows-tunnel.py", "windows-tunnel-service.py", "windows-tunnel-client.py"]
+      : ["setup-macos.sh", "configure-macos.py", "macos-service.py"]) {
       assert.ok(files.has(`config-new-codey-machine/scripts/${file}`));
     }
     assert.ok(files.has("config-new-codey-machine/assets/portal-node-source.tar.gz"));
-    assert.ok(!files.has("config-new-codey-machine/scripts/setup-windows.ps1"));
+    assert.ok(!files.has(`config-new-codey-machine/scripts/${platform === "windows-x64" ? "setup-macos.sh" : "setup-windows.ps1"}`));
     assert.ok(!files.has("config-new-codey-machine/scripts/setup-linux.sh"));
     assert.ok(![...files.keys()].some(name => name.includes("assets/codey-updater/")));
     const enrollment = JSON.parse(files.get("config-new-codey-machine/assets/enrollment.json"));
@@ -219,7 +221,7 @@ test("Mac native packages carry their own architecture/runtime/key, need no VNet
     assert.ok(!JSON.stringify(node).includes(connectToken));
     assert.ok(!JSON.stringify(await f.policy.records()).includes(connectToken));
   }
-  assert.equal(f.probes.length, 2);
+  assert.equal(f.probes.length, 3);
 });
 
 test("complete skill download reserves only this user's identity, includes dependencies and no global or provider credentials", async (t) => {
@@ -324,6 +326,55 @@ test("platform downloads are distinct and missing Mac/Windows releases never fal
   assert.equal(f.workspace.match(`/cloudcli/${enrollment.nodeId}/`).healthMonitoring, true);
   await assert.rejects(f.machineSetup.machineUpdates.bootstrap(f.member.id, enrollment.nodeId), { status: 409 });
   assert.equal((await f.machineSetup.machineUpdates.store.read()).data.devices[enrollment.nodeId], undefined);
+});
+
+test("Windows acceptance packages are tester-only, target-bound, expiring and never a general release", async t => {
+  const f = await fixture(t);
+  const candidate = await bundle(path.join(f.bundleRoot, "acceptance/platforms/windows-x64"), "windows-x64");
+  const policy = {
+    schema: 1, platform: "windows-x64", owners: [f.member.id],
+    expectedComputerName: "CPC-test-WINBOX", expiresAt: Date.now() + 86400000,
+  };
+  const policyFile = path.join(f.bundleRoot, "acceptance.json");
+  await writeFile(policyFile, JSON.stringify(policy));
+  const windowsStatus = async user => (await (await f.request("/api/settings", { user })).json())
+    .machineSetup.platforms.find(row => row.platform === "windows-x64");
+  const visible = await windowsStatus();
+  assert.equal(visible.enabled, true);
+  assert.equal(visible.preview, true);
+  assert.equal(visible.releaseId, candidate.releaseId);
+  assert.equal(visible.expectedComputerName, policy.expectedComputerName);
+  assert.equal(JSON.stringify(visible).includes(f.member.id), false, "Do not disclose the allowlist");
+  assert.equal((await windowsStatus(f.admin)).enabled, false, "Admins cannot inherit the tester's invitation");
+  assert.equal((await f.request("/api/settings/machines/skill?platform=windows-x64", { method: "POST", user: f.admin })).status, 503);
+  assert.equal((await f.machineSetup.availability("windows-x64")).enabled, false, "No principal means no candidate");
+  const response = await f.request("/api/settings/machines/skill?platform=windows-x64", { method: "POST" });
+  assert.equal(response.status, 200);
+  const files = unzip(Buffer.from(await response.arrayBuffer()));
+  const enrollment = JSON.parse(files.get("config-new-codey-machine/assets/enrollment.json"));
+  assert.deepEqual(enrollment.acceptance, { expectedComputerName: policy.expectedComputerName, expiresAt: policy.expiresAt });
+  assert.ok(enrollment.expiresAt <= policy.expiresAt);
+  assert.deepEqual(enrollment.network, { mode: "devtunnel" });
+  assert.match(enrollment.tunnelUpdateKey, /^[A-Za-z0-9_-]{43}$/);
+  const repeated = await f.request(`/api/settings/machines/${enrollment.nodeId}/skill`, { method: "POST" });
+  assert.equal(repeated.status, 200);
+  const again = JSON.parse(unzip(Buffer.from(await repeated.arrayBuffer())).get("config-new-codey-machine/assets/enrollment.json"));
+  assert.equal(again.nodeId, enrollment.nodeId);
+  assert.equal(again.tunnelUpdateKey, enrollment.tunnelUpdateKey);
+  const legacy = { ...await machineFile(f.root, enrollment.nodeId), platform: "windows-x64" };
+  assert.equal((await f.request(`/api/settings/machines/${enrollment.nodeId}/activate`, { method: "POST", value: legacy })).status, 400);
+  assert.equal(f.probes.length, 0, "A candidate cannot bypass the DevTunnel acceptance via legacy VNet");
+  for (const changed of [
+    { expiresAt: Date.now() - 1 }, { owners: ["*"] }, { owners: [f.admin.id] },
+    { expectedComputerName: "../other" }, { expiresAt: Date.now() + 30 * 86400000 },
+  ]) {
+    await writeFile(policyFile, JSON.stringify({ ...policy, ...changed }));
+    assert.equal((await windowsStatus()).enabled, false);
+  }
+  await bundle(path.join(f.bundleRoot, "platforms/windows-x64"), "windows-x64");
+  const released = await windowsStatus();
+  assert.equal(released.enabled, true);
+  assert.equal(released.preview, undefined, "A normal release does not inherit preview restrictions");
 });
 
 test("machine downloads reject anonymous/forged/cross-origin requests, caller identities, wrong methods and logout", async (t) => {
