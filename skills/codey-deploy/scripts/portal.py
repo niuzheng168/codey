@@ -107,7 +107,7 @@ class Portal:
 
     def models(self, nodes, steering=False):
         output, seconds = command(
-            ["node", str(Path(__file__).with_name("codey-model.mjs"))], timeout=120 if steering else 100,
+            ["node", str(Path(__file__).with_name("codey-model.mjs"))], timeout=150 if steering else 100,
             input=json.dumps({
                 "base": self.base, "cookie": self.cookie, "nodes": nodes,
                 "projectPath": ("/home/zhn/.local/share/codey-updater/probe" if steering else

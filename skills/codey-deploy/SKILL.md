@@ -68,7 +68,10 @@ python <skill-dir>/scripts/deploy.py --scope workspace --nodes zhn-a100 --apply 
 - 仅支持已经接入升级器的节点。必须同时核对 Codey running sessions 和原生
   Codex daemon 已加载任务；忙碌或未知状态不确认升级。
 - `--verify-steering` 仅用于同轮插话功能，追加一次独立合成会话的真实插话验证：
-  一次 `chat.send`、一次带旧轮次 token 的 `chat.steer`、原轮次返回新 marker。
+  一次 `chat.send`，保存唯一排队消息，再通过按钮实际使用的
+  `POST /api/user/drafts/steer` 追加；原轮次必须返回开始后才生成的新 marker。
+  必须确认队列已消费、重复 receipt 被拒绝、普通草稿不变，且迟到的自动保存不会
+  恢复队列或在完成后再发一轮。仅测试旧 `chat.steer` WebSocket 不算该功能通过。
   不重复通用 Codey/Codex 连通性验收；该额外功能验证单独记录。
 - 可用 `--expected-cloudcli-commit <完整 SHA>`、`--expected-portal-commit <完整 SHA>`
   锁定已审核的远端源码，远端变化即停止，不夹带工作树改动。

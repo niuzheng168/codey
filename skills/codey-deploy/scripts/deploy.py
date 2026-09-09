@@ -266,7 +266,7 @@ class Deploy:
                 self.report["nodeUpdates"] = self.worker("rollout", script="updates.py", timeout=510)
             if self.args.verify_steering:
                 with phase(self.report, "real-same-turn-steering-canary", self.record):
-                    self.report["steering"] = self.worker("steering", script="portal.py", timeout=140)
+                    self.report["steering"] = self.worker("steering", script="portal.py", timeout=170)
             with phase(self.report, "shared-ui-and-real-steering-acceptance", self.record):
                 self.report["ui"] = self.worker("publish_ui", timeout=200)
                 self.report["aca"] = self.worker("verify_aca_unchanged", timeout=60)
