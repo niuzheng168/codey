@@ -158,22 +158,37 @@ def verify_usage(key_file):
         if not key or "\n" in key or "\r" in key:
             raise Error("invalid_usage_key_file")
         headers["authorization"] = "Bearer " + key
-    request = urllib.request.Request("http://127.0.0.1:4141/usage", headers=headers)
-    try:
-        # Inherited HTTP proxies must never receive a loopback model credential.
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), tunnel.NoRedirect)
-        with opener.open(request, timeout=10) as response:
-            if response.status != 200:
-                raise Error("existing_model_usage_unavailable")
-            value = json.loads(response.read(1024 * 1024))
-            if not isinstance(value, dict):
-                raise ValueError()
-    except urllib.error.HTTPError as error:
-        if error.code in (401, 403):
-            raise Error("existing_usage_auth_required_use_UsageKeyFile_not_a_key_value") from None
-        raise Error("existing_model_usage_unavailable") from None
-    except (urllib.error.URLError, OSError, ValueError):
-        raise Error("existing_model_usage_unavailable") from None
+    # Inherited HTTP proxies/redirects must never receive a loopback credential.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), tunnel.NoRedirect)
+
+    def probe(pathname):
+        request = urllib.request.Request("http://127.0.0.1:4141" + pathname, headers=headers)
+        try:
+            with opener.open(request, timeout=10) as response:
+                raw = response.read(1024 * 1024 + 1)
+                if len(raw) > 1024 * 1024:
+                    raise ValueError()
+                return response.status, json.loads(raw)
+        except urllib.error.HTTPError as error:
+            status = error.code
+            error.close()  # Never print an upstream body, URL or credential.
+            if status in (401, 403):
+                raise Error("existing_usage_auth_required_use_UsageKeyFile_not_a_key_value") from None
+            return status, None
+        except (urllib.error.URLError, OSError, ValueError):
+            raise Error("existing_proxy_data_probe_unavailable_no_service_changed") from None
+
+    status, body = probe("/usage")
+    usage = windows.common.quota_available(status, body)
+    if not usage:
+        token_status, token_body = probe("/token-usage")
+        if token_status != 200 or not isinstance(token_body, dict) or "error" in token_body:
+            raise Error("existing_proxy_token_usage_unavailable_no_service_changed")
+    return {
+        "dataAccess": True, "usage": usage, "usageHttpStatus": status,
+        **({"tokenUsage": True} if not usage else {}),
+        "warnings": [] if usage else ["copilot_quota_unavailable_model_inference_not_tested"],
+    }
 
 
 def download(url, destination, *, expected=None, limit=128 * 1024 ** 2):
@@ -338,9 +353,10 @@ def configure(args):
     if state and state.get("ready"):
         config = json.loads(runtime_file.read_text(encoding="utf-8-sig"))
         saved = worker.validate(config, "workspace", context)
-        windows.common.verify(saved, {"listenIp": "127.0.0.1"}, Path(config["certificate"]))
+        verification = windows.common.verify(saved, {"listenIp": "127.0.0.1"}, Path(config["certificate"]))
         export_machine(saved, config, args.out)
-        print(json.dumps({"ok": True, "alreadyConfigured": True, "servicesRestarted": False, "output": args.out}))
+        print(json.dumps({"ok": True, "alreadyConfigured": True, "servicesRestarted": False,
+                          "verification": verification, "output": args.out}))
         return
     if state or root.exists() or config_root.exists():
         raise Error("unfinished_or_unrecognized_installation_requires_review_no_overwrite")
@@ -354,7 +370,7 @@ def configure(args):
     occupied = free_ports()
     provider, provider_env = referenced_provider(codex_home)
     usage_key = usage_key_file(args.usage_key_file, provider, codex_home)
-    verify_usage(usage_key)
+    proxy_preflight = verify_usage(usage_key)
     workspace = Path(args.workspace_root or (home / "Documents" if (home / "Documents").is_dir() else home)).resolve()
     name = args.name or computer
     if not name or len(name) > 80 or any(ord(char) < 32 for char in name):
@@ -369,7 +385,7 @@ def configure(args):
         "occupiedPorts": occupied, "services": list(worker.COMPONENTS),
         "networkChanges": "Create only a node-bound private DevTunnel with two HTTPS ports after approval",
         "firewallChanged": False, "azureArmPermissionsRequired": False, "existingModelServiceChanged": False,
-        "logonOnly": True, "globalToolsChanged": False,
+        "logonOnly": True, "globalToolsChanged": False, "proxyPreflight": proxy_preflight,
     }
     if not args.apply:
         print(json.dumps(plan, indent=2))
@@ -443,11 +459,11 @@ def configure(args):
         tasks_created = True
         for attempt in range(30):
             try:
-                windows.common.verify(enrollment, {"listenIp": "127.0.0.1"}, cert)
+                verification = windows.common.verify(enrollment, {"listenIp": "127.0.0.1"}, cert)
                 break
             except (OSError, ValueError, windows.SetupError, http.client.HTTPException):
                 if attempt == 29:
-                    raise Error("local_TLS_SSO_usage_or_anonymous_denial_failed")
+                    raise Error("local_TLS_SSO_authenticated_data_or_anonymous_denial_failed")
                 time.sleep(2)
         if gateway_proof() != proof:
             raise Error("protected_model_process_changed")
@@ -460,6 +476,7 @@ def configure(args):
             "ok": True, "localTlsAndSsoVerified": True, "existingModelServiceUnchanged": True,
             "existingCodexConfigUnchanged": True, "logonOnly": True, "firewallChanged": False,
             "portalActivationRequired": True, "realModelCallsTested": False, "reloginTested": False,
+            "verification": verification,
             "output": args.out, "runtimeConfig": str(runtime_file),
         }, indent=2))
     except BaseException:

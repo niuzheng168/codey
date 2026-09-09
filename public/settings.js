@@ -451,12 +451,15 @@ document.querySelector("#add-prepared-machine-form").addEventListener("submit", 
       throw new Error("请选择配置完成的机器文件，不是 enrollment 或校验值");
     }
     machineActivationNotice("正在从门户验证 VNet/DevTunnel、HTTPS、Usage/History、Workspace SSO 和 WebSocket…");
-    const { node } = await api(`/api/settings/machines/${machine.nodeId}/activate`, "POST", machine);
+    const { node, verification } = await api(`/api/settings/machines/${machine.nodeId}/activate`, "POST", machine);
     form.reset();
     await load();
     addNodeDialog.close();
     document.querySelector("#machine-activation-message").textContent = "";
-    notice(`机器已验通并添加：${node.name}。现在可以使用 VNet 用量、History 和 Workspace。模型尚未登录时，请完成本人的 provider 授权。`);
+    const usageMessage = verification?.usage === false
+      ? "Copilot 配额暂不可用；本地 Token 统计、History、Workspace SSO 已验通。"
+      : "用量、History、Workspace SSO 已验通。";
+    notice(`机器已验通并添加：${node.name}。${usageMessage}模型推理仍需单独验收；保留本人现有 provider 登录。`);
   }, machineActivationNotice);
 });
 

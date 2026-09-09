@@ -214,6 +214,15 @@ def local_probe(ip, port, server_name, cert, pathname, headers=None):
         connection.close()
 
 
+def quota_available(status, body):
+    """Quota telemetry is not model health. Authentication/protocol failures stay fatal."""
+    if status == 200 and isinstance(body, dict) and "error" not in body:
+        return True
+    if (status == 200 and body is None) or status in (404, 429) or 500 <= status <= 599:
+        return False
+    raise SetupError(f"Authenticated quota probe failed: HTTP {status}")
+
+
 def verify(enrollment, network, cert):
     node_id = enrollment["nodeId"]
     server_name = f"{node_id}.nodes.codey.internal"
@@ -221,12 +230,30 @@ def verify(enrollment, network, cert):
     now = int(time.time())
     ticket = signed({"v": 1, "aud": node_id, "sub": enrollment["principalId"], "scope": ["history", "usage"],
                      "iat": now, "exp": now + 60}, enrollment["clientSigningKey"].encode())
-    if local_probe(ip, 8443, server_name, cert, "/healthz")[0] != 200:
+    health_status, health = local_probe(ip, 8443, server_name, cert, "/healthz")
+    if health_status != 200:
         raise SetupError("HTTPS health probe failed")
-    for path in ["/usage", "/session-history?state=all&limit=1"]:
-        status = local_probe(ip, 8443, server_name, cert, path, {"authorization": "Bearer " + ticket})[0]
-        if status != 200:
-            raise SetupError(f"Authenticated probe failed: {path} returned HTTP {status}")
+    headers = {"authorization": "Bearer " + ticket}
+    usage_status, usage_body = local_probe(ip, 8443, server_name, cert, "/usage", headers)
+    devtunnel = enrollment.get("network", {}).get("mode") == "devtunnel"
+    # Preserve the VNet/headless install contract, including its HTTP 200 null
+    # quota response before the owner has logged into a provider.
+    usage = quota_available(usage_status, usage_body) if devtunnel else usage_status == 200
+    if not usage:
+        # Only the owner-bound DevTunnel relay may substitute its independent,
+        # authenticated local token ledger for an unavailable upstream quota API.
+        if (not devtunnel
+                or not isinstance(health, dict) or health.get("relay") != "codey-node-relay"
+                or health.get("nodeId") != node_id):
+            raise SetupError(f"Authenticated probe failed: /usage returned HTTP {usage_status}")
+        status, body = local_probe(ip, 8443, server_name, cert, "/token-usage", headers)
+        if status != 200 or not isinstance(body, dict) or "error" in body:
+            raise SetupError(f"Authenticated token usage probe failed: HTTP {status}")
+        if local_probe(ip, 8443, server_name, cert, "/token-usage")[0] != 401:
+            raise SetupError("Anonymous token usage must be denied")
+    status = local_probe(ip, 8443, server_name, cert, "/session-history?state=all&limit=1", headers)[0]
+    if status != 200:
+        raise SetupError(f"Authenticated History probe failed: HTTP {status}")
     if local_probe(ip, 8443, server_name, cert, "/usage")[0] != 401:
         raise SetupError("Anonymous Usage must be denied")
     pathname = "/api/auth/status"
@@ -240,6 +267,11 @@ def verify(enrollment, network, cert):
         raise SetupError("Workspace SSO binding probe failed")
     if local_probe(ip, 3001, server_name, cert, pathname)[0] != 401:
         raise SetupError("Anonymous Workspace must be denied")
+    return {
+        "usage": usage, "usageHttpStatus": usage_status, "history": True, "workspaceSso": True,
+        "anonymousDenied": True, **({"tokenUsage": True} if not usage else {}),
+        "warnings": [] if usage else ["copilot_quota_unavailable_model_inference_not_tested"],
+    }
 
 
 def unit(description, command, directory, environment, service_path):

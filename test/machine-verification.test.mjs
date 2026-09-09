@@ -32,6 +32,9 @@ test("actual TLS probes require the pinned node, correct owner/tickets, anonymou
   const machine = { id, tlsServerName: dns, ca: cert, fingerprint: new X509Certificate(cert).fingerprint256, privateIp: "10.42.0.4" };
   let anonymousAllowed = false;
   let badWebsocket = false;
+  let usageStatus = 200, usageBody = { ok: true }, tokensStatus = 200, tokensBody = { totals: {} };
+  let anonymousTokensAllowed = false;
+  let relayNodeId = id;
   let requests = 0;
   const sso = (req) => {
     try {
@@ -56,9 +59,13 @@ test("actual TLS probes require the pinned node, correct owner/tickets, anonymou
         }).principalId === principal.id;
       } catch { /* Expected for the negative control. */ }
     }
-    res.writeHead(allowed || anonymousAllowed ? 200 : 401, { "content-type": "application/json" });
+    const status = allowed || anonymousAllowed || (req.url === "/token-usage" && anonymousTokensAllowed)
+      ? req.url === "/usage" ? usageStatus : req.url === "/token-usage" ? tokensStatus : 200 : 401;
+    res.writeHead(status, { "content-type": "application/json" });
     res.end(JSON.stringify(req.url === "/api/auth/status"
-      ? { managedAuthentication: true, needsSetup: false, user: { username: "alice" } } : { ok: true }));
+      ? { managedAuthentication: true, needsSetup: false, user: { username: "alice" } }
+      : req.url === "/healthz" ? { ok: true, relay: "codey-node-relay", nodeId: relayNodeId }
+      : req.url === "/usage" ? usageBody : req.url === "/token-usage" ? tokensBody : { ok: true }));
   });
   const sockets = new Set();
   server.on("connection", (socket) => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
@@ -75,7 +82,7 @@ test("actual TLS probes require the pinned node, correct owner/tickets, anonymou
   t.after(() => { for (const socket of sockets) socket.destroy(); server.close(); });
   const requestImpl = (target, options, callback) => {
     assert.ok(["8443", "3001"].includes(target.port));
-    assert.equal(target.hostname, "10.42.0.4");
+    assert.ok(["10.42.0.4", "127.0.0.1"].includes(target.hostname));
     assert.equal(options.rejectUnauthorized, true);
     return https.request(`https://127.0.0.1:${server.address().port}${target.pathname}${target.search}`, options, callback);
   };
@@ -95,4 +102,45 @@ test("actual TLS probes require the pinned node, correct owner/tickets, anonymou
   anonymousAllowed = false;
   badWebsocket = true;
   await assert.rejects(verifyMachine(machine, options), { status: 502 });
+  badWebsocket = false;
+
+  // Exercise the DevTunnel path against actual TLS HTTP/WS fixtures, with only
+  // the transport adapter substituted; no real tunnel or protected port is used.
+  const tunnelMachine = { ...machine, networkMode: "devtunnel", devTunnel: { tunnelId: "fixture", clusterId: "jpe1" } };
+  const tunnelOptions = { ...options, getTunnelToken: async () => "fixture-only", tunnelTransportFactory: () => {
+    const agent = new https.Agent();
+    return { agent, dispose: async () => agent.destroy() };
+  } };
+  for (const [status, body] of [[500, { error: "Failed to fetch Copilot usage" }], [503, {}],
+    [404, {}], [429, {}], [200, null]]) {
+    usageStatus = status; usageBody = body;
+    const result = await verifyMachine(tunnelMachine, tunnelOptions);
+    assert.equal(result.usage, false);
+    assert.equal(result.tokenUsage, true);
+    assert.equal(result.usageHttpStatus, status);
+    assert.equal(result.websocket, true);
+    assert.deepEqual(result.warnings, ["copilot_quota_unavailable_model_inference_not_tested"]);
+  }
+  usageStatus = 200; usageBody = null;
+  assert.equal((await verifyMachine(machine, options)).usage, true, "Preserve headless VNet HTTP 200 behavior");
+  usageStatus = 500; usageBody = { error: "quota unavailable" };
+  await assert.rejects(verifyMachine(machine, options), { status: 502 }, "VNet behavior is not relaxed");
+  await assert.rejects(verifyMachine(tunnelMachine, { ...tunnelOptions, clientKey: "wrong-key-".repeat(5) }), { status: 502 });
+  await assert.rejects(verifyMachine({ ...tunnelMachine, tlsServerName: "wrong.nodes.codey.internal" }, tunnelOptions), { status: 502 });
+  relayNodeId = "other-node";
+  await assert.rejects(verifyMachine(tunnelMachine, tunnelOptions), { status: 502 });
+  relayNodeId = id;
+  for (const status of [401, 403, 302]) {
+    usageStatus = status;
+    await assert.rejects(verifyMachine(tunnelMachine, tunnelOptions), { status: 502 });
+  }
+  usageStatus = 500;
+  for (const [status, body] of [[401, {}], [403, {}], [500, {}], [200, null], [200, []], [200, { error: "bad" }]]) {
+    tokensStatus = status; tokensBody = body;
+    await assert.rejects(verifyMachine(tunnelMachine, tunnelOptions), { status: 502 });
+  }
+  tokensStatus = 200; tokensBody = { totals: {} }; anonymousTokensAllowed = true;
+  await assert.rejects(verifyMachine(tunnelMachine, tunnelOptions), { status: 502 });
+  anonymousTokensAllowed = false; badWebsocket = true;
+  await assert.rejects(verifyMachine(tunnelMachine, tunnelOptions), { status: 502 });
 });

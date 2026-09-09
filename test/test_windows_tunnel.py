@@ -4,6 +4,7 @@ import copy
 import hashlib
 import hmac
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +64,117 @@ def token(**changes):
 
 
 class WindowsTunnelTests(unittest.TestCase):
+    def proxy_probe(self, responses, key_file=None):
+        calls = []
+
+        class Response(io.BytesIO):
+            status = 200
+
+        def open_request(request, **_kwargs):
+            calls.append(request.full_url)
+            self.assertTrue(request.full_url.startswith("http://127.0.0.1:4141/"))
+            self.assertIsNone(request.get_header("Cookie"))
+            if key_file:
+                self.assertEqual(request.get_header("Authorization"), "Bearer " + key_file.read_text().strip())
+            pathname = request.full_url.removeprefix("http://127.0.0.1:4141")
+            status, body = responses[pathname]
+            if status != 200:
+                raise urllib.error.HTTPError(request.full_url, status, "redacted fixture", {}, io.BytesIO(b"never log"))
+            return Response(json.dumps(body).encode())
+
+        def build_opener(proxy_handler, redirect_handler):
+            self.assertEqual(proxy_handler.proxies, {})
+            self.assertIs(redirect_handler, installer.tunnel.NoRedirect)
+            return SimpleNamespace(open=open_request)
+
+        with patch.object(installer.urllib.request, "build_opener", side_effect=build_opener):
+            return installer.verify_usage(key_file), calls
+
+    def test_quota_failure_uses_independent_authenticated_local_statistics_without_claiming_model_health(self):
+        with tempfile.TemporaryDirectory() as directory:
+            key = Path(directory) / "existing.key"
+            key.write_text("private-fixture-credential" * 2)
+            for status, body in [(500, {"error": "Failed to fetch Copilot usage"}), (503, {}),
+                                 (404, {}), (429, {}), (200, None)]:
+                with self.subTest(status=status, body=body):
+                    result, calls = self.proxy_probe({
+                        "/usage": (status, body), "/token-usage": (200, {"totals": {"requests": 1}}),
+                    }, key)
+                    self.assertFalse(result["usage"])
+                    self.assertTrue(result["tokenUsage"])
+                    self.assertEqual(result["usageHttpStatus"], status)
+                    self.assertEqual(result["warnings"], ["copilot_quota_unavailable_model_inference_not_tested"])
+                    self.assertEqual(calls, ["http://127.0.0.1:4141/usage", "http://127.0.0.1:4141/token-usage"])
+                    self.assertNotIn(key.read_text(), json.dumps(result))
+            result, calls = self.proxy_probe({"/usage": (200, {"copilot_plan": "test"})}, key)
+            self.assertTrue(result["usage"])
+            self.assertEqual(result["warnings"], [])
+            self.assertEqual(len(calls), 1)
+
+    def test_quota_warning_never_bypasses_authentication_redirects_or_invalid_data(self):
+        for status, body in [(401, {}), (403, {}), (302, {}), (200, []), (200, {"error": "invalid"})]:
+            with self.subTest(endpoint="usage", status=status, body=body), self.assertRaises(installer.Error):
+                self.proxy_probe({"/usage": (status, body)})
+        for status, body in [(401, {}), (403, {}), (500, {}), (404, {}),
+                             (200, None), (200, []), (200, {"error": "invalid"})]:
+            with self.subTest(endpoint="tokens", status=status, body=body), self.assertRaises(installer.Error):
+                self.proxy_probe({"/usage": (500, {}), "/token-usage": (status, body)})
+        with patch.object(installer.urllib.request, "build_opener",
+                          return_value=SimpleNamespace(open=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                              OSError("private diagnostic must not be printed")))):
+            with self.assertRaisesRegex(installer.Error, "^existing_proxy_data_probe_unavailable_no_service_changed$"):
+                installer.verify_usage(None)
+
+    def test_local_tls_verification_reports_quota_warning_but_still_enforces_all_security_controls(self):
+        enrollment = invitation()
+
+        def verify(**changes):
+            values = {
+                "mode": "devtunnel", "usage": (500, {"error": "Failed to fetch Copilot usage"}),
+                "health": (200, {"relay": "codey-node-relay", "nodeId": ID}),
+                "tokens": (200, {"totals": {}}), "anonymousTokens": 401,
+                "history": 200, "username": "zhn", "anonymousUsage": 401, "anonymousWorkspace": 401,
+                **changes,
+            }
+
+            def probe(_ip, _port, _dns, _cert, pathname, headers=None):
+                if pathname == "/healthz":
+                    return values["health"]
+                if pathname == "/usage":
+                    return values["usage"] if headers else (values["anonymousUsage"], {})
+                if pathname == "/token-usage":
+                    return values["tokens"] if headers else (values["anonymousTokens"], {})
+                if pathname.startswith("/session-history"):
+                    self.assertTrue(headers["authorization"].startswith("Bearer "))
+                    return values["history"], {"items": []}
+                self.assertEqual(pathname, "/api/auth/status")
+                return (200, {"managedAuthentication": True, "user": {"username": values["username"]}}) if headers else (
+                    values["anonymousWorkspace"], {})
+
+            with patch.object(installer.windows.common, "local_probe", side_effect=probe):
+                return installer.windows.common.verify(
+                    {**enrollment, "network": {"mode": values["mode"]}}, {"listenIp": "127.0.0.1"}, Path("fixture.pem"))
+
+        result = verify()
+        self.assertFalse(result["usage"])
+        self.assertTrue(result["tokenUsage"])
+        self.assertEqual(result["usageHttpStatus"], 500)
+        self.assertTrue(result["history"] and result["workspaceSso"] and result["anonymousDenied"])
+        self.assertTrue(verify(mode="same-vnet", usage=(200, None))["usage"], "Preserve existing headless VNet setup")
+        for changes in [
+            {"usage": (401, {})}, {"usage": (403, {})}, {"usage": (302, {})},
+            {"usage": (200, {"error": "bad"})}, {"mode": "same-vnet"},
+            {"health": (200, {"relay": "codey-node-relay", "nodeId": "different-owner-node"})},
+            {"tokens": (401, {})}, {"tokens": (500, {})}, {"tokens": (200, {"error": "bad"})},
+            {"anonymousTokens": 200}, {"history": 500}, {"username": "other-owner"},
+            {"anonymousUsage": 200}, {"anonymousWorkspace": 200},
+        ]:
+            with self.subTest(changes=changes), self.assertRaises(installer.Error):
+                verify(**changes)
+        with patch.object(installer.windows.common, "local_probe", side_effect=OSError("TLS fixture failure")):
+            with self.assertRaises(OSError):
+                installer.windows.common.verify(enrollment, {"listenIp": "127.0.0.1"}, Path("fixture.pem"))
+
     def install_fixture(self, root):
         home, skill = root / "home", root / "package"
         home.mkdir()
@@ -365,7 +478,10 @@ class WindowsTunnelTests(unittest.TestCase):
                                                     side_effect=lambda target, _sid: Path(target).mkdir(parents=True)))
                     stack.enter_context(patch.object(installer, "gateway_proof", return_value=proof))
                     stack.enter_context(patch.object(installer, "free_ports", return_value=[]))
-                    stack.enter_context(patch.object(installer, "verify_usage"))
+                    stack.enter_context(patch.object(installer, "verify_usage", return_value={
+                        "dataAccess": True, "usage": False, "usageHttpStatus": 500, "tokenUsage": True,
+                        "warnings": ["copilot_quota_unavailable_model_inference_not_tested"],
+                    }))
                     stack.enter_context(patch.object(installer.shutil, "disk_usage", return_value=SimpleNamespace(free=16 * 1024 ** 3)))
                     stack.enter_context(patch.object(installer, "prepare_devtunnel", return_value=Path(args.devtunnel_executable)))
                     stack.enter_context(patch.object(installer, "build_runtime", side_effect=build))
@@ -373,7 +489,10 @@ class WindowsTunnelTests(unittest.TestCase):
                     stack.enter_context(patch.object(installer.tunnel, "ensure_tunnel",
                                                     return_value={"tunnelId": "codey-test-windows", "clusterId": "jpe1"}))
                     stack.enter_context(patch.object(installer.tunnel, "renew", return_value={"ok": True}))
-                    verify = stack.enter_context(patch.object(installer.windows.common, "verify"))
+                    verify = stack.enter_context(patch.object(installer.windows.common, "verify", return_value={
+                        "usage": False, "usageHttpStatus": 500, "tokenUsage": True,
+                        "warnings": ["copilot_quota_unavailable_model_inference_not_tested"],
+                    }))
                     stack.enter_context(patch.object(installer, "export_machine",
                                                     side_effect=OSError("fixture export failure") if export_fails else original_export))
                     stack.enter_context(redirect_stdout(output))
@@ -386,6 +505,7 @@ class WindowsTunnelTests(unittest.TestCase):
                 state = json.loads((config_root / "installation.json").read_text())
                 runtime = json.loads((config_root / "runtime.json").read_text())
                 self.assertEqual(state["ready"], not export_fails)
+                self.assertFalse(state["proxyPreflight"]["usage"])
                 self.assertEqual(runtime["protectedModelProcess"], proof)
                 self.assertEqual((codex_home / "config.toml").read_text(), 'model = "preserve-me"\n')
                 self.assertEqual(runtime["codexHome"], str(codex_home))
@@ -401,6 +521,8 @@ class WindowsTunnelTests(unittest.TestCase):
                     self.assertNotIn("privateIp", machine)
                     self.assertNotIn("vmResourceId", machine)
                     self.assertTrue(json.loads(output.getvalue())["existingModelServiceUnchanged"])
+                    self.assertFalse(json.loads(output.getvalue())["verification"]["usage"])
+                    self.assertFalse(json.loads(output.getvalue())["realModelCallsTested"])
                     for secret in ("A" * 43, "B" * 43, "C" * 43, "private key fixture"):
                         self.assertNotIn(secret, Path(args.out).read_text())
 

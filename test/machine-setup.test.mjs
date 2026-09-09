@@ -177,6 +177,11 @@ test("Windows and Mac native packages need no VNet and activate only after scope
       assert.ok(files.has(`config-new-codey-machine/scripts/${file}`));
     }
     assert.ok(files.has("config-new-codey-machine/assets/portal-node-source.tar.gz"));
+    if (platform === "windows-x64") {
+      assert.match(files.get("config-new-codey-machine/SKILL.md").toString(), /Copilot 配额不是聊天健康检查/);
+      assert.match(files.get("config-new-codey-machine/scripts/configure-windows-tunnel.py").toString(), /probe\("\/token-usage"\)/);
+      assert.match(files.get("config-new-codey-machine/scripts/configure-machine.py").toString(), /copilot_quota_unavailable_model_inference_not_tested/);
+    }
     assert.ok(!files.has(`config-new-codey-machine/scripts/${platform === "windows-x64" ? "setup-macos.sh" : "setup-windows.ps1"}`));
     assert.ok(!files.has("config-new-codey-machine/scripts/setup-linux.sh"));
     assert.ok(![...files.keys()].some(name => name.includes("assets/codey-updater/")));

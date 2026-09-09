@@ -86,20 +86,43 @@ export async function verifyMachine(machine, { principal, master, clientKey, req
       probe(machine, 3001, "/api/auth/status", workspaceHeaders("/api/auth/status"), options),
       probe(machine, 3001, "/api/auth/status", {}, options),
     ]);
-    if (health.status !== 200 || usage.status !== 200 || history.status !== 200 ||
+    const usageAvailable = usage.status === 200 && (machine.networkMode !== "devtunnel" ||
+      (usage.body !== null && typeof usage.body === "object" &&
+        !Array.isArray(usage.body) && !Object.hasOwn(usage.body, "error")));
+    const quotaUnavailable = (usage.status === 200 && usage.body === null) ||
+      [404, 429].includes(usage.status) || (usage.status >= 500 && usage.status <= 599);
+    if (health.status !== 200 || (!usageAvailable && !quotaUnavailable) || history.status !== 200 ||
         anonymousData.status !== 401 || anonymousWorkspace.status !== 401 ||
         workspace.status !== 200 || workspace.body.managedAuthentication !== true ||
         workspace.body.needsSetup !== false || workspace.body.user?.username !== principal.name) {
       throw new Error("Private service authentication verification failed");
     }
+    if (!usageAvailable) {
+      // The optional Copilot quota API may fail while the node remains usable.
+      // Do not turn that into a successful quota result or waive authentication.
+      if (machine.networkMode !== "devtunnel" || health.body?.relay !== "codey-node-relay" ||
+          health.body.nodeId !== machine.id) {
+        throw new Error("An unavailable quota API requires a verified owner-bound relay");
+      }
+      const [tokens, anonymousTokens] = await Promise.all([
+        probe(machine, 8443, "/token-usage", dataHeaders, options),
+        probe(machine, 8443, "/token-usage", {}, options),
+      ]);
+      if (tokens.status !== 200 || !tokens.body || typeof tokens.body !== "object" ||
+          Array.isArray(tokens.body) || Object.hasOwn(tokens.body, "error") || anonymousTokens.status !== 401) {
+        throw new Error("Independent authenticated token usage verification failed");
+      }
+    }
     await probe(machine, 3001, "/ws", {
       ...workspaceHeaders("/ws"), connection: "Upgrade", upgrade: "websocket",
       "sec-websocket-version": "13", "sec-websocket-key": randomBytes(16).toString("base64"),
     }, { ...options, websocket: true });
-    return { https: true, usage: true, history: true, workspaceSso: true, websocket: true, anonymousDenied: true };
+    return { https: true, usage: usageAvailable, history: true, workspaceSso: true, websocket: true, anonymousDenied: true,
+      ...(!usageAvailable ? { tokenUsage: true, usageHttpStatus: usage.status,
+        warnings: ["copilot_quota_unavailable_model_inference_not_tested"] } : {}) };
   } catch {
     throw requestError(machine.networkMode === "devtunnel"
-      ? "DevTunnel 验收未通过：请确认 Mac 隧道在线、令牌有效、8443/3001 服务及本节点证书正确；机器尚未添加"
+      ? "DevTunnel 验收未通过：请确认隧道在线、令牌有效、8443/3001 服务、数据认证及本节点证书正确；机器尚未添加"
       : "私网验收未通过：请确认 Skill 已完成 VNet、8443/3001 服务和本节点证书配置；机器尚未添加", 502);
   } finally { await Promise.allSettled([...agents.values()].map(transport => transport.dispose())); }
 }

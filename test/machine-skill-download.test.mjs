@@ -32,6 +32,9 @@ async function page({ download = async () => archiveResponse(), pending = [], ma
   let settingsRequests = 0;
   runInNewContext(source, {
     document,
+    CustomEvent: class {
+      constructor(type, options) { this.type = type; this.detail = options?.detail; }
+    },
     window: {
       location: { hash: "", replace: (url) => redirects.push(url) },
       addEventListener() {},
@@ -200,4 +203,31 @@ test("the settings page has a visible, accessible download status next to the en
   assert.match(html, /id="machine-download-message"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.ok(html.indexOf('id="machine-download-message"') > html.indexOf('id="machine-skill-form"'));
   assert.ok(html.indexOf('id="machine-download-message"') < html.indexOf('id="add-prepared-machine-form"'));
+});
+
+test("adding a node with unavailable quota shows the warning and never claims model inference was verified", async () => {
+  for (const usage of [true, false]) {
+    const p = await page({ download: async () => new Response(JSON.stringify({
+      node: { name: "Windows Dev Box" }, verification: { usage, tokenUsage: true },
+    }), { status: 201, headers: { "content-type": "application/json" } }) });
+    p.elements.get("#prepared-machine-file").files = [{ size: 500, text: async () => JSON.stringify({
+      schema: 1, nodeId, tlsCertificate: "public certificate fixture",
+      networkMode: "devtunnel", devTunnel: { tunnelId: "fixture" },
+    }) }];
+    const form = p.elements.get("#add-prepared-machine-form");
+    p.submit(form);
+    for (let attempt = 0; attempt < 20 && form.querySelector("button").disabled; attempt++) {
+      await new Promise(setImmediate);
+    }
+    assert.equal(form.querySelector("button").disabled, false);
+    assert.equal(p.requests[0].url, `/api/settings/machines/${nodeId}/activate`);
+    const notice = p.elements.get("#settings-message").textContent;
+    assert.match(notice, /机器已验通并添加/);
+    assert.match(notice, /模型推理仍需单独验收/);
+    if (usage) assert.doesNotMatch(notice, /配额暂不可用/);
+    else {
+      assert.match(notice, /Copilot 配额暂不可用/);
+      assert.match(notice, /本地 Token 统计/);
+    }
+  }
 });

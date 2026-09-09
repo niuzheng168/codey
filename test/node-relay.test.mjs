@@ -7,7 +7,7 @@ import { issueClientTicket } from "../src/client-ticket.mjs";
 const origin = "https://codey.example.test";
 const signingKey = "s".repeat(48);
 
-async function startRelay(t) {
+async function startRelay(t, options = {}) {
   const history = {
     async list(nodeId, options) {
       return {
@@ -42,6 +42,7 @@ async function startRelay(t) {
         status: 200,
         headers: { "content-type": "application/json" },
       }),
+    ...options,
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -98,4 +99,28 @@ test("node relay validates tickets, CORS, and read-only routes", async (t) => {
     headers: { origin, authorization: `Bearer ${ticket}` },
   });
   assert.equal(mutation.status, 405);
+});
+
+test("unavailable Copilot quota remains an error while independent token statistics and History stay authenticated", async (t) => {
+  const calls = [];
+  const baseUrl = await startRelay(t, { fetchImpl: async url => {
+    const pathname = new URL(url).pathname;
+    calls.push(pathname);
+    return new Response(JSON.stringify(pathname === "/usage"
+      ? { error: "Failed to fetch Copilot usage" } : { totals: { requests: 1 } }),
+    { status: pathname === "/usage" ? 500 : 200, headers: { "content-type": "application/json" } });
+  } });
+  const token = issueClientTicket({ signingKey, nodeId: "jpe2", principalId: "principal" }).token;
+  const headers = { authorization: `Bearer ${token}` };
+  const usage = await fetch(baseUrl + "/usage", { headers });
+  assert.equal(usage.status, 500, "Do not fabricate quota success or zero usage");
+  assert.deepEqual(await usage.json(), { error: "Failed to fetch Copilot usage" });
+  const tokens = await fetch(baseUrl + "/token-usage", { headers });
+  assert.equal(tokens.status, 200);
+  assert.equal((await tokens.json()).totals.requests, 1);
+  assert.equal((await fetch(baseUrl + "/session-history", { headers })).status, 200);
+  for (const pathname of ["/usage", "/token-usage", "/session-history"]) {
+    assert.equal((await fetch(baseUrl + pathname)).status, 401);
+  }
+  assert.deepEqual(calls, ["/usage", "/token-usage"], "Unauthenticated requests never reach the existing proxy");
 });
