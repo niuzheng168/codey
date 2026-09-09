@@ -55,6 +55,34 @@ python <skill-dir>/scripts/deploy.py --scope portal --apply --target-seconds 600
 导航开关、Workspace SSO/Usage、实际 MCP 侧车健康，以及本地/远程进程未变。
 该模式不重新执行模型推理；不能把上次模型测试计为本轮测试。
 
+### 只更新 Workspace 前端及所选节点 CloudCLI
+
+CloudCLI 前后端功能更新、不涉及 Portal/MCP 或 copilot-api 时，使用最小组件范围：
+
+```powershell
+python <skill-dir>/scripts/deploy.py --scope workspace --nodes zhn-a100 --apply --verify-steering
+```
+
+- 只签名/分发 `cloudcli` 组件，共享 UI 发布一次；不构建或部署 ACA/MCP 镜像，
+  不更新 copilot-api、Node、Codex，默认也不更换独立升级器。
+- 仅支持已经接入升级器的节点。必须同时核对 Codey running sessions 和原生
+  Codex daemon 已加载任务；忙碌或未知状态不确认升级。
+- `--verify-steering` 仅用于同轮插话功能，追加一次独立合成会话的真实插话验证：
+  一次 `chat.send`、一次带旧轮次 token 的 `chat.steer`、原轮次返回新 marker。
+  不重复通用 Codey/Codex 连通性验收；该额外功能验证单独记录。
+- 可用 `--expected-cloudcli-commit <完整 SHA>`、`--expected-portal-commit <完整 SHA>`
+  锁定已审核的远端源码，远端变化即停止，不夹带工作树改动。
+- 保留未选择节点及所有 copilot-api 的 PID/启动时间，核对 ACA 修订不变；
+  共享 UI 成功发布不代表其它节点的后端也已更新。
+- 失败事务已回滚且无未完成 job 后，可明确使用 `--resume-release <原 release>`
+  重试同一已验证、已签名的应用包，不重复构建/签名或启动整个发布。
+  若根因是已审查并测试的升级器缺陷，再附加 `--refresh-updater`：
+  只安装所选节点的升级器代码，复用本地凭据，核对应用 PID 不变。
+  旧失败报告、job 记录和诊断间隔均保留在同一发布的总耗时内。
+  并行 ACA 重启导致修订号变化时，先确认其已就绪；只有镜像、配置及共享 UI
+  完全相同才可加 `--reconcile-aca` 接受纯 `revisionSuffix` 变化。
+  原始基线另存留档；真实配置变化或未就绪的发布仍拒绝，不回退另一发布者。
+
 当用户明确要求“修改本地代码并部署”，且提交尚未获准或明确要求部署后才提交时，先审阅全部本地变更；
 仅确认这些改动都属于本次授权范围后，附加 `--reviewed-working-tree`。它使用独立临时
 Git index 生成不可变 tree/archive，不改真实 index、不创建 commit、不 push。

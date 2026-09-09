@@ -5,7 +5,27 @@ import https from 'node:https';
 import tls from 'node:tls';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 
+/** Wait only for the idempotent authenticated readiness GET, never a model send or session creation. */
+export async function waitForCloudCliReady(request, {
+  timeoutMs = 30000, intervalMs = 500, now = () => performance.now(), sleep = delay,
+} = {}) {
+  const deadline = now() + timeoutMs;
+  while (true) {
+    try {
+      return await request();
+    } catch (error) {
+      // TLS, ownership, authentication and application errors remain fatal.
+      // systemctl's "active" state can precede a simple service binding its port.
+      if (!['ECONNREFUSED', 'ECONNRESET'].includes(error?.code) || now() >= deadline) throw error;
+      await sleep(Math.min(intervalMs, deadline - now()));
+    }
+  }
+}
+
+async function main() {
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const input = JSON.parse(Buffer.concat(chunks).toString());
@@ -73,7 +93,7 @@ function request(pathname, method = 'GET', body) {
   });
 }
 
-const running = (await request('/api/providers/sessions/running')).data.sessions;
+const running = (await waitForCloudCliReady(() => request('/api/providers/sessions/running'))).data.sessions;
 assert.ok(Array.isArray(running));
 if (input.mode === 'idle') {
   console.log(JSON.stringify({ runningSessions: running.length }));
@@ -136,4 +156,9 @@ if (input.mode === 'idle') {
     assert.equal(removed.action, 'archived');
   }
   console.log(JSON.stringify({ passed: true, codeyModel: true, syntheticSessionArchived: true }));
+}
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  await main();
 }

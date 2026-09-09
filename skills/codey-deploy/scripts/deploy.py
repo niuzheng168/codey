@@ -10,18 +10,26 @@ import secrets
 import shlex
 import sys
 import time
+import zipfile
 
-from common import NODES, command, phase, read, require, save, sha
+from common import NODES, command, phase, read, release_name, require, save, sha
 
 
 class Deploy:
     def __init__(self, args):
+        expected = {name: value for name, value in [
+            ("portal", getattr(args, "expected_portal_commit", None)),
+            ("cloudcli", getattr(args, "expected_cloudcli_commit", None)),
+        ] if value}
+        require(all(len(value) == 40 and set(value) <= set("0123456789abcdef") for value in expected.values()),
+                "Expected source commits must be full lowercase SHA-1 values")
         self.args = args
         self.started = time.monotonic()
-        self.release = "fast-" + datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
+        resumed = getattr(args, "resume_release", None)
+        self.release = release_name(resumed) if resumed else "fast-" + datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
         self.root = Path(args.workspace).resolve()
         self.job = self.root / "artifacts" / self.release
-        self.job.mkdir(mode=0o700, parents=True)
+        self.job.mkdir(mode=0o700, parents=True, exist_ok=bool(resumed))
         self.scripts = Path(__file__).resolve().parent
         self.nodes = tuple(args.nodes)
         require(self.nodes and len(set(self.nodes)) == len(self.nodes), "Choose distinct target nodes")
@@ -31,10 +39,31 @@ class Deploy:
                        "status": "running", "forceActualRollout": True, "mcpTests": "skipped-by-user",
                        "protectedLocalCopilot": True, "phases": []}
         self.record = self.job / "report.json"
+        if resumed:
+            previous = read(self.record)
+            require(previous["status"] == "needs-attention" and previous.get("scope") == "workspace-only"
+                    and previous["selectedNodes"] == list(self.nodes),
+                    "Resume only the same failed Workspace release and selected nodes")
+            attempt = len(previous.get("previousAttempts", [])) + 1
+            backup = self.job / f"report-attempt-{attempt}.json"
+            require(not backup.exists(), "Previous attempt evidence must not be overwritten")
+            save(backup, previous)
+            self.report = {**previous, "status": "running", "previousAttempts": [
+                *previous.get("previousAttempts", []),
+                {"report": str(backup), "error": previous.get("error"), "finishedAt": previous.get("finishedAt")},
+            ]}
+            for name in ("error", "finishedAt", "withinTarget", "lockCleanupError"):
+                self.report.pop(name, None)
+            # Recovery/diagnosis time remains part of the original end-to-end clock.
+            self.started = time.monotonic() - max(0, time.time() - previous["startedAt"])
         self.lock = self.root / "artifacts/.codey-deploy-controller.lock"
         with self.lock.open("x", encoding="utf-8") as output:
             json.dump({"release": self.release, "pid": os.getpid()}, output)
         self.base = {"root": args.remote_root, "registry": args.registry, "nodes": list(self.nodes)}
+        if expected:
+            self.base["expectedCommits"] = expected
+        if getattr(args, "reconcile_aca", False):
+            self.base["reconcileAca"] = True
         self.report["selectedNodes"] = list(self.nodes)
         self.report["skippedNodes"] = [node for node in NODES if node not in self.nodes]
         if args.node_transport == "updater" and args.scope == "fleet":
@@ -127,16 +156,141 @@ class Deploy:
         save(self.job / "reviewed-source.json", result)
         return result
 
-    def node_services(self):
+    def node_services(self, nodes=None, services=("codey-cloudcli.service", "copilot-api.service")):
         def inspect(node):
             output = self.ssh(node, [
-                "systemctl", "--user", "show", "codey-cloudcli.service", "copilot-api.service",
+                "systemctl", "--user", "show", *services,
                 "--property=Id,ActiveState,MainPID,ExecMainStartTimestampMonotonic",
             ], timeout=20)
-            require(output.count("ActiveState=active") == 2 and "\nMainPID=0" not in output,
+            require(output.count("ActiveState=active") == len(services) and "\nMainPID=0" not in output,
                     "A protected remote service is not active: " + node)
             return node, output
-        return dict(self.pool.map(inspect, getattr(self, "nodes", NODES)))
+        return dict(self.pool.map(inspect, nodes if nodes is not None else getattr(self, "nodes", NODES)))
+
+    def native_idle(self):
+        script = (self.scripts / "native-idle.mjs").read_text(encoding="utf-8")
+        def inspect(node):
+            launch = ('p=$(systemctl --user show codey-cloudcli.service --property=MainPID --value); '
+                      'test "$p" -gt 0 && exec "$(readlink /proc/$p/exe)" --input-type=module')
+            output = self.ssh(node, ["sh", "-c", launch], input=script, timeout=60)
+            result = json.loads(output.splitlines()[-1])
+            require(result["activeCount"] == 0, "A native Codex task is still active on " + node)
+            if self.args.verify_steering:
+                require(result["available"], "Native steering requires the existing Codex app daemon on " + node)
+            return node, result
+        return dict(self.pool.map(inspect, self.nodes))
+
+    def preserved_gateway(self):
+        script = ("import json,pathlib; "
+                  "p=pathlib.Path.home()/'.config/codey-updater/installed.json'; "
+                  "x=json.loads(p.read_text()); "
+                  "print(json.dumps({'releaseId':x['releaseId'],'gateway':x['components']['copilotApi']}))")
+        rows = {}
+        for node in self.nodes:
+            rows[node] = json.loads(self.ssh(node, ["python3", "-I", "-S", "-c", script], timeout=20))
+        return {"releaseId": next(iter(rows.values()))["releaseId"],
+                "nodes": {node: row["gateway"] for node, row in rows.items()}}
+
+    def refresh_reviewed_updater(self):
+        attempt = len(self.report.get("previousAttempts", []))
+        archive = self.job / f"reviewed-updater-source-{attempt}.zip"
+        require(not archive.exists(), "Do not overwrite reviewed updater evidence")
+        hashes = {}
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            for name in ["updater.py", "engine.py", "probe.mjs", "install.py", "UPGRADE.md"]:
+                file = self.root / "node-updater" / name
+                hashes[name] = sha(file)
+                bundle.write(file, "codey-updater/" + name)
+        self.upload(self.args.builder, [str(archive)], self.remote)
+        results = [self.install_updater({
+            "node": node, "alreadyEnrolled": True, "useExistingConfig": True,
+            "file": self.remote + "/" + archive.name, "sha256": sha(archive),
+        }) for node in self.nodes]
+        return {"nodes": results, "reviewedFiles": hashes, "archiveSha256": sha(archive),
+                "credentialReused": True, "applicationServicesRestarted": False}
+
+    def run_workspace(self):
+        self.report["scope"] = "workspace-only"
+        self.report["components"] = ["cloudcli"]
+        self.report["forceActualRollout"] = False
+        self.base["components"] = ["cloudcli"]
+        try:
+            if self.args.resume_release:
+                with phase(self.report, "resume-existing-signed-workspace-release", self.record):
+                    self.upload(self.args.builder, [str(file) for file in self.scripts.iterdir()
+                                                   if file.suffix in {".py", ".mjs"}], self.remote + "/scripts")
+                    self.manifest = self.worker("resume_workspace", timeout=60)
+                    if self.manifest.get("acaReconciliation"):
+                        self.report["acaReconciliation"] = self.manifest["acaReconciliation"]
+                    attempt = len(self.report["previousAttempts"])
+                    for name in ("node-update-jobs", "node-update-progress"):
+                        command(["scp", "-q", f"{self.args.builder}:{self.remote}/{name}.json",
+                                 str(self.job / f"{name}-attempt-{attempt}.json")], timeout=30)
+                    self.worker("ready", script="updates.py", timeout=60)
+                    require(self.protected_local() == self.report["localBefore"], "Protected local gateway changed")
+                    require(self.node_services(services=("copilot-api.service",)) == self.report["gatewayBefore"],
+                            "Protected node gateway changed before recovery")
+                    self.report["worktreeBefore"] = command(["git", "status", "--short"], cwd=self.root)[0]
+            else:
+                with phase(self.report, "workspace-preflight-and-source", self.record):
+                    self.report["localBefore"] = self.protected_local()
+                    self.report["nodesBefore"] = self.node_services(nodes=NODES)
+                    self.report["gatewayBefore"] = self.node_services(services=("copilot-api.service",))
+                    self.report["updaterBefore"] = self.node_services(services=("codey-node-updater.service",))
+                    self.report["worktreeBefore"] = command(["git", "status", "--short"], cwd=self.root)[0]
+                    self.upload(self.args.builder, [str(file) for file in self.scripts.iterdir()
+                                                   if file.suffix in {".py", ".mjs"}], self.remote + "/scripts")
+                    self.report["source"] = self.worker("prepare", timeout=110)
+                    self.idle(self.nodes)
+                    self.report["nativeBefore"] = self.native_idle()
+                    self.base["preservedGateway"] = self.preserved_gateway()
+                with phase(self.report, "cloudcli-only-build-and-tests", self.record):
+                    self.manifest = self.worker("build_workspace", timeout=480)
+                    save(self.job / "manifest.json", self.manifest)
+                with phase(self.report, "sign-cloudcli-only-release", self.record):
+                    self.report["nodeRelease"] = self.worker("publish", script="updates.py", timeout=160)
+                    require(self.report["nodeRelease"]["components"] == ["cloudcli"], "Gateway entered the release")
+            if self.args.refresh_updater:
+                with phase(self.report, "reviewed-independent-updater-repair", self.record):
+                    self.worker("ready", script="updates.py", timeout=60)
+                    before = self.node_services(nodes=NODES)
+                    self.report["updaterRepair"] = self.refresh_reviewed_updater()
+                    require(self.node_services(nodes=NODES) == before, "Updater repair restarted an application")
+                    self.report.setdefault("updaterOriginalBefore", self.report["updaterBefore"])
+                    self.report["updaterBefore"] = self.node_services(services=("codey-node-updater.service",))
+            with phase(self.report, "selected-node-owner-confirmed-update", self.record):
+                self.idle(self.nodes)
+                self.report["nativeAtConfirmation"] = self.native_idle()
+                # Existing enrolled updaters only. Do not bootstrap or replace an
+                # updater as a side effect of changing the application backend.
+                self.report["nodeUpdates"] = self.worker("rollout", script="updates.py", timeout=510)
+            if self.args.verify_steering:
+                with phase(self.report, "real-same-turn-steering-canary", self.record):
+                    self.report["steering"] = self.worker("steering", script="portal.py", timeout=140)
+            with phase(self.report, "shared-ui-and-real-steering-acceptance", self.record):
+                self.report["ui"] = self.worker("publish_ui", timeout=200)
+                self.report["aca"] = self.worker("verify_aca_unchanged", timeout=60)
+                self.report["e2e"] = self.worker("verify", script="portal.py", extra={"modelNodes": []}, timeout=100)
+                self.report["mcp"] = self.worker("mcp_health", timeout=60)
+            with phase(self.report, "protected-services-and-worktree-check", self.record):
+                self.report["nodesAfter"] = self.node_services(nodes=NODES)
+                self.report["gatewayAfter"] = self.node_services(services=("copilot-api.service",))
+                self.report["updaterAfter"] = self.node_services(services=("codey-node-updater.service",))
+                self.report["localAfter"] = self.protected_local()
+                require(self.report["localAfter"] == self.report["localBefore"], "Protected local gateway changed")
+                require(self.report["gatewayAfter"] == self.report["gatewayBefore"], "A protected gateway changed")
+                require(self.report["updaterAfter"] == self.report["updaterBefore"], "An updater was replaced")
+                require(all(self.report["nodesAfter"][node] == self.report["nodesBefore"][node]
+                            for node in NODES if node not in self.nodes), "An excluded node service changed")
+                self.report["worktreeAfter"] = command(["git", "status", "--short"], cwd=self.root)[0]
+                require(self.report["worktreeAfter"] == self.report["worktreeBefore"], "Development worktree changed")
+            self.report["status"] = "complete"
+        except Exception as error:
+            self.report["status"] = "needs-attention"
+            self.report["error"] = str(error)
+        finally:
+            self.finish()
+        return 0 if self.report["status"] == "complete" and self.report["withinTarget"] else 1
 
     def run_portal(self):
         self.report["scope"] = "portal-only"
@@ -173,6 +327,8 @@ class Deploy:
         return 0 if self.report["status"] == "complete" and self.report["withinTarget"] else 1
 
     def run(self):
+        if self.args.scope == "workspace":
+            return self.run_workspace()
         if self.args.scope == "portal":
             return self.run_portal()
         if self.args.node_transport == "updater":
@@ -315,6 +471,7 @@ print(json.dumps({'node':json.loads(config.read_text())['nodeId'],'updaterInstal
                     self.upload(self.args.builder, [str(self.job / "portal-reviewed.tar.gz")], self.remote)
                 self.report["source"] = self.worker("prepare", timeout=100)
                 self.idle(self.nodes)
+                self.report["nativeBefore"] = self.native_idle()
             with phase(self.report, "build-and-test-once", self.record):
                 self.manifest = self.worker("build", timeout=380)
                 save(self.job / "manifest.json", self.manifest)
@@ -330,6 +487,8 @@ print(json.dumps({'node':json.loads(config.read_text())['nodeId'],'updaterInstal
                 self.report["updaterInstallation"] = list(self.pool.map(self.install_updater, rows))
                 require(self.node_services() == self.report["nodesBefore"], "Updater bootstrap changed an application service")
             with phase(self.report, "owner-confirmed-canary-and-batch-model-e2e", self.record):
+                self.idle(self.nodes)
+                self.report["nativeAtConfirmation"] = self.native_idle()
                 self.report["nodeUpdates"] = self.worker("rollout", script="updates.py", timeout=510)
             with phase(self.report, "final-aca-fleet-and-local-acceptance", self.record):
                 mcp = self.pool.submit(self.worker, "mcp_health", timeout=60)
@@ -377,7 +536,16 @@ def arguments():
     parser.add_argument("--registry", default="codexshareef492f53f0")
     parser.add_argument("--seed", help="Optional previously validated build cache; not a substitute for this run's tests")
     parser.add_argument("--target-seconds", type=int, default=600)
-    parser.add_argument("--scope", choices=("fleet", "portal"), default="fleet")
+    parser.add_argument("--scope", choices=("fleet", "portal", "workspace"), default="fleet")
+    parser.add_argument("--verify-steering", action="store_true",
+                        help="Workspace scope: prove a correction reaches the same native Codex turn")
+    parser.add_argument("--expected-cloudcli-commit", help="Fail rather than publishing an unexpected remote CloudCLI tip")
+    parser.add_argument("--expected-portal-commit", help="Fail rather than publishing an unexpected remote parent tip")
+    parser.add_argument("--resume-release", help="Explicitly resume a failed Workspace release without rebuilding or signing again")
+    parser.add_argument("--refresh-updater", action="store_true",
+                        help="Workspace recovery only: install reviewed updater source on selected enrolled nodes without restarting apps")
+    parser.add_argument("--reconcile-aca", action="store_true",
+                        help="Recovery only: accept a completed metadata-only ACA restart; reject image/config/UI drift")
     parser.add_argument("--node-transport", choices=("updater", "ssh"), default="updater",
                         help="Default: signed owner-confirmed pull updates. SSH is legacy-only before updater adoption.")
     parser.add_argument("--nodes", nargs="+", choices=NODES, default=list(NODES),
@@ -391,6 +559,14 @@ def arguments():
 if __name__ == "__main__":
     args = arguments()
     require(args.apply, "Read SKILL.md and obtain release authorization, then pass --apply")
+    require(not args.verify_steering or args.scope == "workspace", "Steering acceptance is Workspace-scoped")
+    require(args.scope != "workspace" or (args.node_transport == "updater" and not args.reviewed_working_tree),
+            "Workspace-only releases require enrolled updaters and committed application source")
+    require(not args.resume_release or args.scope == "workspace", "Resume is Workspace-scoped")
+    require(not args.refresh_updater or (args.scope == "workspace" and args.resume_release),
+            "Updater repair requires explicit recovery of a failed Workspace release")
+    require(not args.reconcile_aca or (args.scope == "workspace" and args.resume_release),
+            "ACA baseline reconciliation requires explicit Workspace recovery")
     require(not args.reviewed_working_tree or args.scope == "portal" or args.node_transport == "updater",
             "Reviewed source is supported by Portal-only and independent-updater releases, not legacy SSH")
     raise SystemExit(Deploy(args).run())

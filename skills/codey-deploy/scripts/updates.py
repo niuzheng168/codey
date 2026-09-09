@@ -49,6 +49,10 @@ class Updates:
         source = self.builder.source / "portal"
         manifest = self.job / "manifest.json"
         require(read(self.job / "validation.json")["passed"], "Build tests must pass before signing")
+        components = self.request.get("components", ["cloudcli", "copilotApi"])
+        require(components in (["cloudcli"], ["cloudcli", "copilotApi"]), "Unexpected release components")
+        if components == ["cloudcli"]:
+            require(read(manifest).get("scope") == "workspace", "CloudCLI-only signing requires Workspace validation")
         signing = Path.home() / ".config/codey-node-release-signing"
         signing.mkdir(mode=0o700, parents=True, exist_ok=True)
         private, public = signing / "private.pem", signing / "public.pem"
@@ -74,6 +78,7 @@ class Updates:
                                 for row in json.loads(previous)["releases"]), default=0) + 1
             command(["node", str(source / "scripts/publish-node-update.mjs"), "publish", "--manifest", manifest,
                      "--output", feed, "--private-key", private, "--sequence", str(sequence),
+                     "--components", ",".join(components),
                      "--cloudcli-node-majors", "22,24", "--gateway-node-majors", "22,24,26",
                      "--notes", "Reviewed Codey fleet build; retain existing Node/identity; both clients must pass real model checks"],
                     timeout=60, log=self.job / "node-update-signing.log")
@@ -96,7 +101,7 @@ class Updates:
             store.write_new(next_name, (feed / "catalog.json").read_bytes())
             store.replace(next_name, "catalog.json")
             result = {"releaseId": release, "sequence": sequence, "signed": True,
-                      "artifactsVerified": True, "privateKeyDistributed": False}
+                      "components": components, "artifactsVerified": True, "privateKeyDistributed": False}
             save(self.job / "node-update-release.json", result)
             return result
         finally:
@@ -128,6 +133,16 @@ class Updates:
             file.chmod(0o600)
             outputs.append({"node": node, "file": str(file), "sha256": hashlib.sha256(payload).hexdigest()})
         return {"nodes": outputs}
+
+    def ready(self):
+        status = self.api("/api/settings/updates")
+        targets = {node["id"]: node for node in status["nodes"]}
+        for node in self.targets:
+            row = targets.get(node, {})
+            require(row.get("enrolled") and row.get("connected") and not row.get("protected"),
+                    "Selected updater is unavailable or protected: " + node)
+            require(not row.get("activeJob"), "Finish the existing node transaction before retrying or repairing: " + node)
+        return {"nodes": self.targets, "connected": True, "unfinishedJobs": 0}
 
     def rollout(self):
         release = read(self.job / "node-update-release.json")["releaseId"]
@@ -166,7 +181,7 @@ def main():
     request = json.load(sys.stdin)
     updates = Updates(request)
     try:
-        require(request["mode"] in {"publish", "bootstrap", "rollout"}, "Unknown updater release operation")
+        require(request["mode"] in {"publish", "bootstrap", "rollout", "ready"}, "Unknown updater release operation")
         result = getattr(updates, request["mode"])()
         print(json.dumps({"ok": True, "result": result}), flush=True)
     except Exception as error:

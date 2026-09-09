@@ -105,15 +105,17 @@ class Portal:
         with ThreadPoolExecutor(max_workers=4) as pool:
             return list(pool.map(check, targets))
 
-    def models(self, nodes):
+    def models(self, nodes, steering=False):
         output, seconds = command(
-            ["node", str(Path(__file__).with_name("codey-model.mjs"))], timeout=100,
+            ["node", str(Path(__file__).with_name("codey-model.mjs"))], timeout=120 if steering else 100,
             input=json.dumps({
                 "base": self.base, "cookie": self.cookie, "nodes": nodes,
-                "projectPath": f"/home/zhn/.local/share/codey-deploy/{self.builder.release}/probe",
+                "projectPath": ("/home/zhn/.local/share/codey-updater/probe" if steering else
+                                f"/home/zhn/.local/share/codey-deploy/{self.builder.release}/probe"),
                 "dependencyRoot": str(self.job / "source/cloudcli"),
+                "steering": steering,
             }),
-            log=self.job / ("codey-model-" + "-".join(nodes) + ".private.log"),
+            log=self.job / (("codey-steering-" if steering else "codey-model-") + "-".join(nodes) + ".private.log"),
         )
         result = json.loads(output)
         require(result["passed"], "A Codey real model call failed")
@@ -190,6 +192,8 @@ class Portal:
                 self.report["nodes"] = self.status()
             elif mode == "models":
                 self.report["codeyModels"] = self.models(self.request["nodes"])
+            elif mode == "steering":
+                self.report["steering"] = self.models(self.request["nodes"], steering=True)
             elif mode == "verify":
                 self.report.update(self.verify())
             elif mode == "verify_portal":

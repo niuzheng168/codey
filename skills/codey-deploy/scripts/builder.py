@@ -60,6 +60,8 @@ class Builder:
             command(["git", "fetch", "--no-tags", "origin", f"refs/heads/{branch}:{ref}"],
                     cwd=checkout, timeout=45, log=self.job / f"fetch-{name}.log")
             commit, _ = command(["git", "rev-parse", ref], cwd=checkout)
+            expected = self.request.get("expectedCommits", {}).get(name)
+            require(not expected or commit == expected, "Remote source does not match the explicitly selected " + name + " commit")
             archive = self.job / f"source-{name}.tar.gz"
             reviewed = self.request.get("portalSnapshot") if name == "portal" else None
             if reviewed:
@@ -152,18 +154,129 @@ class Builder:
         (source / "node_modules").symlink_to(cache / "node_modules", target_is_directory=True)
         return read(cache / "ready.json")["mode"]
 
+    def test_directory(self, prefix):
+        # /dev is blocked by workspace validation; Git ancestors also affect
+        # skill scope. Use short, isolated paths outside the source worktrees.
+        return tempfile.TemporaryDirectory(prefix=prefix, dir="/var/tmp")
+
+    def test_environment(self, temporary):
+        # Tests receive no real HOME, provider env, Codex state, or production database.
+        return {
+            "PATH": os.environ["PATH"], "HOME": temporary, "TMPDIR": temporary, "CI": "true",
+            "DATABASE_PATH": ":memory:", "CODEY_MANAGED": "false", "CODEY_PORTAL_SSO": "false",
+            "NODE_ENV": "test", "NO_COLOR": "1", "HUSKY": "0", "SKIP_INSTALL_SIMPLE_GIT_HOOKS": "1",
+            "ELECTRON_SKIP_BINARY_DOWNLOAD": "1",
+            "npm_config_cache": str(self.root / "artifacts/codey-deploy-cache/npm"),
+            "BUN_INSTALL_CACHE_DIR": str(self.root / "artifacts/codey-deploy-cache/bun"),
+        }
+
+    def build_cloudcli(self, commits, env):
+        source = self.source / "cloudcli"
+        mode = self.dependency_cache("cloudcli", env)
+        command(["git", "init", "--quiet"], cwd=source)
+        for label, args in [
+            ("typecheck", ["npm", "run", "typecheck"]),
+            ("frontend-tests", ["npm", "run", "test:client"]),
+            ("backend-tests", ["npm", "test"]),
+            ("lint", ["npm", "run", "lint"]),
+            ("build-server", ["npm", "run", "build:server"]),
+            ("shared-ui", ["node", str(self.source / "portal/scripts/build-cloudcli-ui.mjs"),
+                           "--source", str(source), "--output", str(self.job / "ui"),
+                           "--release", "ui-" + self.release]),
+        ]:
+            self.check("cloudcli", label, args, {**env, "TSX_TSCONFIG_PATH": str(source / "server/tsconfig.json")})
+        save(source / "codey-release.json", {
+            "release": self.release, "sourceCommit": commits["cloudcli"],
+            "lockSha256": sha(source / "package-lock.json"),
+        })
+        archive_tree(source, self.job / "cloudcli.tar.gz", [
+            "package.json", "package-lock.json", "server", "shared", "dist-server",
+            "scripts", "codey-release.json",
+        ])
+        return {"version": read(source / "package.json")["version"], "sourceCommit": commits["cloudcli"],
+                "lockSha256": sha(source / "package-lock.json"), "dependencyCache": mode,
+                "archiveSha256": sha(self.job / "cloudcli.tar.gz"),
+                "entrySha256": sha(source / "dist-server/server/index.js")}
+
+    def build_workspace(self):
+        require(self.request.get("components") == ["cloudcli"], "Workspace scope may only publish CloudCLI")
+        # Retain honest, previously validated gateway metadata for the existing
+        # manifest contract. Its archive is neither rebuilt nor signed/published.
+        preserved = self.request["preservedGateway"]
+        prior = self.root / "artifacts" / release_name(preserved["releaseId"])
+        require(read(prior / "validation.json")["passed"], "Preserved gateway build was not validated")
+        gateway = read(prior / "manifest.json")["gateway"]
+        for observed in preserved["nodes"].values():
+            require(all(observed[a] == gateway[b] for a, b in [
+                ("commit", "sourceCommit"), ("entrySha256", "entrySha256"), ("version", "version"),
+            ]), "A gateway differs from the preserved build; do not include it in a Workspace-only update")
+        commits = read(self.job / "source.json")
+        with self.test_directory("codey-workspace-") as temporary:
+            cloudcli = self.build_cloudcli(commits, self.test_environment(temporary))
+        manifest = {
+            "release": self.release, "scope": "workspace", "components": ["cloudcli"],
+            "commits": commits, "cloudcli": cloudcli, "gateway": gateway,
+            "gatewayPreservedFrom": preserved["releaseId"], "images": {},
+            "ui": read(self.job / "ui/latest-build.json"), "mcpTests": "unchanged-not-run",
+        }
+        self.report.update({"passed": True, "scope": "workspace", "components": ["cloudcli"],
+                            "cloudcli": cloudcli, "gatewayRebuilt": False, "imagesBuilt": False})
+        save(self.job / "validation.json", self.report)
+        save(self.job / "manifest.json", manifest)
+        return manifest
+
+    def verify_aca_unchanged(self):
+        before = read(self.job / "aca-before.private.json")["properties"]
+        after = self.app()["properties"]
+        require(after["latestRevisionName"] == after["latestReadyRevisionName"] == before["latestReadyRevisionName"],
+                "ACA revision changed during the Workspace-only release")
+        require(canonical(after["template"]) == canonical(before["template"])
+                and canonical(after["configuration"]) == canonical(before["configuration"]),
+                "ACA configuration changed during the Workspace-only release")
+        result = {"ready": True, "revision": after["latestReadyRevisionName"], "unchanged": True}
+        save(self.job / "aca-result.json", result)
+        return result
+
+    def resume_workspace(self):
+        manifest = read(self.job / "manifest.json")
+        require(manifest.get("scope") == "workspace" and manifest.get("components") == ["cloudcli"]
+                and read(self.job / "validation.json")["passed"], "Not a validated CloudCLI-only release")
+        require(sha(self.job / "cloudcli.tar.gz") == manifest["cloudcli"]["archiveSha256"],
+                "The signed application artifact changed; never rebuild it under the same release id")
+        for name, expected in self.request.get("expectedCommits", {}).items():
+            require(manifest["commits"][name] == expected, "Recovery source differs from the selected commit")
+        self.lease.mkdir(mode=0o700)
+        save(self.lease / "owner.json", {"release": self.release})
+        if self.request.get("reconcileAca"):
+            before = read(self.job / "aca-before.private.json")
+            current = self.app()
+            old, new = before["properties"], current["properties"]
+            require(new["provisioningState"] == "Succeeded"
+                    and new["latestRevisionName"] == new["latestReadyRevisionName"],
+                    "Wait for the other ACA rollout to finish; do not replace its baseline mid-rollout")
+            old_template, new_template = canonical(old["template"]), canonical(new["template"])
+            old_template.pop("revisionSuffix", None)
+            new_template.pop("revisionSuffix", None)
+            require(old_template == new_template
+                    and canonical(old["configuration"]) == canonical(new["configuration"]),
+                    "The concurrent ACA change is not a metadata-only restart; review it separately")
+            active = read_json_bytes(self.publisher().AzureStore(self.config).read("active.json", 2048))
+            require(active == read(self.job / "ui-before.json"), "Shared UI changed; do not overwrite another publication")
+            save(self.job / f"aca-before-reconcile-{time.time_ns()}.private.json", before)
+            save(self.job / "aca-before.private.json", current)
+            reconciliation = {"previousRevision": old["latestReadyRevisionName"],
+                              "acceptedRevision": new["latestReadyRevisionName"],
+                              "imagesAndConfigurationUnchanged": True, "sharedUiUnchanged": True,
+                              "acaMutatedByThisRelease": False}
+            save(self.job / "aca-reconciliation.json", reconciliation)
+            manifest = {**manifest, "acaReconciliation": reconciliation}
+        self.verify_aca_unchanged()
+        return manifest
+
     def build(self):
         commits = read(self.job / "source.json")
-        # Tests receive no real HOME, provider env, Codex state, or production database.
-        with tempfile.TemporaryDirectory(prefix="codey-fast-", dir="/dev/shm") as temporary:
-            env = {
-                "PATH": os.environ["PATH"], "HOME": temporary, "TMPDIR": temporary, "CI": "true",
-                "DATABASE_PATH": ":memory:", "CODEY_MANAGED": "false", "CODEY_PORTAL_SSO": "false",
-                "NODE_ENV": "test", "NO_COLOR": "1", "HUSKY": "0", "SKIP_INSTALL_SIMPLE_GIT_HOOKS": "1",
-                "ELECTRON_SKIP_BINARY_DOWNLOAD": "1",
-                "npm_config_cache": str(self.root / "artifacts/codey-deploy-cache/npm"),
-                "BUN_INSTALL_CACHE_DIR": str(self.root / "artifacts/codey-deploy-cache/bun"),
-            }
+        with self.test_directory("codey-fast-") as temporary:
+            env = self.test_environment(temporary)
 
             def image(name, directory, repository):
                 tag = self.release
@@ -186,34 +299,6 @@ class Builder:
                 ]:
                     self.check("portal", label, args, env)
                 return image("portal", self.source / "portal", "codey")
-
-            def cloudcli():
-                source = self.source / "cloudcli"
-                mode = self.dependency_cache("cloudcli", env)
-                command(["git", "init", "--quiet"], cwd=source)
-                for label, args in [
-                    ("typecheck", ["npm", "run", "typecheck"]),
-                    ("frontend-tests", ["npm", "run", "test:client"]),
-                    ("backend-tests", ["npm", "test"]),
-                    ("lint", ["npm", "run", "lint"]),
-                    ("build-server", ["npm", "run", "build:server"]),
-                    ("shared-ui", ["node", str(self.source / "portal/scripts/build-cloudcli-ui.mjs"),
-                                   "--source", str(source), "--output", str(self.job / "ui"),
-                                   "--release", "ui-" + self.release]),
-                ]:
-                    self.check("cloudcli", label, args, {**env, "TSX_TSCONFIG_PATH": str(source / "server/tsconfig.json")})
-                save(source / "codey-release.json", {
-                    "release": self.release, "sourceCommit": commits["cloudcli"],
-                    "lockSha256": sha(source / "package-lock.json"),
-                })
-                archive_tree(source, self.job / "cloudcli.tar.gz", [
-                    "package.json", "package-lock.json", "server", "shared", "dist-server",
-                    "scripts", "codey-release.json",
-                ])
-                return {"version": read(source / "package.json")["version"], "sourceCommit": commits["cloudcli"],
-                        "lockSha256": sha(source / "package-lock.json"), "dependencyCache": mode,
-                        "archiveSha256": sha(self.job / "cloudcli.tar.gz"),
-                        "entrySha256": sha(source / "dist-server/server/index.js")}
 
             def gateway():
                 source = self.source / "copilot-api"
@@ -240,7 +325,7 @@ class Builder:
             with ThreadPoolExecutor(max_workers=4) as pool:
                 portal_job = pool.submit(portal)
                 mcp_job = pool.submit(image, "mcp", self.source / "portal/codex-session-share-mcp", "codey-mcp")
-                cc_job, cp_job = pool.submit(cloudcli), pool.submit(gateway)
+                cc_job, cp_job = pool.submit(self.build_cloudcli, commits, env), pool.submit(gateway)
                 images = dict([portal_job.result(), mcp_job.result()])
                 cc, cp = cc_job.result(), cp_job.result()
         manifest = {"release": self.release, "commits": commits, "cloudcli": cc, "gateway": cp, "images": images,
@@ -311,7 +396,7 @@ class Builder:
 
     def build_portal(self):
         """Portal-only release: no MCP, Workspace UI or node package build."""
-        with tempfile.TemporaryDirectory(prefix="codey-portal-", dir="/dev/shm") as temporary:
+        with self.test_directory("codey-portal-") as temporary:
             env = {
                 "PATH": os.environ["PATH"], "HOME": temporary, "TMPDIR": temporary,
                 "CI": "true", "NODE_ENV": "test", "NO_COLOR": "1",
