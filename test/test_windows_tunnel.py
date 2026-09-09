@@ -293,9 +293,103 @@ class WindowsTunnelTests(unittest.TestCase):
         self.assertIsNone(client.NoRedirect().redirect_request(None, None, 302, "", {}, "https://untrusted.test"))
 
     def test_login_detection_handles_cli_success_codes_that_still_require_sign_in(self):
-        for status, text in [(1, "error"), (0, "Not logged in"), (0, "Entra ID login required.")]:
+        for status, text in [(1, "error"), (0, "Not logged in"), (0, "Entra ID login required."),
+                             (0, ""), (0, "A window handle must be configured")]:
             self.assertFalse(installer.logged_in(SimpleNamespace(returncode=status, stdout=text)))
         self.assertTrue(installer.logged_in(SimpleNamespace(returncode=0, stdout="Logged in as the owner")))
+        self.assertFalse(installer.logged_in(SimpleNamespace(
+            returncode=0, stdout="Logged in as the owner", stderr="A window handle must be configured")))
+
+    def test_cached_devtunnel_login_is_reused_even_without_an_interactive_console(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "devtunnel.exe"
+            executable.write_bytes(b"fixture only")
+            args = SimpleNamespace(devtunnel_executable=str(executable))
+            for read_only in (False, True):
+                with self.subTest(read_only=read_only), \
+                        patch.object(installer.tunnel, "cli", return_value=SimpleNamespace(
+                            returncode=0, stdout="Logged in as the owner")) as show, \
+                        patch.object(installer, "interactive_auth_console", return_value=False) as console, \
+                        patch.object(installer.subprocess, "run") as login:
+                    self.assertEqual(installer.prepare_devtunnel(args, Path(directory), "owner", read_only=read_only),
+                                     executable.resolve())
+                    show.assert_called_once_with(executable.resolve(), ["user", "show"], check=False)
+                    console.assert_not_called()
+                    login.assert_not_called()
+
+    def test_headless_and_read_only_setup_report_browser_login_action_without_trying_any_authentication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "owner's tools" / "devtunnel.exe"
+            executable.parent.mkdir()
+            executable.write_bytes(b"fixture only")
+            args = SimpleNamespace(devtunnel_executable=str(executable))
+            for read_only, interactive in ((False, False), (True, False), (True, True)):
+                with self.subTest(read_only=read_only, interactive=interactive), \
+                        patch.object(installer.tunnel, "cli", return_value=SimpleNamespace(
+                            returncode=0, stdout="Entra ID login required.")), \
+                        patch.object(installer, "interactive_auth_console", return_value=interactive), \
+                        patch.object(installer.subprocess, "run") as login:
+                    with self.assertRaises(installer.DevTunnelBrowserLoginRequired) as failure:
+                        installer.prepare_devtunnel(args, Path(directory), "owner", read_only=read_only)
+                    login.assert_not_called()
+                    result = installer.setup_error(failure.exception)
+                    self.assertFalse(result["ok"])
+                    action = result["userAction"]
+                    self.assertIn("visible, non-admin PowerShell", action["where"])
+                    self.assertEqual(action["command"],
+                        "& '" + str(executable.resolve()).replace("'", "''") + "' user login --entra --use-browser-auth")
+                    self.assertFalse(action["deviceCodeFallback"])
+                    self.assertIn("az login does not sign in DevTunnel", action["note"])
+                    self.assertNotIn("--use-device-code-auth", action["command"])
+
+    def test_interactive_setup_uses_browser_auth_once_in_the_inherited_console_and_checks_cached_login(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "devtunnel.exe"
+            executable.write_bytes(b"fixture only")
+            args = SimpleNamespace(devtunnel_executable=str(executable))
+            responses = [SimpleNamespace(returncode=0, stdout="Not logged in"),
+                         SimpleNamespace(returncode=0, stdout="Logged in as the owner")]
+            from contextlib import redirect_stdout
+            with patch.object(installer.tunnel, "cli", side_effect=responses) as show, \
+                    patch.object(installer, "interactive_auth_console", return_value=True), \
+                    patch.object(installer.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as login, \
+                    redirect_stdout(io.StringIO()):
+                self.assertEqual(installer.prepare_devtunnel(args, Path(directory), "owner"), executable.resolve())
+            login.assert_called_once_with(
+                [str(executable.resolve()), "user", "login", "--entra", "--use-browser-auth"],
+                timeout=300, creationflags=0)
+            self.assertEqual(show.call_count, 2)
+
+    def test_failed_browser_login_never_retries_device_code_azure_login_or_clears_the_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "devtunnel.exe"
+            executable.write_bytes(b"fixture only")
+            args = SimpleNamespace(devtunnel_executable=str(executable))
+            from contextlib import redirect_stdout
+            for outcome in ("failure", "timeout", "not-cached"):
+                with self.subTest(outcome=outcome), \
+                        patch.object(installer.tunnel, "cli", return_value=SimpleNamespace(
+                            returncode=0, stdout="Not logged in")) as show, \
+                        patch.object(installer, "interactive_auth_console", return_value=True), \
+                        patch.object(installer.subprocess, "run",
+                            side_effect=subprocess.TimeoutExpired("private diagnostic", 300) if outcome == "timeout" else None,
+                            return_value=SimpleNamespace(returncode=1 if outcome == "failure" else 0)) as login, \
+                        redirect_stdout(io.StringIO()):
+                    with self.assertRaises(installer.DevTunnelBrowserLoginRequired) as failure:
+                        installer.prepare_devtunnel(args, Path(directory), "owner")
+                    login.assert_called_once()
+                    self.assertEqual(login.call_args.args[0][-2:], ["--entra", "--use-browser-auth"])
+                    self.assertEqual(show.call_count, 2 if outcome == "not-cached" else 1)
+                    self.assertNotIn("private diagnostic", json.dumps(installer.setup_error(failure.exception)))
+
+    def test_authentication_requires_live_interactive_streams_not_pipes_or_pythonw(self):
+        tty = SimpleNamespace(isatty=lambda: True)
+        pipe = SimpleNamespace(isatty=lambda: False)
+        for streams, expected in [((tty, tty, tty), True), ((pipe, tty, tty), False),
+                                  ((tty, pipe, tty), False), ((tty, tty, pipe), False), ((None, None, None), False)]:
+            with self.subTest(expected=expected), patch.object(installer.sys, "stdin", streams[0]), \
+                    patch.object(installer.sys, "stdout", streams[1]), patch.object(installer.sys, "stderr", streams[2]):
+                self.assertEqual(installer.interactive_auth_console(), expected)
 
     @unittest.skipUnless(os.name == "nt", "Windows sharing violations")
     def test_atomic_state_retries_sharing_violations_without_removing_old_state(self):

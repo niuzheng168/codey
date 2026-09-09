@@ -185,6 +185,27 @@ HTTPS 数据转发、DevTunnel 和续期四个隐藏登录任务。已有 `4141`
 本人在前台浏览器完成所需的 Entra 登录，后台任务不会弹登录或改用匿名隧道。
 服务不依赖节点持有 Azure ARM/RBAC 权限，续期经独立、仅限本节点的第三份 key。
 
+**Windows 登录必须走浏览器，不重试 device code。** 在原 Windows owner 的普通、
+可见、**非管理员 PowerShell** 中执行：
+
+```powershell
+devtunnel user login --entra --use-browser-auth
+devtunnel user show
+```
+
+CLI 不在 PATH 时使用安装器错误 JSON 的 `userAction.command`（已引用实际绝对路径），
+不修改全局 PATH。浏览器成功后重跑原安装命令即可；已有缓存会被安装器识别，**不要注销、
+反复登录、重建节点/隧道或重装 runtime**。用户已成功登录时直接继续当前阶段，不要为
+采用这份修复而重跑已完成的安装。
+
+AI 工具的无界面/重定向执行环境可能触发 `A window handle must be configured`，
+随后 CLI 尝试 device-code 登录；组织策略阻止 device code 时重试没有作用。
+安装器在非交互环境或只读恢复预检中不会发起登录，而是返回上述可见窗口操作指引；
+仅在交互终端中以显式 `--entra --use-browser-auth` 发起一次浏览器登录，并检查本 owner 的缓存。
+失败就停止，不回退裸 `user login`、`--use-device-code-auth`、集成 Windows 登录或匿名隧道。
+**`az login` 与 DevTunnel 登录独立**，不能代替该命令，也不要据此索取 Azure 部署权限。
+后台 host/renewal 继续使用本 owner 的缓存；需要 MFA/重新登录时由本人前台完成，不在任务中弹窗。
+
 `-UsageKeyFile` 只接受已存在的本地用量凭据文件路径，不接受 key 内容；简单的原 Codex
 本地代理 `cat <key-file>` 引用可自动发现。外部模型 provider 的凭据不会转交本地代理。
 认证不足时在安装前明确停止；不生成替代 key，也不要求用户把密码/token 发给运维。
@@ -248,7 +269,9 @@ Codex HOME/可执行文件。旧计划未保存显示名时，保留原命令的
 空闲端口和无现有 Codey 任务/worker。不会把未知目录或半成品构建冒充可复用 runtime。
 
 预检仅查询原隧道，不写 journal、不安装/更新 DevTunnel、不弹出登录。
-如账号已过期，先由本人正常完成登录，再重试；不以匿名访问或重建隧道绕过认证。
+如账号已过期，先由本人在普通非管理员 PowerShell 使用
+`devtunnel user login --entra --use-browser-auth` 完成登录，再重试；
+不使用 device code、`az login`、匿名访问或重建隧道绕过该步骤。
 Apply 仍只 `show` 原隧道、补齐缺少的 HTTPS `3001/8443`，不会发出 tunnel `create`。
 原 Node/CloudCLI build、enrollment、ticket、证书和私钥保持原字节；仅随后安装本节点
 四个登录任务、完成 TLS/SSO 自检，才生成 `output/codey-machine.json`。原状态另存审计备份。

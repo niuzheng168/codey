@@ -219,7 +219,41 @@ def download(url, destination, *, expected=None, limit=128 * 1024 ** 2):
 
 def logged_in(result):
     text = (result.stdout or "").lower()
-    return result.returncode == 0 and "not logged in" not in text and "login required" not in text
+    diagnostics = text + "\n" + (getattr(result, "stderr", "") or "").lower()
+    return (result.returncode == 0 and re.search(r"\blogged in\b", text) is not None
+            and not any(marker in diagnostics for marker in (
+                "not logged in", "login required", "a window handle must be configured",
+            )))
+
+
+class DevTunnelBrowserLoginRequired(Error):
+    def __init__(self, executable, code="devtunnel_owner_browser_login_required"):
+        super().__init__(code)
+        command = "& '" + str(executable).replace("'", "''") + "'"
+        self.user_action = {
+            "required": "interactive_browser_login",
+            "where": "A regular, visible, non-admin PowerShell window under the original Windows owner",
+            "command": command + " user login --entra --use-browser-auth",
+            "verifyCommand": command + " user show",
+            "then": "Rerun the same installer command, retaining -Resume if used. The cached DevTunnel login will be reused.",
+            "deviceCodeFallback": False,
+            "note": "Organization device-code policy cannot be fixed by retrying. az login does not sign in DevTunnel.",
+        }
+
+
+def interactive_auth_console():
+    try:
+        return all(stream is not None and stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr))
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def setup_error(error):
+    result = {"ok": False, "code": str(error) if isinstance(error, (Error, tunnel.TunnelError))
+              else "windows_tunnel_setup_failed_review_private_log"}
+    if isinstance(error, DevTunnelBrowserLoginRequired):
+        result["userAction"] = error.user_action
+    return result
 
 
 def prepare_devtunnel(args, home, sid, *, read_only=False):
@@ -255,19 +289,29 @@ def prepare_devtunnel(args, home, sid, *, read_only=False):
             raise Error("downloaded_devtunnel_must_have_a_valid_microsoft_signature")
     if not candidate.is_absolute() or not candidate.is_file() or candidate.suffix.lower() != ".exe":
         raise Error("native_devtunnel_required")
+    candidate = candidate.resolve()
     result = tunnel.cli(candidate, ["user", "show"], check=False)
     if not logged_in(result):
-        if read_only:
-            raise Error("devtunnel_owner_login_required_resume_does_not_change_login")
-        # This is the only interactive step. Never log credentials/device codes
-        # or run login in a scheduled task/background worker.
-        print("DevTunnel requires your own Microsoft/Entra login. Complete the browser sign-in.", flush=True)
-        result = subprocess.run([str(candidate), "user", "login", "--entra"], timeout=300)
+        # Agent pipes, hidden windows, pythonw and read-only resume must not start
+        # WAM/device-code prompts. The user performs the same browser command in
+        # their normal owner console; subsequent runs reuse that exact login cache.
+        if read_only or not interactive_auth_console():
+            raise DevTunnelBrowserLoginRequired(candidate)
+        print("Complete DevTunnel browser sign-in as the original Windows owner. No device-code fallback will be attempted.", flush=True)
+        try:
+            # Inherit the interactive console, never CREATE_NO_WINDOW/DEVNULL or
+            # capture_output. Explicit browser auth avoids the broker/HWND path.
+            result = subprocess.run(
+                [str(candidate), "user", "login", "--entra", "--use-browser-auth"],
+                timeout=300, creationflags=0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise DevTunnelBrowserLoginRequired(candidate, "devtunnel_browser_login_failed") from None
         if result.returncode:
-            raise Error("devtunnel_owner_login_required")
+            raise DevTunnelBrowserLoginRequired(candidate, "devtunnel_browser_login_failed")
         if not logged_in(tunnel.cli(candidate, ["user", "show"], check=False)):
-            raise Error("devtunnel_owner_login_required")
-    return candidate.resolve()
+            raise DevTunnelBrowserLoginRequired(candidate, "devtunnel_browser_login_not_cached_for_this_owner")
+    return candidate
 
 
 def resume_file(file, root):
@@ -695,6 +739,5 @@ if __name__ == "__main__":
     try:
         configure(parser.parse_args())
     except Exception as error:
-        print(json.dumps({"ok": False, "code": str(error) if isinstance(error, (Error, tunnel.TunnelError))
-                          else "windows_tunnel_setup_failed_review_private_log"}))
+        print(json.dumps(setup_error(error)))
         raise SystemExit(1)

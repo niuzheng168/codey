@@ -35,6 +35,11 @@
 
 - 下载得到说明 ZIP：回到新入口下载“完整机器配置 Skill”，不是手动旧 Skill。
 - 缺失 assets / hash 不匹配：停止执行，重新下载完整包；不拿别人的 enrollment 补齐。
+- Windows 登录报 `A window handle must be configured`，或组织阻止 device-code 登录：
+  不重复设备码/无窗口登录，也不以 `az login` 替代。原 owner 在普通、可见的非管理员
+  PowerShell 执行 `devtunnel user login --entra --use-browser-auth`，以 `devtunnel user show`
+  确认，再继续原安装阶段。CLI 不在 PATH 时使用错误 JSON 中已引用绝对路径的命令。
+  缓存登录已可用时不再发起登录，不注销、重建节点/隧道或重装服务。
 - 原代理 `/usage` 返回 500 “Failed to fetch Copilot usage”：这是配额上游错误，不等于
   Codex 聊天故障。按新版 Skill 的独立数据认证检查继续并报告配额警告，不改/重启代理。
   旧包若尚未创建安装状态/服务/隧道，从同一待配置身份重下修正版；不是创建新节点。
