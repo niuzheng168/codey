@@ -168,6 +168,31 @@ class MacNodeTests(unittest.TestCase):
             with self.assertRaises(service.ServiceError):
                 installer.normalize_registry(file, "https://registry.npmjs.org/")
 
+    def test_registry_rebasing_preserves_aliases_and_uses_the_actual_package_name(self):
+        with tempfile.TemporaryDirectory() as temp:
+            file = Path(temp) / "package-lock.json"
+            packages = {
+                "node_modules/wrap-ansi-cjs": {
+                    "name": "wrap-ansi", "version": "7.0.0", "integrity": "sha512-wrap-original",
+                    "resolved": "https://registry.npmjs.org/wrap-ansi/-/wrap-ansi-7.0.0.tgz",
+                },
+                "node_modules/scoped-alias": {
+                    "name": "@scope/package", "version": "1.2.3", "integrity": "sha512-scoped-original",
+                    "resolved": "https://registry.npmjs.org/@scope/package/-/package-1.2.3.tgz",
+                },
+            }
+            file.write_text(json.dumps({"lockfileVersion": 3, "packages": packages}))
+            installer.normalize_registry(file, "https://feed.example.test/public/npm/registry/")
+            actual = json.loads(file.read_text())
+            self.assertEqual(actual["lockfileVersion"], 3)
+            self.assertEqual(set(actual["packages"]), set(packages))
+            for key, before in packages.items():
+                after = actual["packages"][key]
+                self.assertEqual({k: v for k, v in after.items() if k != "resolved"},
+                                 {k: v for k, v in before.items() if k != "resolved"})
+                self.assertEqual(after["resolved"], "https://feed.example.test/public/npm/registry/"
+                                 + before["resolved"].removeprefix("https://registry.npmjs.org/"))
+
     def test_launchd_jobs_are_user_login_scoped_and_renewal_is_periodic(self):
         config = {"worker": "/private/worker.py", "releaseRoot": "/private/release", "configRoot": "/private/state"}
         workspace = plistlib.loads(installer.launch_agent("com.codey.test.workspace", "workspace", config, "/private/runtime.json").encode())
