@@ -190,14 +190,43 @@ def desktop_codex(home):
     raise Error("Provide --codex-bin pointing to the reviewed installed Codex native executable")
 
 
+def normalize_tunnel(value):
+    """Normalize CLI records, never token claims; require an explicit region."""
+    record = value.get("tunnel", value) if isinstance(value, dict) else None
+    if not isinstance(record, dict) or not isinstance(record.get("tunnelId"), str):
+        raise Error("Invalid DevTunnel response")
+    tunnel_id, cluster_id = record["tunnelId"], record.get("clusterId")
+    if "." in tunnel_id:
+        parts = tunnel_id.split(".")
+        if len(parts) != 2:
+            raise Error("Invalid qualified DevTunnel ID")
+        tunnel_id, suffix = parts
+        if "clusterId" in record and cluster_id != suffix:
+            raise Error("DevTunnel returned conflicting regions")
+        cluster_id = suffix
+    if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,58}[a-z0-9]", tunnel_id)
+            or not isinstance(cluster_id, str)
+            or not re.fullmatch(r"[a-z][a-z0-9]{1,15}", cluster_id)):
+        raise Error("Invalid DevTunnel coordinates")
+    return {**record, "tunnelId": tunnel_id, "clusterId": cluster_id}
+
+
 def token_bound_tunnel(executable, enrollment, config_root):
     state_file = config_root / "tunnel.json"
     requested = "codey-" + enrollment["nodeId"]
     description = "Codey macOS " + enrollment["nodeId"]
+    pinned = None
     if state_file.exists():
         state = service.private_json(state_file)
-        if state.get("requested") != requested:
+        if not isinstance(state, dict) or state.get("requested") != requested:
             raise Error("Existing tunnel journal belongs to another node")
+        if set(state) != {"requested"}:
+            cluster = state.get("clusterId")
+            if (state.get("tunnelId") != requested or not isinstance(cluster, str)
+                    or not re.fullmatch(r"[a-z][a-z0-9]{1,15}", cluster)
+                    or state.get("qualifiedId") != requested + "." + cluster):
+                raise Error("Invalid existing tunnel journal; nothing was replaced")
+            pinned = (requested, cluster)
         result = run([executable, "show", state.get("qualifiedId", requested), "--json"], check=False)
         if result.returncode:
             raise Error("The recorded tunnel is unavailable; do not create another identity")
@@ -206,24 +235,28 @@ def token_bound_tunnel(executable, enrollment, config_root):
         # exact name instead of creating a second tunnel.
         write_private(state_file, {"requested": requested})
         result = run([executable, "create", requested, "--description", description, "--json"])
-    value = json.loads(result.stdout)
-    tunnel = value.get("tunnel", value)
-    tunnel_id, cluster_id = tunnel.get("tunnelId", ""), tunnel.get("clusterId", "")
-    if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,58}[a-z0-9]", tunnel_id)
-            or not re.fullmatch(r"[a-z][a-z0-9]{1,15}", cluster_id)
-            or tunnel.get("description") != description):
+    tunnel = normalize_tunnel(json.loads(result.stdout))
+    tunnel_id, cluster_id = tunnel["tunnelId"], tunnel["clusterId"]
+    if tunnel_id != requested or tunnel.get("description") != description:
         raise Error("The tunnel is not bound to this installation")
+    if pinned is not None and pinned != (tunnel_id, cluster_id):
+        raise Error("The recorded tunnel binding changed; nothing was replaced")
     qualified = tunnel_id + "." + cluster_id
-    write_private(state_file, {"requested": requested, "qualifiedId": qualified, "tunnelId": tunnel_id, "clusterId": cluster_id})
-    ports = tunnel.get("ports") or []
-    if any(entry.get("portNumber") not in (3001, 8443) for entry in ports):
+    ports = tunnel.get("ports", [])
+    if (not isinstance(ports, list) or any(not isinstance(entry, dict)
+            or type(entry.get("portNumber")) is not int
+            or entry["portNumber"] not in (3001, 8443) for entry in ports)):
         raise Error("This node tunnel contains unrelated ports")
+    missing = []
     for port in (3001, 8443):
-        existing = next((entry for entry in ports if entry.get("portNumber") == port), None)
-        if existing and existing.get("protocol") != "https":
+        matches = [entry for entry in ports if entry["portNumber"] == port]
+        if len(matches) > 1 or (matches and matches[0].get("protocol") != "https"):
             raise Error("Existing tunnel port is not HTTPS")
-        if not existing:
-            run([executable, "port", "create", qualified, "--port-number", str(port), "--protocol", "https", "--json"])
+        if not matches:
+            missing.append(port)
+    write_private(state_file, {"requested": requested, "qualifiedId": qualified, "tunnelId": tunnel_id, "clusterId": cluster_id})
+    for port in missing:
+        run([executable, "port", "create", qualified, "--port-number", str(port), "--protocol", "https", "--json"])
     return tunnel_id, cluster_id
 
 
