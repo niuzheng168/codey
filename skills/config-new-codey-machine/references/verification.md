@@ -54,6 +54,11 @@
   Node/后端 build、enrollment、ticket 与 TLS 原字节未变，未重跑下载/npm/构建或创建新隧道。
   CLI 的 qualified tunnel ID 与独立 cluster 字段必须一致；不能手改 journal 或跳过身份检查。
   已有 runtime、任务/worker 或激活文件不在此恢复窗口内；成功重跑仍只验收。
+- Windows 已添加且能查看历史，但报 native Codex executable unavailable：
+  检查安装器保存的 Desktop 版本化缓存路径是否已消失；按
+  [已接入节点的原生 Codex 修复](windows-codex-repair.md) 使用独立 repair 入口，
+  不重跑首次安装/Resume，不增加 PATH fallback。验收私有副本及所有 companion SHA-256、
+  原生 stdio/model catalog 和实际 Codey 回复；原代理、Desktop、身份/隧道、构建不变。
 - Windows 防火墙阻止私网访问：先审核精确来源/IP/端口并获得用户确认，不自动放行；
   现有 Dev Tunnel 节点不用这个首次 VNet 安装器重装。
 - 本机通过、门户添加失败：VNet 包检查 PE/LB/NSG/UDR/ACA egress；DevTunnel 包检查

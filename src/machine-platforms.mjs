@@ -8,7 +8,10 @@ export const MACHINE_PLATFORMS = Object.freeze([
     files: ["scripts/setup-windows.ps1", "scripts/configure-windows.py",
       "scripts/windows-service.py", "scripts/windows-tasks.ps1",
       "scripts/configure-windows-tunnel.py", "scripts/windows-tunnel-client.py",
-      "scripts/windows-tunnel-service.py", "scripts/windows-tunnel-tasks.ps1"],
+      "scripts/windows-tunnel-service.py", "scripts/windows-tunnel-tasks.ps1",
+      "scripts/windows-codex-runtime.py", "scripts/repair-windows-codex.py",
+      "scripts/repair-windows-codex.ps1", "scripts/windows-codex-repair-tasks.ps1",
+      "references/windows-codex-repair.md"],
   }),
   Object.freeze({
     id: "linux-x64", name: "Linux", entrypoint: "scripts/setup-linux.sh",

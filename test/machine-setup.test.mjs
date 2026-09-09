@@ -172,7 +172,8 @@ test("Windows and Mac native packages need no VNet and activate only after scope
     assert.ok(response.headers.get("content-disposition").includes(`-${platform === "windows-x64" ? "windows" : platform}-n-`));
     const files = unzip(Buffer.from(await response.arrayBuffer()));
     for (const file of platform === "windows-x64"
-      ? ["setup-windows.ps1", "configure-windows-tunnel.py", "windows-tunnel-service.py", "windows-tunnel-client.py"]
+      ? ["setup-windows.ps1", "configure-windows-tunnel.py", "windows-tunnel-service.py", "windows-tunnel-client.py",
+        "windows-codex-runtime.py", "repair-windows-codex.py", "repair-windows-codex.ps1", "windows-codex-repair-tasks.ps1"]
       : ["setup-macos.sh", "configure-macos.py", "macos-service.py"]) {
       assert.ok(files.has(`config-new-codey-machine/scripts/${file}`));
     }
@@ -181,6 +182,8 @@ test("Windows and Mac native packages need no VNet and activate only after scope
       assert.match(files.get("config-new-codey-machine/SKILL.md").toString(), /Copilot 配额不是聊天健康检查/);
       assert.match(files.get("config-new-codey-machine/scripts/configure-windows-tunnel.py").toString(), /probe\("\/token-usage"\)/);
       assert.match(files.get("config-new-codey-machine/scripts/configure-machine.py").toString(), /copilot_quota_unavailable_model_inference_not_tested/);
+      assert.ok(files.has("config-new-codey-machine/references/windows-codex-repair.md"));
+      assert.match(files.get("config-new-codey-machine/scripts/configure-windows-tunnel.py").toString(), /native\.pin\(codex, root, node_id/);
     }
     assert.ok(!files.has(`config-new-codey-machine/scripts/${platform === "windows-x64" ? "setup-macos.sh" : "setup-windows.ps1"}`));
     assert.ok(!files.has("config-new-codey-machine/scripts/setup-linux.sh"));

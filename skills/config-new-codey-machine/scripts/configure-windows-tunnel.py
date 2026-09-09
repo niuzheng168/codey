@@ -33,6 +33,7 @@ def module(name, file):
 windows = module("codey_windows_install_helpers", "configure-windows.py")
 tunnel = module("codey_windows_tunnel_client", "windows-tunnel-client.py")
 worker = module("codey_windows_tunnel_worker", "windows-tunnel-service.py")
+native = module("codey_windows_native_codex", "windows-codex-runtime.py")
 Error = windows.SetupError
 
 
@@ -249,7 +250,7 @@ def interactive_auth_console():
 
 
 def setup_error(error):
-    result = {"ok": False, "code": str(error) if isinstance(error, (Error, tunnel.TunnelError))
+    result = {"ok": False, "code": str(error) if isinstance(error, (Error, tunnel.TunnelError, native.NativeCodexError))
               else "windows_tunnel_setup_failed_review_private_log"}
     if isinstance(error, DevTunnelBrowserLoginRequired):
         result["userAction"] = error.user_action
@@ -564,13 +565,21 @@ def configure(args):
     if resuming:
         if str(codex_home) != state.get("codexHome"):
             raise Error("resume_codex_home_mismatch")
-        if not args.codex_executable:
+        if state.get("nativeCodex"):
+            native.verify(state["nativeCodex"], root, node_id)
+            if args.codex_executable and args.codex_executable not in (
+                    state["codexExecutable"], state["nativeCodex"]["sourceExecutable"]):
+                raise Error("resume_existing_owner_tools_must_match_original_plan")
+            args.codex_executable = state["nativeCodex"]["executable"]
+        elif not args.codex_executable:
             args.codex_executable = state.get("codexExecutable")
         if not args.openssl:
             args.openssl = state.get("opensslExecutable")
     codex, openssl, pythonw = existing_tools(args, home)
     if resuming and (str(codex) != state.get("codexExecutable") or str(openssl) != state.get("opensslExecutable")):
         raise Error("resume_existing_owner_tools_must_match_original_plan")
+    native_codex = (state["nativeCodex"] if resuming and state.get("nativeCodex")
+                    else native.pin(codex, root, node_id))
     proof = gateway_proof()
     if proof["ownerSid"] != context["sid"]:
         raise Error("4141_process_belongs_to_another_owner")
@@ -589,7 +598,8 @@ def configure(args):
     plan = {
         "nodeId": node_id, "platform": "windows-x64", "mode": "private-devtunnel-existing-model", "name": name,
         "computerName": computer, "ownerSid": context["sid"], "releaseId": manifest["releaseId"],
-        "protectedModelProcess": proof, "codexExecutable": str(codex), "codexHome": str(codex_home),
+        "protectedModelProcess": proof, "codexExecutable": native_codex["executable"], "codexHome": str(codex_home),
+        "sourceCodexExecutable": native_codex["sourceExecutable"], "nativeCodex": native_codex,
         "opensslExecutable": str(openssl), "privateListeners": ["127.0.0.1:3001", "127.0.0.1:8443"],
         "occupiedPorts": occupied, "services": list(worker.COMPONENTS),
         "networkChanges": "Create only a node-bound private DevTunnel with two HTTPS ports after approval",
@@ -626,9 +636,15 @@ def configure(args):
     else:
         windows.private_directory(config_root, context["sid"])
         windows.private_directory(root, context["sid"])
-        tunnel.write_state(state_file, {**plan, "ready": False})
     tasks_created = False
     try:
+        if not (resuming and state.get("nativeCodex")):
+            pinned = native.pin(codex, root, node_id, apply=True)
+            if pinned != native_codex:
+                raise Error("selected_native_codex_changed_since_plan_no_tasks_created")
+        native.verify(native_codex, root, node_id)
+        codex = Path(native_codex["executable"])
+        tunnel.write_state(state_file, {**plan, "ready": False})
         releases = root / "releases"
         release = windows.within(releases / manifest["releaseId"], releases)
         if not resuming:
@@ -654,8 +670,8 @@ def configure(args):
                    else tunnel.ensure_tunnel(devtunnel, enrollment, config_root))
         binaries = root / "bin"
         binaries.mkdir()
-        for name in ("windows-tunnel-service.py", "windows-tunnel-client.py", "windows-service.py"):
-            shutil.copyfile(SCRIPT / name, binaries / name)
+        for helper_name in ("windows-tunnel-service.py", "windows-tunnel-client.py", "windows-service.py"):
+            shutil.copyfile(SCRIPT / helper_name, binaries / helper_name)
         node = release / "node/node.exe"
         config = {
             "schema": 1, "kind": "windows-devtunnel", "nodeId": node_id, "ownerSid": context["sid"],
@@ -664,7 +680,8 @@ def configure(args):
             "runnerPath": str(binaries / "windows-tunnel-service.py"),
             "ownerHelper": str(binaries / "windows-service.py"),
             "tunnelHelper": str(binaries / "windows-tunnel-client.py"),
-            "codexExe": str(codex), "codexHome": str(codex_home), "devtunnelExe": str(devtunnel),
+            "codexExe": str(codex), "nativeCodex": native_codex,
+            "codexHome": str(codex_home), "devtunnelExe": str(devtunnel),
             "workspaceEntry": str(release / "cloudcli/dist-server/server/index.js"),
             "dataEntry": str(release / "portal-node/node-relay/server.mjs"),
             "databasePath": str(config_root / "auth.db"), "workspaceRoot": str(workspace),
@@ -678,6 +695,7 @@ def configure(args):
         config["fileHashes"] = {config[field]: tunnel.digest(config[field]) for field in (
             "runnerPath", "ownerHelper", "tunnelHelper", "nodeExe", "codexExe", "devtunnelExe", "workspaceEntry", "dataEntry",
         )}
+        config["fileHashes"].update(native.hashes(native_codex))
         tunnel.write_state(runtime_file, config)
         for component in worker.COMPONENTS:
             worker.validate(config, component, context)

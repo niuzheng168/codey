@@ -236,6 +236,22 @@ Workspace/data 只监听 `127.0.0.1:3001/8443`；不打开入站规则、22/4141
 失败仅撤销本次创建的精确任务，保留同一身份、隧道、私有构建日志和目录供审查。
 未完成安装不自动覆盖；成功重跑只验收，不重启或升级。
 
+#### Windows：已接入，但原生 Codex 可执行文件不可用
+
+出现 `The configured native Codex executable is unavailable; no PATH fallback was started.`
+时，先核对已配置的绝对路径。旧安装器曾直接绑定 Desktop 的 `bin/<版本目录>/codex.exe`；
+该缓存文件消失后仍可查看历史/连通 Workspace，但不能启动聊天。
+新版首次安装把已选定的原生 `codex.exe` 和允许的同目录辅助程序复制到本节点
+`native-codex/<内容摘要>/`，逐文件固定 SHA-256，不随 Desktop 缓存更新自动换版，
+不复制 auth/config 或修改全局 PATH，也不启用 PATH/exec fallback。
+
+**已成功添加的节点不要重跑首次安装或 `-Resume`。** 使用独立
+`scripts/repair-windows-codex.ps1`，按
+[已接入节点的原生 Codex 修复](references/windows-codex-repair.md) 先计划，再在原 owner
+的普通 PowerShell 应用。仅重启已验证归属且空闲的 Workspace 和续期任务，
+复用既有节点、隧道、证书及已构建 runtime；不重建服务、不改 Desktop/模型代理。
+这不是自动升级器：后续换 Codex 版本也必须显式选择并校验新二进制。
+
 #### Windows：恢复隧道绑定阶段的失败
 
 DevTunnel CLI `1.0.2030` 可返回 `tunnelId: "<id>.<cluster>"` 而不另给 `clusterId`。
