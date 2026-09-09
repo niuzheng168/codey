@@ -27,6 +27,11 @@ DEPLOY_API = "2022-09-01"
 SCHEMA = "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#"
 MARKER = "codey-windows-automation-v1"
 CREATE_NO_WINDOW = 0x08000000
+LOADED_WORKER_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+TUNNEL_HEALTH_INTERVAL_SECONDS = 60
+TUNNEL_STARTUP_GRACE_SECONDS = 90
+TUNNEL_MISSING_HOST_THRESHOLD = 3
+TUNNEL_RECOVERY_COOLDOWN_SECONDS = 300
 
 
 class SafeError(Exception):
@@ -35,6 +40,10 @@ class SafeError(Exception):
 
 class InventoryUnavailable(SafeError):
     """A transient observation failure is not evidence that a service exited."""
+
+
+class TunnelHealthUnavailable(SafeError):
+    """Unknown service/authentication state must not trigger a process restart."""
 
 
 def require(value, code):
@@ -197,7 +206,7 @@ def singleton(file):
 def status(config, component, state, **fields):
     # Whitelisted structured state only: never child stdout, HTTP bodies, or exceptions.
     record = {"schema": 1, "component": component, "state": state, "updatedAt": now(),
-              "workerPid": os.getpid(), **fields}
+              "workerPid": os.getpid(), "workerSourceSha256": LOADED_WORKER_SHA256, **fields}
     save(Path(config["stateRoot"]) / (component + ".json"), record)
     return record
 
@@ -233,6 +242,7 @@ def load_config(file, enforce_context=True):
         context = windows_context()
         require(context["sid"] == config["ownerSid"], "wrong_windows_owner")
         require(not context["elevated"], "worker_must_not_be_elevated")
+    config["_configFile"] = str(Path(file).resolve())
     return config, runtime
 
 
@@ -534,11 +544,11 @@ def matching_processes(config, runtime, component):
         })
       ConvertTo-Json -InputObject $rows -Compress
     """
-    env = {**os.environ,
+    env = {**powershell_child_environment(),
            "CODEY_WATCH_PROCESS_NAME": "devtunnel.exe" if component == "tunnel" else "node.exe",
            "CODEY_WATCH_EXECUTABLE": runtime["devtunnelExe" if component == "tunnel" else "nodeExe"]}
     try:
-        completed = subprocess.run([config["powershellExe"], "-NoProfile", "-NonInteractive", "-Command", script],
+        completed = subprocess.run([native_powershell(config["powershellExe"]), "-NoProfile", "-NonInteractive", "-Command", script],
                                    capture_output=True, text=True, encoding="utf-8", errors="replace",
                                    timeout=30, creationflags=CREATE_NO_WINDOW, env=env)
     except subprocess.TimeoutExpired:
@@ -584,20 +594,146 @@ def inventory_with_retry(config, runtime, component, last_known_pid=None):
             delay = min(delay * 2, 60)
 
 
+def require_current_worker_before_launch(config):
+    """Never cold-start a service using code/config superseded on disk.
+
+    Running applications are not stopped for a code update. Once no matching
+    application is running, exit nonzero so Task Scheduler reloads the worker.
+    The installation path/hash and task action must still pass load_config().
+    """
+    expected = config.get("fileHashes", {}).get("workerPath")
+    if expected is None:  # Unit-level supervisor fixtures bypass load_config().
+        return
+    require(LOADED_WORKER_SHA256 == expected.lower() and
+            hashlib.sha256(Path(config["workerPath"]).read_bytes()).hexdigest() == expected.lower(),
+            "watchdog_code_changed_restart_required")
+    current = read(config["_configFile"])
+    require(current and current.get("fileHashes") == config["fileHashes"] and
+            current.get("runtimeConfig") == config["runtimeConfig"],
+            "watchdog_configuration_changed_restart_required")
+
+
+def tunnel_host_connections(runtime):
+    """Read only the configured tunnel's actual host count, never its tokens."""
+    try:
+        result = subprocess.run(
+            [runtime["devtunnelExe"], "show", runtime["tunnelId"], "--json"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=20, creationflags=CREATE_NO_WINDOW,
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        raise TunnelHealthUnavailable("tunnel_health_query_unavailable") from None
+    if result.returncode != 0 or len(result.stdout) > 16384:
+        raise TunnelHealthUnavailable("tunnel_health_query_failed")
+    try:
+        value = json.loads(result.stdout)["tunnel"]
+        count = value["hostConnections"]
+        if value["tunnelId"] != runtime["tunnelId"] or type(count) is not int or not 0 <= count <= 64:
+            raise ValueError()
+        return count
+    except (KeyError, ValueError, TypeError):
+        raise TunnelHealthUnavailable("tunnel_health_invalid_response") from None
+
+
+def stop_disconnected_tunnel(config, runtime, pid):
+    """Stop only a re-verified tunnel host, holding its handle against PID reuse."""
+    require(os.name == "nt" and type(pid) is int and pid > 0, "invalid_tunnel_recovery_target")
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    kernel.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.OpenProcess(0x1000 | 0x100000 | 0x0001, False, pid)
+    if not handle:
+        return False
+    try:
+        image = ctypes.create_unicode_buffer(32768)
+        length = wintypes.DWORD(len(image))
+        require(kernel.QueryFullProcessImageNameW(handle, 0, image, ctypes.byref(length)),
+                "tunnel_recovery_identity_unavailable")
+        require(ntpath.normcase(image.value) == ntpath.normcase(runtime["devtunnelExe"]),
+                "tunnel_recovery_executable_mismatch")
+        # Fresh command-line and SID checks, not just an earlier PID observation.
+        if matching_processes(config, runtime, "tunnel") != [pid]:
+            return False
+        require(kernel.TerminateProcess(handle, 1), "tunnel_recovery_stop_failed")
+        require(kernel.WaitForSingleObject(handle, 5000) == 0, "tunnel_recovery_exit_timeout")
+        return True
+    finally:
+        kernel.CloseHandle(handle)
+
+
+class TunnelHostMonitor:
+    """Detect a live CLI process whose relay host connection has disappeared."""
+    def __init__(self, config, runtime):
+        self.config, self.runtime = config, runtime
+        self.pid = None
+        self.first_observed = 0
+        self.next_check = 0
+        self.missing = 0
+        self.last_recovery = None
+
+    def check(self, pid):
+        timestamp = time.monotonic()
+        if pid != self.pid:
+            self.pid, self.first_observed = pid, timestamp
+            self.next_check, self.missing = 0, 0
+        if timestamp < self.next_check:
+            return False
+        self.next_check = timestamp + TUNNEL_HEALTH_INTERVAL_SECONDS
+        try:
+            connections = tunnel_host_connections(self.runtime)
+        except TunnelHealthUnavailable as error:
+            self.missing = 0
+            status(self.config, "tunnel-health", "unknown", pid=pid, code=str(error),
+                   processRestarted=False)
+            return False
+        self.missing = self.missing + 1 if connections == 0 else 0
+        ready = (self.missing >= TUNNEL_MISSING_HOST_THRESHOLD and
+                 timestamp - self.first_observed >= TUNNEL_STARTUP_GRACE_SECONDS and
+                 (self.last_recovery is None or
+                  timestamp - self.last_recovery >= TUNNEL_RECOVERY_COOLDOWN_SECONDS))
+        status(self.config, "tunnel-health", "connected" if connections else "relay_disconnected",
+               pid=pid, hostConnections=connections, consecutiveMissing=self.missing,
+               processRestarted=False)
+        if not ready:
+            return False
+        # An inventory failure is not permission to terminate anything.
+        try:
+            restarted = stop_disconnected_tunnel(self.config, self.runtime, pid)
+        except InventoryUnavailable as error:
+            status(self.config, "tunnel-health", "unknown", pid=pid, code=str(error),
+                   processRestarted=False)
+            return False
+        if restarted:
+            self.last_recovery, self.missing = timestamp, 0
+            status(self.config, "tunnel-health", "restarting_disconnected_host", pid=pid,
+                   hostConnections=0, processRestarted=True, workspaceRestarted=False,
+                   networkConfigurationChanged=False)
+        return restarted
+
+
 def supervise(config, runtime, component):
     delay = 5
+    monitor = TunnelHostMonitor(config, runtime) if component == "tunnel" else None
     while True:
         found = inventory_with_retry(config, runtime, component)
         if found:
             pid = found[0]
             status(config, component, "adopted", pid=pid, context=windows_context())
             while process_alive(pid) and inventory_with_retry(config, runtime, component, pid) == [pid]:
+                if monitor and monitor.check(pid):
+                    break
                 time.sleep(15)
                 status(config, component, "adopted", pid=pid, context=windows_context())
             status(config, component, "restart_pending")
             # A user may already have replaced the exited manual process.
             # Reconcile a fresh inventory before starting a new host.
             continue
+        require_current_worker_before_launch(config)
         launcher = config["workspaceLauncher" if component == "workspace" else "tunnelLauncher"]
         # The existing launchers enforce SID, loopback binding, hashes, and port ownership.
         # Raw child output is deliberately discarded, not persisted as potentially sensitive logs.
@@ -609,6 +745,10 @@ def supervise(config, runtime, component):
             env=powershell_child_environment()) as child:
             started = time.monotonic()
             while child.poll() is None:
+                if monitor:
+                    hosts = inventory_with_retry(config, runtime, component)
+                    if hosts:
+                        monitor.check(hosts[0])
                 status(config, component, "supervising", launcherPid=child.pid, context=windows_context())
                 time.sleep(15)
             delay = 5 if time.monotonic() - started > 120 else min(delay * 2, 300)

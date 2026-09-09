@@ -387,7 +387,8 @@ def configure(args):
                     "DATABASE_PATH": str(data / "cloudcli/auth.db"), "CODEY_PORTAL_NODE_ID": enrollment["nodeId"],
                     "CODEY_PORTAL_USERNAME": enrollment["username"], "CODEY_PORTAL_PRINCIPAL_ID": enrollment["principalId"],
                     "CODEY_PORTAL_SSO_KEY": enrollment["workspaceSsoKey"], "CODEY_PORTAL_TLS_CERT": str(cert),
-                    "CODEY_PORTAL_TLS_KEY": str(key), "CODEY_CODEX_EXECUTABLE": str(codex)}},
+                    "CODEY_PORTAL_TLS_KEY": str(key), "CODEY_CODEX_EXECUTABLE": str(codex),
+                    "CODEY_CODEX_RUNTIME_TRANSPORT": "stdio"}},
             },
         }
         write_json(task_config, config_value)

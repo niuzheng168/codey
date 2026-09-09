@@ -1,6 +1,7 @@
 """Offline tests; no scheduled tasks, authentication, or Azure changes."""
 import base64
 import copy
+import hashlib
 from datetime import datetime, timezone
 import importlib.util
 import json
@@ -453,12 +454,119 @@ class SupervisorTests(unittest.TestCase):
         with patch.object(worker, "matching_processes", side_effect=[[123], [456], [456]]), \
              patch.object(worker, "process_alive", side_effect=[False, True]), \
              patch.object(worker, "windows_context", return_value={}), patch.object(worker, "status") as status, \
+             patch.object(worker, "tunnel_host_connections", return_value=1), \
              patch.object(worker.time, "sleep", side_effect=self.Finished()), \
              patch.object(worker.subprocess, "Popen") as popen:
             with self.assertRaises(self.Finished):
                 worker.supervise(CONFIG, RUNTIME, "tunnel")
         status.assert_any_call(CONFIG, "tunnel", "adopted", pid=456, context={})
         popen.assert_not_called()
+
+
+class TunnelHealthTests(unittest.TestCase):
+    def test_host_count_is_bound_to_the_existing_tunnel_and_never_returns_raw_output(self):
+        reply = {"tunnel": {"tunnelId": RUNTIME["tunnelId"], "hostConnections": 0}}
+        completed = Mock(returncode=0, stdout=json.dumps(reply))
+        with patch.object(worker.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(worker.tunnel_host_connections(RUNTIME), 0)
+        self.assertEqual(run.call_args.args[0], [
+            RUNTIME["devtunnelExe"], "show", RUNTIME["tunnelId"], "--json"])
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs["creationflags"], worker.CREATE_NO_WINDOW)
+        for value in [
+            {"tunnel": {"tunnelId": "someone-else.jpe1", "hostConnections": 0}},
+            {"tunnel": {"tunnelId": RUNTIME["tunnelId"], "hostConnections": True}},
+            {"tunnel": {"tunnelId": RUNTIME["tunnelId"], "hostConnections": -1}},
+            {}, {"private": "DO_NOT_LOG_SECRET"},
+        ]:
+            with patch.object(worker.subprocess, "run", return_value=Mock(returncode=0, stdout=json.dumps(value))):
+                with self.assertRaises(worker.TunnelHealthUnavailable) as raised:
+                    worker.tunnel_host_connections(RUNTIME)
+                self.assertNotIn("DO_NOT_LOG_SECRET", str(raised.exception))
+        with patch.object(worker.subprocess, "run", return_value=Mock(returncode=1, stdout="DO_NOT_LOG_SECRET")):
+            with self.assertRaisesRegex(worker.TunnelHealthUnavailable, "tunnel_health_query_failed"):
+                worker.tunnel_host_connections(RUNTIME)
+
+    def test_live_pid_with_three_confirmed_missing_host_connections_is_recovered(self):
+        clock = [0]
+        monitor = worker.TunnelHostMonitor(CONFIG, RUNTIME)
+        with patch.object(worker.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(worker, "tunnel_host_connections", return_value=0) as health, \
+             patch.object(worker, "stop_disconnected_tunnel", return_value=True) as stop, \
+             patch.object(worker, "status") as status:
+            for timestamp in (0, 15, 59, 60, 90, 119):
+                clock[0] = timestamp
+                self.assertFalse(monitor.check(123))
+            stop.assert_not_called()
+            clock[0] = 120
+            self.assertTrue(monitor.check(123))
+        self.assertEqual(health.call_count, 3, "Do not poll the cloud on every 15-second PID check")
+        stop.assert_called_once_with(CONFIG, RUNTIME, 123)
+        status.assert_any_call(CONFIG, "tunnel-health", "restarting_disconnected_host", pid=123,
+                               hostConnections=0, processRestarted=True, workspaceRestarted=False,
+                               networkConfigurationChanged=False)
+
+    def test_healthy_or_unknown_observations_reset_the_missing_host_streak(self):
+        clock = [0]
+        monitor = worker.TunnelHostMonitor(CONFIG, RUNTIME)
+        values = [0, 0, worker.TunnelHealthUnavailable("tunnel_health_query_failed"), 0, 1, 0]
+        with patch.object(worker.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(worker, "tunnel_host_connections", side_effect=values), \
+             patch.object(worker, "stop_disconnected_tunnel") as stop, patch.object(worker, "status"):
+            for timestamp in range(0, 360, 60):
+                clock[0] = timestamp
+                self.assertFalse(monitor.check(123))
+        stop.assert_not_called()
+
+    def test_a_replacement_host_gets_its_own_grace_period_and_recovery_has_a_cooldown(self):
+        clock = [0]
+        monitor = worker.TunnelHostMonitor(CONFIG, RUNTIME)
+        with patch.object(worker.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(worker, "tunnel_host_connections", return_value=0), \
+             patch.object(worker, "stop_disconnected_tunnel", return_value=True) as stop, \
+             patch.object(worker, "status"):
+            for timestamp in (0, 60, 120):
+                clock[0] = timestamp
+                monitor.check(123)
+            stop.assert_called_once_with(CONFIG, RUNTIME, 123)
+            for timestamp in (121, 181, 241, 301, 361):
+                clock[0] = timestamp
+                self.assertFalse(monitor.check(456))
+            self.assertEqual(stop.call_count, 1)
+            clock[0] = 421
+            self.assertTrue(monitor.check(456))
+            self.assertEqual(stop.call_count, 2)
+
+    def test_an_inventory_race_does_not_stop_a_replacement_or_unknown_process(self):
+        clock = [0]
+        for result in (False, worker.InventoryUnavailable("process_inventory_timeout")):
+            monitor = worker.TunnelHostMonitor(CONFIG, RUNTIME)
+            with patch.object(worker.time, "monotonic", side_effect=lambda: clock[0]), \
+                 patch.object(worker, "tunnel_host_connections", return_value=0), \
+                 patch.object(worker, "stop_disconnected_tunnel", side_effect=(
+                     result if isinstance(result, Exception) else lambda *_: result)), \
+                 patch.object(worker, "status"):
+                for timestamp in (0, 60, 120):
+                    clock[0] = timestamp
+                    self.assertFalse(monitor.check(123))
+
+    def test_a_stale_resident_worker_cannot_launch_with_new_disk_code_or_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, settings = root / "worker.py", root / "config.json"
+            source.write_bytes(b"reviewed worker")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            config = {"workerPath": str(source), "runtimeConfig": "reviewed-runtime.json",
+                      "fileHashes": {"workerPath": digest}, "_configFile": str(settings)}
+            settings.write_text(json.dumps(config), encoding="utf-8")
+            with patch.object(worker, "LOADED_WORKER_SHA256", digest):
+                worker.require_current_worker_before_launch(config)
+                settings.write_text(json.dumps({**config, "runtimeConfig": "next-runtime.json"}), encoding="utf-8")
+                with self.assertRaisesRegex(worker.SafeError, "watchdog_configuration_changed"):
+                    worker.require_current_worker_before_launch(config)
+                source.write_bytes(b"new worker not yet loaded")
+                with self.assertRaisesRegex(worker.SafeError, "watchdog_code_changed"):
+                    worker.require_current_worker_before_launch(config)
 
 
 class WorkspaceLauncherTests(unittest.TestCase):

@@ -61,6 +61,7 @@ $env:CODEY_PORTAL_TLS_KEY = $config.tlsPrivateKey
 $env:DATABASE_PATH = $config.databasePath
 $env:CODEX_HOME = $config.codexHome
 $env:CODEY_CODEX_EXECUTABLE = $config.codexExe
+$env:CODEY_CODEX_RUNTIME_TRANSPORT = 'stdio'
 $env:WORKSPACES_ROOT = $config.workspaceRoot
 $env:VITE_IS_PLATFORM = 'false'
 $env:PATH = (Split-Path -Parent $config.nodeExe) + ';' +
