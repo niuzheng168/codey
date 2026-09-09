@@ -80,7 +80,7 @@ class FakeRuntime(engine.Runtime):
                 "copilotService": "copilot-api.service", "copilotHome": str(self.data), "database": str(self.data / "absent.sqlite"),
                 "components": values, "highestSequence": installed.get("sequence", 0), "installedDigest": installed.get("digest"),
                 "currentRelease": installed.get("releaseId"), "readyMigrations": ["gateway-api-key-v1"],
-                "protected": {str(self.data / "config.json"): engine.sha(self.data / "config.json")},
+                "protected": {str(self.data / "config.json"): engine.gateway_config_hash(self.data / "config.json")},
                 "pinHash": engine.sha(self.data / "portal-build.json")}
 
     def prepare_dependencies(self, before, candidate, job):
@@ -215,6 +215,79 @@ class NodeUpdaterTests(unittest.TestCase):
         self.assertNotEqual(engine.config_hash(file, probe), before)
         file.write_text(baseline + "\n[projects." + json.dumps(str(probe)) + ']\ntrust_level = "untrusted"\n')
         self.assertNotEqual(engine.config_hash(file, probe), before)
+
+    def test_gateway_transport_renames_preserve_every_setting_and_other_files_stay_byte_protected(self):
+        file = self.root / "config.json"
+        legacy = {"auth": {"apiKeys": ["owner-key"]}, "providers": [{"url": "https://approved.invalid"}],
+                  "responsesTransport": {"headersTimeoutMsV2": 12345, "streamInactivityTimeoutMs": 45678}}
+        current = {**legacy, "upstreamTransport": {
+            "headersTimeoutMs": 12345, "streamInactivityTimeoutMs": 45678}}
+        current.pop("responsesTransport")
+        engine.save(file, legacy)
+        expected = engine.gateway_config_hash(file)
+        raw = engine.config_hash(file)
+        for value in [current, {**current, "responsesTransport": legacy["responsesTransport"]},
+                      {**current, "upstreamTransport": {
+                          **current["upstreamTransport"], "headersTimeoutMsV2": 12345}}]:
+            engine.save(file, value)
+            self.assertEqual(engine.gateway_config_hash(file), expected)
+        self.assertNotEqual(engine.config_hash(file), raw)
+        changes = [
+            {**current, "auth": {"apiKeys": ["different-key"]}},
+            {**current, "providers": [{"url": "https://different.invalid"}]},
+            {**current, "upstreamTransport": {**current["upstreamTransport"], "headersTimeoutMs": 12346}},
+            {**current, "upstreamTransport": {"headersTimeoutMs": 12345}},
+            {**current, "unexpected": True},
+            {key: value for key, value in current.items() if key != "upstreamTransport"},
+        ]
+        for value in changes:
+            engine.save(file, value)
+            self.assertNotEqual(engine.gateway_config_hash(file), expected)
+
+    def test_conflicting_gateway_aliases_and_malformed_blocks_are_not_normalized_away(self):
+        file = self.root / "config.json"
+        for value in [
+            {"responsesTransport": {"headersTimeoutMsV2": 10}, "upstreamTransport": {"headersTimeoutMs": 20}},
+            {"upstreamTransport": {"headersTimeoutMsV2": 10, "headersTimeoutMs": 20}},
+            {"upstreamTransport": {"headersTimeoutMsV2": True, "headersTimeoutMs": 1}},
+            {"responsesTransport": []}, {"upstreamTransport": None}, [],
+        ]:
+            with self.subTest(value=value):
+                engine.save(file, value)
+                with self.assertRaises(engine.UpdateError) as error:
+                    engine.gateway_config_hash(file)
+                self.assertEqual(error.exception.code, "configuration_changed")
+
+    def test_gateway_startup_transport_migration_passes_transaction_without_changing_credentials(self):
+        if os.name == "nt":
+            self.skipTest("POSIX activation is validated in the isolated Linux environment")
+        runtime = self.runtime(directory_anchor=True)
+        file = runtime.data / "config.json"
+        original = {**engine.read(file), "responsesTransport": {
+            "headersTimeoutMsV2": 12345, "streamInactivityTimeoutMs": 45678}}
+        engine.save(file, original)
+        before = runtime.snapshot()
+        manifest, download = self.package(runtime, ["copilotApi"])
+
+        def migrate_at_start(arguments, **kwargs):
+            result = runtime.runner(arguments, **kwargs)
+            if arguments[:3] == ["systemctl", "--user", "start"]:
+                document = engine.read(file)
+                block = document.pop("responsesTransport")
+                block["headersTimeoutMs"] = block.pop("headersTimeoutMsV2")
+                document["upstreamTransport"] = block
+                engine.save(file, document)
+            return result
+
+        with patch("engine.run", side_effect=migrate_at_start):
+            result = engine.Upgrade(runtime, lambda *_: None, download).execute(
+                manifest, "d" * 64, runtime.root / "jobs/transport-migration")
+        self.assertEqual(result["state"], "succeeded")
+        self.assertEqual(runtime.snapshot()["protected"], before["protected"])
+        self.assertEqual(engine.read(file)["auth"], original["auth"])
+        self.assertNotIn("responsesTransport", engine.read(file))
+        self.assertEqual(engine.read(file)["upstreamTransport"]["headersTimeoutMs"], 12345)
+        self.assertEqual(runtime.model_calls, 1)
 
     def test_model_failure_rolls_back_code_and_pin_but_not_new_user_data(self):
         runtime = self.runtime(directory_anchor=True, model_failure=True)

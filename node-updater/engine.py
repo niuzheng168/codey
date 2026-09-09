@@ -186,6 +186,40 @@ def config_hash(file, probe_path=None):
     return hashlib.sha256(raw).hexdigest()
 
 
+def gateway_config_hash(file):
+    """Hash all gateway settings, accepting only equal-valued transport aliases."""
+    document = read(file)
+    require(isinstance(document, dict), "configuration_changed")
+
+    def encoded(value):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+    def transport(value):
+        require(isinstance(value, dict), "configuration_changed")
+        result = dict(value)
+        if "headersTimeoutMsV2" in result:
+            previous = result.pop("headersTimeoutMsV2")
+            if "headersTimeoutMs" in result:
+                require(encoded(previous) == encoded(result["headersTimeoutMs"]), "configuration_changed")
+            else:
+                result["headersTimeoutMs"] = previous
+        return result
+
+    # copilot-api 2.5.3 persists these two field renames at startup. Do not
+    # ignore either block: conflicting aliases must fail before any switch.
+    if "responsesTransport" in document:
+        previous = transport(document.pop("responsesTransport"))
+        if "upstreamTransport" in document:
+            current = transport(document["upstreamTransport"])
+            require(encoded(previous) == encoded(current), "configuration_changed")
+        else:
+            current = previous
+        document["upstreamTransport"] = current
+    elif "upstreamTransport" in document:
+        document["upstreamTransport"] = transport(document["upstreamTransport"])
+    return hashlib.sha256(encoded(document)).hexdigest()
+
+
 def install_fingerprint(directory):
     directory = Path(directory)
     package = read(directory / "package.json")
@@ -311,7 +345,9 @@ class Runtime:
             "copilotNode": str(Path(f"/proc/{cp_pid}/exe").resolve(strict=True)),
             "components": versions, "copilotHome": str(data), "database": str(database),
             "pinHash": sha(data / "portal-build.json") if (data / "portal-build.json").is_file() else None,
-            "protected": {str(file): config_hash(file, self.root / "probe") for file in protected if file.is_file()},
+            "protected": {str(file): (gateway_config_hash(file) if file == data / "config.json"
+                                     else config_hash(file, self.root / "probe"))
+                          for file in protected if file.is_file()},
             "platform": "linux-x64", "currentRelease": installed.get("releaseId"),
             "highestSequence": installed.get("sequence", 0),
             "installedDigest": installed.get("digest"),

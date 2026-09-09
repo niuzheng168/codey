@@ -50,6 +50,13 @@ automatic credential rewrite or a bypass of authentication. A runtime change,
 irreversible database migration, Windows/macOS node or unknown installation
 layout also needs a separately implemented/reviewed migration or adapter.
 
+Gateway JSON is compared semantically across the copilot-api 2.5.3 renames
+`responsesTransport` to `upstreamTransport` and `headersTimeoutMsV2` to
+`headersTimeoutMs`. Only identical values are equivalent; conflicting aliases
+block the update. API keys, providers, transport values and all other settings
+remain covered by the configuration fingerprint. The updater does not rewrite
+the configuration or exempt arbitrary migrations.
+
 On a failed activation it restores only this transaction's package pointers,
 not stale databases, credentials, certificates or user data. Retained versions,
 dependency caches and backups are not automatically deleted. An interrupted
