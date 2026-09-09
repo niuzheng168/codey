@@ -221,9 +221,23 @@ const server = http.createServer(async (req, res) => {
         const body = await readJson(req);
         if (!["preview-a", "preview-b"].includes(body.scope)) throw new Error("Not a preview draft.");
         if (req.method === "DELETE") state.drafts.delete(body.scope);
-        else state.drafts.set(body.scope, { scope: body.scope, text: String(body.text || ""), queuedMessage: body.queuedMessage ?? null });
+        else state.drafts.set(body.scope, {
+          scope: body.scope, text: String(body.text || ""),
+          queuedMessage: body.preserveQueuedMessage === true
+            ? state.drafts.get(body.scope)?.queuedMessage ?? null : body.queuedMessage ?? null,
+        });
       } else if (req.method !== "GET") { send(res, 405, { error: "Method denied." }); return; }
       send(res, 200, { success: true, drafts: [...state.drafts.values()] }); return;
+    }
+    if (apiPath === "/api/user/drafts/steer" && req.method === "POST") {
+      const body = await readJson(req);
+      const draft = state.drafts.get(body.scope);
+      const accepted = Boolean(draft?.queuedMessage?.id && draft.queuedMessage.id === body.queuedMessage?.id);
+      if (accepted) state.drafts.set(body.scope, { ...draft, queuedMessage: null });
+      send(res, 200, {
+        kind: "chat_steer_result", sessionId: body.scope, requestId: body.requestId,
+        accepted, ...(!accepted ? { error: "Preview queue changed." } : {}),
+      }); return;
     }
     if (apiPath === "/api/commands/list") { await readJson(req); send(res, 200, { builtIn: [], custom: [] }); return; }
     if (/^\/api\/providers\/[^/]+\/skills$/.test(apiPath)) { send(res, 200, { data: { skills: [] } }); return; }
