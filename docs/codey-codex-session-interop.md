@@ -71,8 +71,30 @@ opening such an old session explicitly in the App can still be necessary.
 
 ## Scope and remaining limitations
 
-- This is a Linux/local-daemon integration, not database replication between
-  different machines. Both clients must address the same host and Codex home.
+### Windows desktop-owned sessions (2026-09-09)
+
+The Windows stdio history reader is not itself the desktop writer. Starting
+another stdio process cannot resume an already owned thread, even when the
+desktop UI is idle. Windows now handles the exact native writer refusal with
+`thread/queue/add`: the existing desktop process executes the queued text and
+image inputs without releasing its lock or changing the thread ID.
+
+Codey correlates the resulting persisted turn by the submitted user-message
+`clientId`, reads paginated items, and waits for `completedAt`. A read-only
+snapshot can label a still-running foreign-process turn `interrupted`, so that
+status alone is not a completion signal. Unknown acknowledgements are not
+retried. Only the caller's still-pending queue entry may be cancelled.
+
+This path inherits desktop execution settings and keeps desktop approvals and
+started-turn interruption in the desktop. Incompatible explicit browser model,
+effort or permission selections are refused before submission. It does not
+rewrite Codex configuration, remove locks, fork histories, or restart the app.
+The existing Unix shared-daemon path remains unchanged.
+
+### General limitations
+
+- These are same-host integrations, not database replication between different
+  machines. Both clients must address the same host and Codex home.
 - It enables discovery, reading, and safe continuation. The six-second index
   refresh is not token-level mirroring of every desktop-initiated background
   turn into an already-open Codey chat.

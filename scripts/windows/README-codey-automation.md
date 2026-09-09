@@ -68,14 +68,36 @@ ID is retained across turns; completion is delivered only after the owned
 process exits and releases its writer. Inherited helper pipe handles are not
 proof that the native writer is still alive.
 
-This does not permit taking over a thread held by Codex Desktop. An active
-turn/writer conflict fails explicitly, with no lock deletion, desktop restart,
-fork, or automatic prompt retry. One-shot command/file/permission approvals use
+For an existing desktop-owned thread, the exact native `active writer` refusal
+selects **Codex's native queue**, not another execution process. Queue APIs work
+without acquiring its writer; the original desktop process executes the input,
+including `localImage` attachments, even when it was idle. Codey observes only
+the turn whose user-message `clientId` matches its unique queue submission.
+Its bounded, paginated history observer never substitutes the newest unrelated
+turn. An unfinished foreign-process snapshot can say `interrupted`; a durable
+`completedAt` timestamp is required before reporting completion.
+
+Queued desktop turns inherit the desktop model, effort and permissions.
+Incompatible explicit model/effort selections or stricter browser permission
+restrictions are rejected before enqueueing, not silently ignored or widened.
+Unclaimed queue entries can be cancelled by their exact ID. Once the desktop
+starts the turn, interruption and desktop tool approvals remain there. There
+is no lock deletion, desktop restart, fork, configuration rewrite or automatic
+prompt retry after an ambiguous acknowledgement.
+
+For Codey-owned runs, one-shot command/file/permission approvals use
 the existing Codey permission UI; unsupported desktop-only interactions fail
 explicitly rather than hang or silently approve. Existing Unix nodes retain
 their daemon transport. Activating an update requires a controlled
 Workspace-only restart and atomic pinned launcher/configuration references;
 do not restart the protected copilot-api.
+
+Acceptance must include an **existing Desktop-created, Desktop-owned thread**,
+not only a new standalone stdio test thread. Upload a fresh image through Codey,
+have that desktop thread identify its contents, continue the same ID for another
+turn, and verify the prior history and desktop/copilot-api PIDs remain unchanged.
+This native-queue path was checked with Desktop CLI `0.153.1`; an older CLI that
+lacks the queue API must fail explicitly before submitting input.
 
 ## Full Windows package acceptance
 
