@@ -1,7 +1,8 @@
-"""Recognize and stop only this owner's Codex app-server processes."""
+"""Recognize and stop Codex app-server processes rooted in the target home."""
 import os
 from pathlib import Path
 import signal
+import subprocess
 import time
 
 from ...common.errors import SetupError
@@ -27,9 +28,7 @@ def recognized(home, executable, arguments):
 
 def record(home, pid):
     process = Path("/proc") / str(pid)
-    info = process.stat()
-    if info.st_uid != os.getuid():
-        return None
+    process.stat()
     arguments = [part.decode("utf-8", "replace")
                  for part in (process / "cmdline").read_bytes().split(b"\0") if part]
     executable = (process / "exe").resolve()
@@ -63,6 +62,22 @@ def inspect(home, current_key=None):
     return sorted(rows, key=lambda item: item["pid"])
 
 
+def _send(pid, value):
+    try:
+        os.kill(pid, value)
+    except PermissionError:
+        name = signal.Signals(value).name.removeprefix("SIG")
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", "kill", "-" + name, str(pid)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise SetupError("Administrator permission could not stop an old Codex app-server") from None
+        if result.returncode:
+            raise SetupError("Administrator permission could not stop an old Codex app-server")
+
+
 def stop(home, planned, *, term_seconds=10, kill_seconds=5):
     def same(item):
         try:
@@ -74,7 +89,7 @@ def stop(home, planned, *, term_seconds=10, kill_seconds=5):
         if not same(item):
             raise SetupError("A planned Codex app-server changed before it could be stopped")
     for item in planned:
-        os.kill(item["pid"], signal.SIGTERM)
+        _send(item["pid"], signal.SIGTERM)
     deadline = time.monotonic() + term_seconds
     remaining = {item["pid"] for item in planned}
     while remaining and time.monotonic() < deadline:
@@ -83,10 +98,27 @@ def stop(home, planned, *, term_seconds=10, kill_seconds=5):
     for pid in remaining:
         expected = next(item for item in planned if item["pid"] == pid)
         if same(expected):
-            os.kill(pid, signal.SIGKILL)
+            _send(pid, signal.SIGKILL)
     deadline = time.monotonic() + kill_seconds
     while any(same(item) for item in planned) and time.monotonic() < deadline:
         time.sleep(0.2)
     if any(same(item) for item in planned):
         raise SetupError("A recognized old Codex app-server did not exit")
     return [item["pid"] for item in planned]
+
+
+def stop_all(home, *, attempts=4):
+    """Stop every target-home app-server, including bounded immediate respawns."""
+    stopped = []
+    for attempt in range(attempts):
+        planned = inspect(home)
+        if not planned:
+            return sorted(set(stopped))
+        try:
+            stopped.extend(stop(home, planned))
+        except SetupError as error:
+            if "changed before it could be stopped" not in str(error) or attempt == attempts - 1:
+                raise
+    if inspect(home):
+        raise SetupError("Old Codex app-server processes kept restarting and could not be replaced")
+    return sorted(set(stopped))

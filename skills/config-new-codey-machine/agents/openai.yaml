@@ -1,4 +1,4 @@
 interface:
   display_name: "Config new Codey machine"
   short_description: "静态无密钥包生成本机注册文件"
-  default_prompt: "使用 $config-new-codey-machine。在 Linux、Windows 或 macOS 的目标普通用户下运行对应原生入口；从 assets/setup.json 校验发布，本机生成并安全复用独立注册凭据，配置 GitHub DevTunnel 和平台原生守护，输出到 owner Home 的私密 codey-machine-registration.json。Skill 目录不得产生私密文件，不使用或兼容 enrollment.json；Copilot 配额不等于聊天健康，真实模型请求必须单独通过。"
+  default_prompt: "使用 $config-new-codey-machine。在 Linux、Windows 或 macOS 的目标用户下运行对应原生入口；Linux 固定使用 ~/.codex，并直接停止旧 Codex app-server 和旧 Codey 服务后安装本包版本。从 assets/setup.json 校验发布，本机生成并安全复用独立注册凭据，配置 GitHub DevTunnel 和平台原生守护，输出到 owner Home 的私密 codey-machine-registration.json。Skill 目录不得产生私密文件，不使用或兼容 enrollment.json；Copilot 配额不等于聊天健康，真实模型请求必须单独通过。"

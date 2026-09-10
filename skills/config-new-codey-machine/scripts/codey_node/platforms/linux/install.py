@@ -19,7 +19,7 @@ from ...common.files import digest, protected_write
 from ...common.verification import verify
 from ...devtunnel import auth, binding as tunnels, renewal
 from ...service.bundle import install_bundle
-from . import cli, codex_latest, copilot_api, login, replacement, supervisor as worker, updater_service
+from . import cli, codex_latest, codex_process, copilot_api, login, replacement, supervisor as worker, updater_service
 from .build import prepare_runtime, run
 from .systemd import unit
 
@@ -110,6 +110,7 @@ def configure(args):
                "listenIp": "127.0.0.1", "name": platform.node()}
     root = home / ".local/share/codey-machine"
     config = home / ".config/codey-machine"
+    codex_home = home / ".codex"
     if any(path.resolve() != path or not path.is_relative_to(home) for path in (root, config)):
         raise SetupError("Installation/configuration paths must not be linked or leave this owner home")
     state_file = config / "installation.json"
@@ -145,22 +146,20 @@ def configure(args):
         else:
             raise SetupError("Reserved replacement preflight path already exists")
         preflight = config_defaults.prepare(
-            SKILL, codex_home=args.codex_home,
+            SKILL, codex_home=codex_home,
             copilot_api_config=preflight_root / "copilot-api-config.json",
             provider_env_file=preflight_root / "provider.env", new_gateway=True,
         )
         preflight.require_ready()
-        target_codex_home = preflight.codex_home
     else:
         defaults = config_defaults.prepare(
-            SKILL, codex_home=args.codex_home,
+            SKILL, codex_home=codex_home,
             copilot_api_config=root / "data/copilot-api/config.json",
             provider_env_file=config / "provider.env", new_gateway=True,
         )
-        target_codex_home = defaults.codex_home
-    if not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(target_codex_home)):
+    if not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(codex_home)):
         raise SetupError("This systemd installer requires a Codex home without whitespace or systemd specifiers")
-    codex_update = codex_latest.prepare(home, target_codex_home, args.codex_bin, skill=SKILL)
+    codex_update = codex_latest.prepare(home, codex_home, args.codex_bin, skill=SKILL)
     codex = codex_update.executable
     if not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(codex)):
         raise SetupError("This systemd installer requires a Codex path without whitespace or systemd specifiers")
@@ -216,7 +215,7 @@ def configure(args):
                 home, root, config, identity["nodeId"], run, port_available=port_available)
             summary["replacement"] = result
             defaults = config_defaults.prepare(
-                SKILL, codex_home=args.codex_home,
+                SKILL, codex_home=codex_home,
                 copilot_api_config=root / "data/copilot-api/config.json",
                 provider_env_file=config / "provider.env", new_gateway=True,
             )
@@ -283,7 +282,23 @@ def configure(args):
         data = root / "data"
         # The new COPILOT_API_HOME supplies the gateway config and CloudCLI model
         # key. Old services/data were archived and are not used by the new process.
-        defaults.apply()
+        # Stop/update Codex before writing config so an old app-server cannot
+        # save stale in-memory settings after our atomic replacement.
+        codex_result = codex_update.apply()
+        stopped_before_configuration = sorted(set(
+            codex_result.get("stoppedProcesses", []) + codex_process.stop_all(home)
+        ))
+        codex_result["stoppedBeforeConfiguration"] = stopped_before_configuration
+        state["codexUpdate"] = codex_result
+        defaults = config_defaults.prepare(
+            SKILL, codex_home=codex_home,
+            copilot_api_config=root / "data/copilot-api/config.json",
+            provider_env_file=config / "provider.env", new_gateway=True,
+        )
+        defaults_result = defaults.apply()
+        summary["modelDefaults"] = defaults.report()
+        state["modelDefaults"] = defaults_result
+        state["stoppedCodexProcessesBeforeConfiguration"] = stopped_before_configuration
         shell_result = login.apply(shell_owner, shell_changes)
         state["shellModelEnvironment"] = shell_result
         provider_env = config / "provider.env"
@@ -346,10 +361,8 @@ def configure(args):
         copilot_test = copilot_api.wait_ready(model_key)
         state["copilotApi"] = {"login": provider_login, "test": copilot_test}
 
-        # Codex: stop old app-server processes, update/install the official
-        # latest CLI in the owner's existing bin location, then make a real call.
-        codex_result = codex_update.apply()
-        state["codexUpdate"] = codex_result
+        # Codex was already replaced before its config was written. Do not stop
+        # it again after configuration; make the real model call directly.
         codex_test = codex_latest.test_model(codex, defaults.codex_home, model_key, home)
         state["codexTest"] = codex_test
 
@@ -426,7 +439,6 @@ def arguments(argv=None):
     parser.add_argument("--name")
     parser.add_argument("--devtunnel-bin")
     parser.add_argument("--codex-bin", help="Optional existing owner Codex command whose bin directory should be updated")
-    parser.add_argument("--codex-home", help="Absolute target Codex home; otherwise the owner's CODEX_HOME or .codex")
     parser.add_argument("--apply", action="store_true")
     return parser.parse_args(argv)
 

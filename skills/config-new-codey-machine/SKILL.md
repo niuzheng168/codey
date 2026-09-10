@@ -22,7 +22,9 @@ bash scripts/setup-macos.sh --apply
 ```
 
 不加 `--apply` / `-Apply` 时只显示计划。需要 DevTunnel 或 GitHub Copilot 登录时，
-按终端提示完成 GitHub 授权。不要使用 root、sudo 或管理员 PowerShell。
+按终端提示完成 GitHub 授权。Linux 安装仍以当前 owner 写入文件，但接管旧
+Codex/Codey 时允许按需使用管理员权限停止旧进程；不要把整个 Home 改成 root 所有。
+Windows 不要使用管理员 PowerShell。
 
 ## 1. 配置 GitHub DevTunnel
 
@@ -55,12 +57,14 @@ bash scripts/setup-macos.sh --apply
 
 ## 3. 配置 Codex
 
-- **准备检查**：记录现有 Codex 路径和 app-server；保留 `.codex`、auth、
+- **准备检查**：固定使用当前 owner 的 `~/.codex`，不接受隔离 Codex Home；
+  记录现有 Codex 路径和 app-server；保留 `.codex`、auth、
   sessions 及其他配置。
 - **目标**：Linux 使用当前 owner 的正式 Codex CLI；Windows/macOS 固定已审核的
   owner CLI，不创建第二套日常 PATH 入口。
-- **执行脚本**：Linux 停止旧 app-server；已有 CLI 就原位更新，没有则用官方
-  installer 安装 latest；写入模型目录与 provider 配置。Windows/macOS 只为节点
+- **执行脚本**：Linux 直接停止旧 app-server/Codey 进程和旧服务，紧接着重新读取
+  `~/.codex` 并写入配置；相同字节的 inode/时间戳变化不算冲突。已有 CLI 就原位更新，
+  没有则用官方 installer 安装 latest。Windows/macOS 只为节点
   服务固定现有 executable。
 - **验收标准**：`codex --version` 成功；三平台都通过本机模型代理发起真实 Codex
   请求并返回 `CODEY_INSTALL_OK`。**Copilot 配额不是聊天健康检查；真实模型请求必须单独通过。**

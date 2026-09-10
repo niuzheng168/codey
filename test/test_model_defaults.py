@@ -553,6 +553,32 @@ class PathAndAtomicTests(unittest.TestCase):
                 plan.apply()
             self.assertEqual(tree(f.root), before)
 
+    def test_identical_atomic_rewrite_after_planning_is_not_a_conflict(self):
+        with fixture(config='model = "old"\n') as f:
+            plan = defaults.prepare(**f.kwargs)
+            target = f.codex / "config.toml"
+            before = next(item.before for item in plan.changes if item.before.path == target)
+            replacement = target.with_name("config.toml.same-bytes")
+            replacement.write_bytes(target.read_bytes())
+            replacement.chmod(stat.S_IMODE(target.stat().st_mode))
+            os.replace(replacement, target)
+            actual = f.kwargs["owner"].read(target)
+            self.assertEqual(actual.data, before.data)
+            self.assertNotEqual(actual.version, before.version)
+            result = plan.apply()
+            self.assertIn(str(target), result["changedFiles"])
+            self.assertEqual(tomllib.loads(target.read_text())["model"], "gpt-6-astra")
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode guard")
+    def test_same_bytes_with_changed_permissions_still_abort(self):
+        with fixture(config='model = "old"\n') as f:
+            plan = defaults.prepare(**f.kwargs)
+            target = f.codex / "config.toml"
+            before = stat.S_IMODE(target.stat().st_mode)
+            target.chmod(before ^ 0o040)
+            with self.assertRaisesRegex(SetupError, "changed since planning"):
+                plan.apply()
+
     def test_atomic_failure_restores_only_our_writes_and_keeps_private_backups(self):
         with fixture(config='model = "old"\n') as f:
             (f.codex / "models.json").write_bytes(b'{"models":["previous-catalog-fixture"]}')

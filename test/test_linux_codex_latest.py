@@ -69,13 +69,12 @@ class LinuxCodexLatestTests(unittest.TestCase):
                 b": \"${CODEX_INSTALL_DIR:?}\"\n"
             )
             with patch.object(codex_latest, "_download_installer", return_value=installer), \
-                    patch.object(codex_latest.codex_process, "inspect", return_value=[{"pid": 42}]), \
-                    patch.object(codex_latest.codex_process, "stop", return_value=[42]) as stop, \
+                    patch.object(codex_latest.codex_process, "stop_all", return_value=[42]) as stop, \
                     patch.object(codex_latest.subprocess, "run", side_effect=command), \
                     patch.object(codex_latest, "_version", return_value="0.200.0"):
                 with patch.dict(os.environ, {"CODEX_RELEASE": "must-not-leak"}, clear=False):
                     result = plan.apply()
-            stop.assert_called_once()
+            stop.assert_called_once_with(home)
             self.assertEqual(result["version"], "0.200.0")
             self.assertEqual(result["stoppedProcesses"], [42])
             self.assertEqual(calls[0][0][0], "/bin/sh")

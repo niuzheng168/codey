@@ -95,7 +95,7 @@ def fixture(root):
     (codex_home / "config.toml").write_text('model = "previous"\n[mcp_servers.keep]\ncommand = "preserve"\n')
     (codex_home / "auth.json").write_text('{"credential":"preserve-model-login-fixture"}')
     args = installer.arguments(["--out", str(root / "registration.json"), "--devtunnel-bin", str(executable),
-                                "--codex-bin", str(codex), "--codex-home", str(codex_home)])
+                                "--codex-bin", str(codex)])
     network = {"schema": 1, "nodeId": ID, "networkMode": "devtunnel", "listenIp": "127.0.0.1"}
     return SimpleNamespace(skill=skill, home=home, args=args, manifest=manifest,
                            setup=setup, identity=identity, network=network, executable=executable)
@@ -113,6 +113,8 @@ class LinuxContractTests(unittest.TestCase):
             installer.arguments(["--network-file", "must-not-be-consumed"])
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             installer.arguments(["--enrollment", "legacy-must-not-be-consumed"])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            installer.arguments(["--codex-home", "/tmp/isolated-codex"])
 
     def test_static_setup_is_exact_and_matches_the_runtime_release(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -489,15 +491,17 @@ class LinuxTransactionTests(unittest.TestCase):
                 (stage / "release.json").write_text(json.dumps(manifest))
             old_mask = os.umask(0o077)
             try:
+                order = []
+                def apply_codex():
+                    order.append("install-codex")
+                    return {"applied": True, "version": "0.999.0", "stoppedProcesses": []}
                 codex_plan = SimpleNamespace(
                     executable=Path(f.args.codex_bin),
                     report=lambda: {
                         "action": "update", "release": "latest",
                         "targetExecutable": str(Path(f.args.codex_bin)),
                     },
-                    apply=Mock(return_value={
-                        "applied": True, "version": "0.999.0", "stoppedProcesses": [],
-                    }),
+                    apply=Mock(side_effect=apply_codex),
                 )
                 with contextlib.ExitStack() as stack:
                     stack.enter_context(patch.object(installer, "SKILL", f.skill))
@@ -506,6 +510,11 @@ class LinuxTransactionTests(unittest.TestCase):
                     stack.enter_context(patch.object(installer.registration, "load_or_create", return_value=f.identity))
                     codex_prepare = stack.enter_context(
                         patch.object(installer.codex_latest, "prepare", return_value=codex_plan))
+                    stop_codex = stack.enter_context(
+                        patch.object(
+                            installer.codex_process, "stop_all",
+                            side_effect=lambda _home: order.append("stop-codex") or [],
+                        ))
                     socket_factory = stack.enter_context(patch.object(installer.socket, "socket"))
                     stack.enter_context(patch.object(
                         installer.shutil, "disk_usage", return_value=SimpleNamespace(free=free_bytes)))
@@ -543,6 +552,8 @@ class LinuxTransactionTests(unittest.TestCase):
                     f.calls, f.builder, f.cli, f.login, f.create = calls, builder, cli, login, create
                     f.connect_token, f.portal_renew = connect_token, portal_renew
                     f.codex_plan, f.codex_prepare = codex_plan, codex_prepare
+                    f.stop_codex = stop_codex
+                    f.order = order
                     f.output, f.legacy_units, f.service_states = output, legacy_units, service_states
                     f.legacy_unit = legacy_units.get("copilot-api.service", service_dir / "copilot-api.service")
                     yield f
@@ -565,6 +576,41 @@ class LinuxTransactionTests(unittest.TestCase):
             plan = json.loads(f.output.getvalue())
             self.assertTrue(plan["replacement"]["detected"])
             self.assertFalse(any("stop" in call or "disable" in call for call in f.calls))
+
+    def test_apply_uses_only_dot_codex_and_stops_app_servers_before_config(self):
+        with self.setup() as f:
+            f.args.apply = True
+            original = config_defaults.DefaultsPlan.apply
+            def apply_defaults(plan):
+                f.order.append("write-defaults")
+                return original(plan)
+            with patch.object(config_defaults.DefaultsPlan, "apply", apply_defaults), \
+                    patch.dict(os.environ, {"CODEX_HOME": str(f.home / "forbidden-isolated-home")}):
+                installer.configure(f.args)
+            self.assertEqual(f.order, ["install-codex", "stop-codex", "write-defaults"])
+            f.stop_codex.assert_called_once_with(f.home)
+            self.assertEqual(f.codex_prepare.call_args.args[1], f.home / ".codex")
+            self.assertFalse((f.home / "forbidden-isolated-home").exists())
+
+    def test_stop_all_replaces_immediate_app_server_respawns(self):
+        first = {"pid": 10, "start": "1", "executable": "/home/alice/codex"}
+        second = {"pid": 11, "start": "2", "executable": "/home/alice/codex"}
+        with patch.object(codex_process, "inspect", side_effect=[[first], [second], []]), \
+                patch.object(codex_process, "stop", side_effect=[[10], [11]]) as stop:
+            self.assertEqual(codex_process.stop_all(Path("/home/alice")), [10, 11])
+        self.assertEqual(stop.call_count, 2)
+
+    def test_admin_fallback_stops_a_recognized_old_app_server(self):
+        with patch.object(codex_process.os, "kill", side_effect=PermissionError), \
+                patch.object(
+                    codex_process.subprocess, "run",
+                    return_value=SimpleNamespace(returncode=0),
+                ) as admin:
+            codex_process._send(42, codex_process.signal.SIGTERM)
+        self.assertEqual(
+            admin.call_args.args[0],
+            ["sudo", "-n", "kill", "-TERM", "42"],
+        )
 
     def test_replacement_rejects_a_linked_or_external_unit_file(self):
         with self.setup(existing=True) as f:
@@ -594,7 +640,7 @@ class LinuxTransactionTests(unittest.TestCase):
             legacy_cloudcli_config.mkdir()
             (legacy_copilot / "config.json").write_text('{"legacy":"credential-bearing config"}')
             (legacy_cloudcli_config / "service.env").write_text("LEGACY_CONFIG=preserve\n")
-            codex_home = Path(f.args.codex_home)
+            codex_home = f.home / ".codex"
             sessions = codex_home / "sessions"
             sessions.mkdir()
             session = sessions / "original.jsonl"
@@ -742,7 +788,7 @@ class LinuxTransactionTests(unittest.TestCase):
             self.assertEqual(len(gateway["auth"]["apiKeys"]), 1)
             self.assertNotIn("do-not-copy-old-shell-key", gateway["auth"]["apiKeys"])
             self.assertIn("CODEY_MODEL_API_KEY=" + json.dumps(gateway["auth"]["apiKeys"][0]), (config / "provider.env").read_text())
-            self.assertIn("CODEX_HOME=" + f.args.codex_home, (config / "cloudcli.env").read_text())
+            self.assertIn("CODEX_HOME=" + str(f.home / ".codex"), (config / "cloudcli.env").read_text())
             cloudcli_env = (config / "cloudcli.env").read_text()
             self.assertIn("CODEY_PORTAL_PRINCIPAL_ID=" + f.identity["workspaceSubject"], cloudcli_env)
             self.assertIn("CODEY_PORTAL_USERNAME=" + f.identity["workspaceUsername"], cloudcli_env)
@@ -752,10 +798,10 @@ class LinuxTransactionTests(unittest.TestCase):
             )
             self.assertFalse((f.skill / "assets/codey-updater/config.json").exists())
             self.assertEqual(json.loads((config / "registration-secrets.json").read_text()), f.identity)
-            codex_config = tomllib.loads((Path(f.args.codex_home) / "config.toml").read_text())
+            codex_config = tomllib.loads((f.home / ".codex/config.toml").read_text())
             self.assertEqual(codex_config["model"], "gpt-6-astra")
             self.assertEqual(codex_config["mcp_servers"], {"keep": {"command": "preserve"}})
-            self.assertEqual((Path(f.args.codex_home) / "auth.json").read_text(), '{"credential":"preserve-model-login-fixture"}')
+            self.assertEqual((f.home / ".codex/auth.json").read_text(), '{"credential":"preserve-model-login-fixture"}')
             provider_env = f.home / ".config/codey-machine/provider.env"
             for profile in (f.home / ".profile", f.home / ".bashrc"):
                 text = profile.read_text()

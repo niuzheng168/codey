@@ -136,7 +136,7 @@ class Plan:
         }
 
     def apply(self):
-        stopped = codex_process.stop(self.owner.home, codex_process.inspect(self.owner.home))
+        stopped = codex_process.stop_all(self.owner.home)
         self.owner.mkdir(self.bin_directory)
         self.owner.mkdir(self.codex_home)
         cache = self.owner.home / ".cache/codey-machine"

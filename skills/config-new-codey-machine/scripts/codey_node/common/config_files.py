@@ -195,6 +195,11 @@ def fingerprint(info):
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, created_or_changed, info.st_mode
 
 
+def stable_fingerprint(version):
+    """Ignore same-byte atomic rewrites while retaining filesystem and mode checks."""
+    return None if version is None else (version[0], version[5])
+
+
 @dataclass(frozen=True)
 class Snapshot:
     path: Path
@@ -203,7 +208,7 @@ class Snapshot:
 
     def verify(self, owner):
         actual = owner.read(self.path)
-        if actual.version != self.version or actual.data != self.data:
+        if actual.data != self.data or stable_fingerprint(actual.version) != stable_fingerprint(self.version):
             raise SetupError(f"Configuration changed since planning; re-plan before applying: {self.path}")
 
 
