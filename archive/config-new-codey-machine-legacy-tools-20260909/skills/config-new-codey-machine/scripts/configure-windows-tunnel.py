@@ -30,8 +30,8 @@ def module(name, file):
     return value
 
 
-windows = module("codey_windows_install_helpers", "configure-windows.py")
-tunnel = module("codey_windows_tunnel_client", "windows-tunnel-client.py")
+windows = module("codey_windows_install_helpers", "windows-helpers.py")
+tunnel = module("codey_tunnel_client", "tunnel-client.py")
 worker = module("codey_windows_tunnel_worker", "windows-tunnel-service.py")
 native = module("codey_windows_native_codex", "windows-codex-runtime.py")
 Error = windows.SetupError
@@ -219,12 +219,7 @@ def download(url, destination, *, expected=None, limit=128 * 1024 ** 2):
 
 
 def logged_in(result):
-    text = (result.stdout or "").lower()
-    diagnostics = text + "\n" + (getattr(result, "stderr", "") or "").lower()
-    return (result.returncode == 0 and re.search(r"\blogged in\b", text) is not None
-            and not any(marker in diagnostics for marker in (
-                "not logged in", "login required", "a window handle must be configured",
-            )))
+    return tunnel.github_logged_in(result)
 
 
 class DevTunnelBrowserLoginRequired(Error):
@@ -234,11 +229,11 @@ class DevTunnelBrowserLoginRequired(Error):
         self.user_action = {
             "required": "interactive_browser_login",
             "where": "A regular, visible, non-admin PowerShell window under the original Windows owner",
-            "command": command + " user login --entra --use-browser-auth",
-            "verifyCommand": command + " user show",
+            "command": command + " user login --github --use-browser-auth",
+            "verifyCommand": command + " user show --json",
             "then": "Rerun the same installer command, retaining -Resume if used. The cached DevTunnel login will be reused.",
             "deviceCodeFallback": False,
-            "note": "Organization device-code policy cannot be fixed by retrying. az login does not sign in DevTunnel.",
+            "note": "GitHub is required. Do not log out, change a cached Microsoft account, or fall back to Entra. az login does not sign in DevTunnel.",
         }
 
 
@@ -291,26 +286,34 @@ def prepare_devtunnel(args, home, sid, *, read_only=False):
     if not candidate.is_absolute() or not candidate.is_file() or candidate.suffix.lower() != ".exe":
         raise Error("native_devtunnel_required")
     candidate = candidate.resolve()
-    result = tunnel.cli(candidate, ["user", "show"], check=False)
+    result = tunnel.cli(candidate, ["user", "show", "--json"], check=False)
     if not logged_in(result):
+        try:
+            existing = json.loads(result.stdout)
+        except (ValueError, TypeError):
+            existing = {}
+        if not isinstance(existing, dict):
+            existing = {}
+        if existing.get("status", "").lower() == "logged in":
+            raise DevTunnelBrowserLoginRequired(candidate, "devtunnel_github_login_required_existing_account_unchanged")
         # Agent pipes, hidden windows, pythonw and read-only resume must not start
         # WAM/device-code prompts. The user performs the same browser command in
         # their normal owner console; subsequent runs reuse that exact login cache.
-        if read_only or not interactive_auth_console():
+        if read_only or existing.get("status", "").lower() != "not logged in" or not interactive_auth_console():
             raise DevTunnelBrowserLoginRequired(candidate)
         print("Complete DevTunnel browser sign-in as the original Windows owner. No device-code fallback will be attempted.", flush=True)
         try:
             # Inherit the interactive console, never CREATE_NO_WINDOW/DEVNULL or
             # capture_output. Explicit browser auth avoids the broker/HWND path.
             result = subprocess.run(
-                [str(candidate), "user", "login", "--entra", "--use-browser-auth"],
-                timeout=300, creationflags=0,
+                [str(candidate), "user", "login", "--github", "--use-browser-auth"],
+                timeout=300, creationflags=0, env=tunnel.cli_environment(),
             )
         except (OSError, subprocess.TimeoutExpired):
             raise DevTunnelBrowserLoginRequired(candidate, "devtunnel_browser_login_failed") from None
         if result.returncode:
             raise DevTunnelBrowserLoginRequired(candidate, "devtunnel_browser_login_failed")
-        if not logged_in(tunnel.cli(candidate, ["user", "show"], check=False)):
+        if not logged_in(tunnel.cli(candidate, ["user", "show", "--json"], check=False)):
             raise DevTunnelBrowserLoginRequired(candidate, "devtunnel_browser_login_not_cached_for_this_owner")
     return candidate
 
@@ -670,7 +673,7 @@ def configure(args):
                    else tunnel.ensure_tunnel(devtunnel, enrollment, config_root))
         binaries = root / "bin"
         binaries.mkdir()
-        for helper_name in ("windows-tunnel-service.py", "windows-tunnel-client.py", "windows-service.py"):
+        for helper_name in ("windows-tunnel-service.py", "tunnel-client.py", "windows-owner.py"):
             shutil.copyfile(SCRIPT / helper_name, binaries / helper_name)
         node = release / "node/node.exe"
         config = {
@@ -678,8 +681,9 @@ def configure(args):
             "computerName": computer, "root": str(root), "configRoot": str(config_root),
             "name": name, "pythonwExe": str(pythonw), "nodeExe": str(node),
             "runnerPath": str(binaries / "windows-tunnel-service.py"),
-            "ownerHelper": str(binaries / "windows-service.py"),
-            "tunnelHelper": str(binaries / "windows-tunnel-client.py"),
+            "ownerHelper": str(binaries / "windows-owner.py"),
+            "tunnelHelper": str(binaries / "tunnel-client.py"),
+            "tunnelAuthProvider": "github",
             "codexExe": str(codex), "nativeCodex": native_codex,
             "codexHome": str(codex_home), "devtunnelExe": str(devtunnel),
             "workspaceEntry": str(release / "cloudcli/dist-server/server/index.js"),

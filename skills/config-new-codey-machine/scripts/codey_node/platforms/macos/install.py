@@ -1,9 +1,7 @@
-#!/usr/bin/env python3
-"""Prepare an owner-bound macOS CloudCLI node without changing existing services."""
+"""Prepare an owner-bound macOS node without replacing existing services."""
 import argparse
 import base64
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -20,35 +18,19 @@ import tomllib
 import urllib.parse
 import urllib.request
 
-SKILL = Path(__file__).resolve().parents[1]
-NODE_ID = re.compile(r"n-[a-f0-9]{24}")
+from ...common import verification as common
+from ...common import codex_cli, config_defaults
+from ...common.files import digest, write_private
+from ...devtunnel import auth, binding as tunnels
+from ...service.bundle import install_bundle
+from . import supervisor as service
+from .build import build_runtime
+from .process import run
+from .launchd import launch_agent
 
-
-def module(name, file):
-    spec = importlib.util.spec_from_file_location(name, SKILL / "scripts" / file)
-    result = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(result)
-    return result
-
-
-common = module("codey_machine_common", "configure-machine.py")
-service = module("codey_macos_service", "macos-service.py")
+SKILL = Path(__file__).resolve().parents[4]
+NODE_ID = tunnels.NODE_ID
 Error = service.ServiceError
-write_private = service.write_private
-digest = service.digest
-
-
-def run(args, *, cwd=None, env=None, log=None, check=True, timeout=180):
-    if log:
-        with Path(log).open("a") as stream:
-            result = subprocess.run([str(x) for x in args], cwd=cwd, env=env, text=True,
-                                    stdout=stream, stderr=subprocess.STDOUT, timeout=1800)
-    else:
-        result = subprocess.run([str(x) for x in args], cwd=cwd, env=env, text=True,
-                                capture_output=True, timeout=timeout)
-    if check and result.returncode:
-        raise Error(f"{Path(args[0]).name} failed (exit {result.returncode}); existing services were not changed")
-    return result
 
 
 def validate(enrollment, manifest, target, *, ready=False):
@@ -70,7 +52,9 @@ def validate(enrollment, manifest, target, *, ready=False):
     if origin.scheme != "https" or not origin.hostname or origin.username or origin.password or origin.path or origin.query or origin.fragment:
         raise Error("Portal origin must be an exact HTTPS origin")
     if enrollment.get("network") != {"mode": "devtunnel"}:
-        raise Error("Mac nodes require the private DevTunnel enrollment, not Azure VNet files")
+        raise Error("Mac nodes require the private DevTunnel enrollment")
+    if enrollment.get("tunnelAuthProvider", "github") != "github":
+        raise Error("New nodes require GitHub tunnel authentication")
     version = manifest.get("node", "")
     if not re.fullmatch(r"\d+\.\d+\.\d+", version) or not re.fullmatch(r"\d+\.\d+\.\d+", manifest.get("bunBuildTool", "")):
         raise Error("Runtime versions must be pinned")
@@ -91,156 +75,15 @@ def validate(enrollment, manifest, target, *, ready=False):
     return artifacts
 
 
-def normalize_registry(lock, registry):
-    """Rebase registry tarball locations only; preserve every version/integrity."""
-    target = urllib.parse.urlsplit(registry)
-    if target.scheme != "https" or not target.hostname or target.username or target.password or target.query or target.fragment:
-        raise Error("npm registry must be a credential-free HTTPS registry URL")
-    value = json.loads(lock.read_text())
-    allowed = {"registry.npmjs.org", "registry.npmmirror.com", "ms-feed-25.pkgs.visualstudio.com", target.hostname}
-    for key, package in value.get("packages", {}).items():
-        if not package.get("resolved"):
-            continue
-        source = urllib.parse.urlsplit(package["resolved"])
-        if source.hostname not in allowed or source.scheme != "https" or not package.get("integrity"):
-            raise Error("Unreviewed dependency source; refusing to weaken npm integrity or URL policy")
-        name = key.rsplit("node_modules/", 1)[-1]
-        version = package.get("version", "")
-        if not re.fullmatch(r"(?:@[a-z0-9_.-]+/)?[a-z0-9_.-]+", name) or not re.fullmatch(r"\d[\w.+-]*", version):
-            raise Error("Invalid locked registry package")
-        package["resolved"] = registry.rstrip("/") + "/" + name + "/-/" + name.rsplit("/", 1)[-1] + "-" + version + ".tgz"
-    write_private(lock, value)
-
-
-def build_runtime(manifest, root, release, registry, log):
-    distribution = manifest["nodeDistribution"]
-    archive = root / distribution["file"]
-    if not archive.exists():
-        part = archive.with_suffix(".part")
-        run(["curl", "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
-             "--max-time", "180", "--output", str(part), distribution["url"]], log=log)
-        if digest(part) != distribution["sha256"]:
-            raise Error("Node distribution SHA-256 mismatch")
-        os.replace(part, archive)
-    if archive.is_symlink() or digest(archive) != distribution["sha256"]:
-        raise Error("Cached Node distribution is invalid")
-    release.mkdir(mode=0o700)
-    prefix = distribution["file"].removesuffix(".tar.gz")
-    common.unpack(archive, release, (prefix,))
-    os.replace(release / prefix, release / "node")
-    for component, name in (("cloudcli", "cloudcli-source.tar.gz"), ("portal-node", "portal-node-source.tar.gz")):
-        destination = release / component
-        destination.mkdir()
-        common.unpack(SKILL / "assets" / name, destination, None)
-    node = release / "node/bin/node"
-    npm = release / "node/lib/node_modules/npm/bin/npm-cli.js"
-    cloudcli = release / "cloudcli"
-    normalize_registry(cloudcli / "package-lock.json", registry)
-    env = {key: value for key, value in os.environ.items()
-           if key in {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR", "DEVELOPER_DIR"}
-           or key.lower() in {"http_proxy", "https_proxy", "no_proxy", "all_proxy"}}
-    env.update({
-        "PATH": str(node.parent) + ":" + os.environ.get("PATH", "/usr/bin:/bin"),
-        "HUSKY": "0", "ELECTRON_SKIP_BINARY_DOWNLOAD": "1", "CI": "true",
-        "npm_config_cache": str(root / "npm-cache"), "npm_config_registry": registry,
-        "npm_config_audit": "false", "npm_config_fund": "false",
-        "npm_config_maxsockets": "4", "npm_config_replace_registry_host": "never",
-    })
-    run([node, npm, "ci", "--no-audit", "--no-fund"], cwd=cloudcli, env=env, log=log)
-    validation_home = root / "validation-home"
-    validation_home.mkdir(exist_ok=True, mode=0o700)
-    test_env = {**env, "HOME": str(validation_home), "TMPDIR": "/tmp",
-                "CODEY_CODEX_DAEMON_SOCKET": ""}
-    run([node, cloudcli / "node_modules/tsx/dist/cli.mjs", "--tsconfig", "server/tsconfig.json",
-         "--test", "--test-concurrency=2",
-         "server/modules/providers/tests/codex-windows-history.test.ts",
-         "server/modules/providers/tests/codex-macos-transport.test.ts",
-         "server/modules/providers/tests/codex-daemon-interop.test.ts",
-         "server/modules/providers/tests/codex-steering.test.ts",
-         "server/modules/auth/tests/portal-sso.service.test.ts",
-         "server/modules/websocket/tests/portal-sso-websocket.test.ts",
-         "server/modules/websocket/tests/shell-websocket.service.test.ts"],
-        cwd=cloudcli, env=test_env, log=log)
-    run([node, npm, "run", "typecheck"], cwd=cloudcli, env=test_env, log=log)
-    run([node, npm, "run", "lint"], cwd=cloudcli, env=test_env, log=log)
-    # Portal serves the already reviewed shared UI. Do not rebuild/replace it on this Mac.
-    run([node, npm, "run", "build:server"], cwd=cloudcli, env=env, log=log)
-    run([node, npm, "prune", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=cloudcli, env=env, log=log)
-    write_private(release / "release.json", manifest)
-
-
 def port_busy(port):
     with socket.socket() as sock:
         sock.settimeout(0.5)
         return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
-def desktop_codex(home):
-    """Identify the installed Codex app by bundle ID, not a project/PATH shim."""
-    for apps in (Path("/Applications"), home / "Applications"):
-        for app in sorted(apps.glob("*.app")):
-            try:
-                with (app / "Contents/Info.plist").open("rb") as stream:
-                    info = plistlib.load(stream)
-                binary = app / "Contents/Resources/codex"
-                if info.get("CFBundleIdentifier") == "com.openai.codex" and binary.is_file():
-                    return binary
-            except (OSError, ValueError, plistlib.InvalidFileException):
-                continue
-    raise Error("Provide --codex-bin pointing to the reviewed installed Codex native executable")
-
-
 def token_bound_tunnel(executable, enrollment, config_root):
-    state_file = config_root / "tunnel.json"
-    requested = "codey-" + enrollment["nodeId"]
-    description = "Codey macOS " + enrollment["nodeId"]
-    if state_file.exists():
-        state = service.private_json(state_file)
-        if state.get("requested") != requested:
-            raise Error("Existing tunnel journal belongs to another node")
-        result = run([executable, "show", state.get("qualifiedId", requested), "--json"], check=False)
-        if result.returncode:
-            raise Error("The recorded tunnel is unavailable; do not create another identity")
-    else:
-        # Record intent first: if acknowledgement is lost, retry inspects this
-        # exact name instead of creating a second tunnel.
-        write_private(state_file, {"requested": requested})
-        result = run([executable, "create", requested, "--description", description, "--json"])
-    value = json.loads(result.stdout)
-    tunnel = value.get("tunnel", value)
-    tunnel_id, cluster_id = tunnel.get("tunnelId", ""), tunnel.get("clusterId", "")
-    if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,58}[a-z0-9]", tunnel_id)
-            or not re.fullmatch(r"[a-z][a-z0-9]{1,15}", cluster_id)
-            or tunnel.get("description") != description):
-        raise Error("The tunnel is not bound to this installation")
-    qualified = tunnel_id + "." + cluster_id
-    write_private(state_file, {"requested": requested, "qualifiedId": qualified, "tunnelId": tunnel_id, "clusterId": cluster_id})
-    ports = tunnel.get("ports") or []
-    if any(entry.get("portNumber") not in (3001, 8443) for entry in ports):
-        raise Error("This node tunnel contains unrelated ports")
-    for port in (3001, 8443):
-        existing = next((entry for entry in ports if entry.get("portNumber") == port), None)
-        if existing and existing.get("protocol") != "https":
-            raise Error("Existing tunnel port is not HTTPS")
-        if not existing:
-            run([executable, "port", "create", qualified, "--port-number", str(port), "--protocol", "https", "--json"])
-    return tunnel_id, cluster_id
-
-
-def launch_agent(label, mode, config, runtime_path):
-    agent = {
-        "Label": label, "ProgramArguments": [str(Path(sys.executable).resolve()), "-I", config["worker"], mode, str(runtime_path)],
-        "RunAtLoad": True, "ProcessType": "Background", "ThrottleInterval": 60, "Umask": 63,
-        "WorkingDirectory": config["releaseRoot"],
-        "StandardOutPath": str(Path(config["configRoot"]) / (mode + ".log")),
-        "StandardErrorPath": str(Path(config["configRoot"]) / (mode + ".log")),
-    }
-    if mode == "renew":
-        agent["StartInterval"] = 300
-        agent["KeepAlive"] = {"SuccessfulExit": False}
-    else:
-        agent["KeepAlive"] = True
-    return plistlib.dumps(agent).decode()
+    binding = tunnels.ensure_tunnel(executable, enrollment, config_root)
+    return binding["tunnelId"], binding["clusterId"]
 
 
 def verify_backend(config):
@@ -299,16 +142,22 @@ def configure(args):
     registry = urllib.parse.urlsplit(args.npm_registry)
     if registry.scheme != "https" or not registry.hostname or registry.username or registry.password or registry.query or registry.fragment:
         raise Error("npm registry must be a credential-free HTTPS registry")
-    codex_home = Path(args.codex_home or home / ".codex").resolve()
-    existing_config = tomllib.loads((codex_home / "config.toml").read_text())
+    defaults = config_defaults.prepare(
+        SKILL, codex_home=args.codex_home,
+        copilot_api_config=getattr(args, "copilot_api_config", None),
+        model_key_file=getattr(args, "model_key_file", None), require_provider_key=True,
+    )
+    codex_home = defaults.codex_home
+    existing_file = codex_home / "config.toml"
+    existing_config = tomllib.loads(existing_file.read_text(encoding="utf-8-sig")) if existing_file.is_file() else {}
     provider = existing_config.get("model_providers", {}).get(existing_config.get("model_provider"), {})
-    auth = provider.get("auth", {})
+    provider_auth = provider.get("auth", {})
     usage_key = args.usage_key_file
-    if not usage_key and auth.get("command") == "cat" and len(auth.get("args", [])) == 1:
-        usage_key = auth["args"][0]
+    if not usage_key and provider_auth.get("command") == "cat" and len(provider_auth.get("args", [])) == 1:
+        usage_key = provider_auth["args"][0]
     if not usage_key or not Path(usage_key).is_absolute() or not Path(usage_key).is_file():
         raise Error("Specify the existing local usage API key file; no provider key will be regenerated")
-    codex = Path(args.codex_bin or desktop_codex(home)).resolve()
+    codex = codex_cli.require_cli(SKILL, args.codex_bin)
     devtunnel = Path(args.devtunnel_bin or shutil.which("devtunnel") or "").resolve()
     for file in (codex, devtunnel):
         if not file.is_file() or not os.access(file, os.X_OK):
@@ -323,15 +172,18 @@ def configure(args):
     if not workspace.is_dir():
         raise Error("Workspace root must already exist")
     plan = {"platform": target, "nodeId": node_id, "mode": "private-devtunnel", "root": str(root),
-            "loopbackPorts": [3001, 8443], "existingModelProxy": "127.0.0.1:4141 (unchanged)",
+            "loopbackPorts": [3001, 8443], "existingModelProxy": "127.0.0.1:4141 (not restarted or replaced)",
             "services": ["CloudCLI", "Codey-owned Codex backend", "read-only HTTPS data relay", "DevTunnel", "node-scoped token renewal"],
-            "azurePermissionsRequiredByNode": False, "workspaceRoot": str(workspace), "npmRegistry": args.npm_registry}
+            "azurePermissionsRequiredByNode": False, "workspaceRoot": str(workspace), "npmRegistry": args.npm_registry,
+            "modelDefaults": defaults.report()}
     if not args.apply:
         print(json.dumps({"apply": False, "plan": plan}, indent=2))
         return
-    logged_in = run([devtunnel, "user", "show"], check=False)
-    if logged_in.returncode or "not logged in" in logged_in.stdout.lower():
-        raise Error("Run devtunnel user login as this Mac owner before installing")
+    defaults.require_ready()
+    logged_in = auth.cli(devtunnel, ["user", "show", "--json"], check=False)
+    if not auth.github_logged_in(logged_in):
+        raise Error("Run devtunnel user login --github --use-browser-auth as this Mac owner. "
+                    "No cached account was switched and no Entra fallback was started.")
     if (root.exists() or config_root.exists()) and not args.retry_failed:
         raise Error("Installation files already exist; review them and use --retry-failed for this same unfinished identity")
     if args.retry_failed and (root.exists() or config_root.exists()):
@@ -362,7 +214,7 @@ def configure(args):
             if not args.retry_failed:
                 raise Error("Release directory already exists")
             shutil.rmtree(release)
-        build_runtime(manifest, root, release, args.npm_registry, log)
+        build_runtime(manifest, root, release, args.npm_registry, log, skill=SKILL)
         certificate, private_key = config_root / "node.pem", config_root / "node.key"
         if not certificate.exists() and not private_key.exists():
             dns = node_id + ".nodes.codey.internal"
@@ -375,23 +227,16 @@ def configure(args):
             raise Error("Incomplete TLS identity; existing certificate/key was not replaced")
         write_private(config_root / "enrollment.json", enrollment)
         write_private(config_root / "ticket.key", enrollment["clientSigningKey"])
-        write_private(config_root / "macos-service.py", (SKILL / "scripts/macos-service.py").read_text())
+        python_runtime = install_bundle(SKILL / "scripts", config_root / "service", "macos")
         tunnel_id, cluster_id = token_bound_tunnel(devtunnel, enrollment, config_root)
         node = release / "node/bin/node"
-        provider_env = {}
-        if provider.get("env_key"):
-            name = provider["env_key"]
-            if (not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name) or not os.environ.get(name)
-                    or name.startswith("CODEY_") or name in {
-                        "HOME", "PATH", "USER", "HOST", "NODE_ENV", "DATABASE_PATH",
-                        "CODEX_HOME", "CODEX_THREAD_ID", "CODEX_PARENT_THREAD_ID", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
-                    }):
-                raise Error("A referenced provider environment credential is missing; existing configuration was not changed")
-            provider_env[name] = os.environ[name]
+        defaults_result = defaults.apply()
+        provider_env = defaults.provider_env
         config = {
             "schema": 1, "uid": os.getuid(), "nodeId": node_id, "name": args.name, "releaseId": manifest["releaseId"],
             "home": str(home), "osUser": pwd.getpwuid(os.getuid()).pw_name, "releaseRoot": str(release), "configRoot": str(config_root),
-            "enrollmentFile": str(config_root / "enrollment.json"), "worker": str(config_root / "macos-service.py"),
+            "enrollmentFile": str(config_root / "enrollment.json"), "worker": python_runtime["entrypoint"],
+            "pythonRuntime": python_runtime,
             "nodeExe": str(node), "nodeSha256": digest(node), "devtunnelExe": str(devtunnel), "devtunnelSha256": digest(devtunnel),
             "codexExe": str(codex), "codexHome": str(codex_home), "workspaceRoot": str(workspace),
             "codexSocket": f"/private/tmp/codey-{os.getuid()}/{node_id}.sock",
@@ -402,7 +247,7 @@ def configure(args):
             "databasePath": str(config_root / "auth.db"), "certificate": str(certificate), "privateKey": str(private_key),
             "ticketKeyFile": str(config_root / "ticket.key"), "usageUrl": "http://127.0.0.1:4141/",
             "usageKeyFile": str(Path(usage_key).resolve()), "providerEnv": provider_env,
-            "tunnelId": tunnel_id, "clusterId": cluster_id,
+            "tunnelId": tunnel_id, "clusterId": cluster_id, "tunnelAuthProvider": "github",
         }
         write_private(runtime_path, config)
         service.renew(config, enrollment, force=True)
@@ -434,7 +279,8 @@ def configure(args):
         write_private(args.out, machine)
         write_private(state_file, {"status": "local-ready", "nodeId": node_id, "uid": os.getuid(), "releaseId": manifest["releaseId"],
                                    "launchAgents": [label for label, _ in created]})
-        print(json.dumps({"ok": True, "localReady": True, "portalActivationRequired": True, "output": str(args.out)}, indent=2))
+        print(json.dumps({"ok": True, "localReady": True, "portalActivationRequired": True,
+                          "modelDefaults": defaults_result, "output": str(args.out)}, indent=2))
     except Exception:
         for label, plist in reversed(created):
             run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"], check=False)
@@ -444,12 +290,13 @@ def configure(args):
         raise
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--name", default="Mac")
     parser.add_argument("--codex-home")
+    config_defaults.add_existing_gateway_arguments(parser)
     parser.add_argument("--codex-bin")
     parser.add_argument("--devtunnel-bin")
     parser.add_argument("--openssl-bin")

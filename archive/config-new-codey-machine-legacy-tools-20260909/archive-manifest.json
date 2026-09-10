@@ -1,0 +1,119 @@
+{
+  "schema": 1,
+  "reason": "Pre-module review snapshot; legacy Windows resume and repair removed from first-install package",
+  "sourceCommit": "93381fd444e8295dbc093dad6285d1e2623fc210",
+  "files": [
+    {
+      "file": "skills/config-new-codey-machine/SKILL.md",
+      "sha256": "3a0c1977dbbe2d391258e20d796dd211a9c946894c84079de2dc85cd0e16300b"
+    },
+    {
+      "file": "skills/config-new-codey-machine/agents/openai.yaml",
+      "sha256": "76a49c8a95e27addcf59dd809da2eb1820c7edb8c8e2ed01a362391ec87f412c"
+    },
+    {
+      "file": "skills/config-new-codey-machine/dependencies.json",
+      "sha256": "d8a5a6993abee72791daa44621cbf3437d46084f660659344edf226e49f81cba"
+    },
+    {
+      "file": "skills/config-new-codey-machine/references/verification.md",
+      "sha256": "ef687a3bf5cabe36dcca92c653e29ceac83aa30805aa238f49e6951ec9316a34"
+    },
+    {
+      "file": "skills/config-new-codey-machine/references/windows-codex-repair.md",
+      "sha256": "b827e14ff69c55023445db843f8e6f526883ffe360d75b5f2c7d885636e2932e"
+    },
+    {
+      "file": "skills/config-new-codey-machine/references/windows-recovery.md",
+      "sha256": "be80159c7bb37ea742d126b125202c0583f6ad26580a582b7ca218b1f3b3e1ae"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/configure-linux.py",
+      "sha256": "239b355a025ce7727141d2108a1bdcb3f8d6ef348250ef86811f9077224fb2d1"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/configure-macos.py",
+      "sha256": "55de111c790e3ae8d2352dd751563c84d3d7d7e2e60302ac9e2ea3c922c7700f"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/configure-windows-tunnel.py",
+      "sha256": "29aed3fd4d85058ac13b7fe793e4c5a6bdc3aacc4c246ba35d0ec50f71479371"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/linux-tunnel-service.py",
+      "sha256": "29374eb05be60f097534737d741be3766b633c6e3fbfb445b31f8ca6d1f9c9ea"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/machine-common.py",
+      "sha256": "85d8e51b5155a61737cf39335c9893c732c0ec33ec21ec9373550939583511c1"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/macos-service.py",
+      "sha256": "44deed7caa60d1a1b3b7ca68159e01a204e50dc2ffdd0404c97b229f0ee1f296"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/repair-windows-codex.ps1",
+      "sha256": "524c35502a7f02fe50f056d455c6231478ebe5a64c195ecb59d513a1a3b928cd"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/repair-windows-codex.py",
+      "sha256": "298fde0969a31040e9140c7c76fd347db25b3e60769454f42ef6a841a3c937ee"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/setup-linux.sh",
+      "sha256": "df7bfdd7d8547d1506d384c70e4532887fc026420b300bc3b62759022fc0d743"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/setup-macos.sh",
+      "sha256": "4eb55ab41e078df090061c359a841938dd1ea28f0d4305b09578ee1e4c89e0ab"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/setup-windows.ps1",
+      "sha256": "a9b852b6efaca81b33b7cd774aaffeae6fab0ba6a597e3b12c4811745304f3eb"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/tunnel-client.py",
+      "sha256": "ca8781324151fde602f77d895f9ebdc1d5d9f6292ea6c5118833792a738e2b24"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/windows-codex-repair-tasks.ps1",
+      "sha256": "3c66088e8342a7548b8ca8b7b39fbbbf72c949c835541557f73d4e1d3fb53e3a"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/windows-codex-runtime.py",
+      "sha256": "12970944a15be3007fba897072811551db20bb9719a0fa194c86967598b74d20"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/windows-helpers.py",
+      "sha256": "4ff449a1f3203df25a3b91209d9bafd4fdf74ffd01cbb78f2e611887eb21a6b9"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/windows-owner.py",
+      "sha256": "fe314bda58681807fcafc59383070509a4760e264563d3bf107112630df9a8ac"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/windows-tunnel-service.py",
+      "sha256": "210c3eaa2b5a96d44f2644476b499ce402136ec93bd488850cfbc0ff3851f3d8"
+    },
+    {
+      "file": "skills/config-new-codey-machine/scripts/windows-tunnel-tasks.ps1",
+      "sha256": "30ecaf2334d33efa5d88acc3655745f1d04351e8aa696901461da721a1858bb5"
+    },
+    {
+      "file": "test/test_windows_tunnel.py",
+      "sha256": "d88fe522c04d1025081aabf6e057f14303558b5eec5e1499e9fea723c5a704f1"
+    },
+    {
+      "file": "test/test_windows_tunnel_resume.py",
+      "sha256": "2ede4cf4c56a2c5ea64915602904164914963fd59d358d513bd43f15e8b61bac"
+    },
+    {
+      "file": "test/test_windows_codex_runtime.py",
+      "sha256": "383e73d6ec4097fa471609c06895c715dae72f3f2d18b1b5feb54ee18b522abe"
+    },
+    {
+      "file": "test/windows-codex-tasks-fixture.ps1",
+      "sha256": "ea30cf5f0deb84a38a03af2b1d5c04da6ed89c1d27bf98d00996965f0eae82a3"
+    }
+  ]
+}

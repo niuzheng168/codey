@@ -1,11 +1,31 @@
 {
   "schema": 1,
   "platform": "linux-x64",
-  "platforms": ["windows-x64", "linux-x64", "macos-arm64", "macos-x64"],
+  "platforms": [
+    "windows-x64",
+    "linux-x64",
+    "macos-arm64",
+    "macos-x64"
+  ],
   "plannedPlatforms": [],
   "reviewedAt": "2026-09-08",
   "node": "24.20.0",
   "bunBuildTool": "1.4.2",
   "cloudcliRepository": "https://github.com/niuzheng168/claudecodeui.git",
-  "copilotApiRepository": "https://github.com/niuzheng168/copilot-api.git"
+  "copilotApiRepository": "https://github.com/niuzheng168/copilot-api.git",
+  "devTunnelCli": {
+    "linux-x64": {
+      "url": "https://tunnelsassetsprod.blob.core.windows.net/cli/linux-x64-devtunnel",
+      "sha256": "ff6911548907b5abaea4ed5baa36b2420be7c5debcb637a4f50f7a4002b10b60"
+    }
+  },
+  "codexCli": {
+    "version": "0.146.0",
+    "integrities": {
+      "linux-x64": "sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==",
+      "windows-x64": "sha512-b3lxMYeR0+IhstNo4JjX1P9cPc1xwVcCVkPd1lD1wpWPJ0SBhpIkPczwbu3ZRkJcdyl342+rgyf4DUrbZLdrGA==",
+      "macos-arm64": "sha512-nb61yX4r5L6Z0dlC4o3u0GAK1YCd4TUvjaB382bajDoh84V+uv2hTBIVZ++fgXWV9yoeuNrNnNcn7GoTGOe2Tg==",
+      "macos-x64": "sha512-hTQR5jy/ObfTf1MDnuJCZJAe+SljKE8DDwQWN6lDFgjsPhMQz852U2tILt8Ei+G5GkQSzemHYKl2AYPwW0Y5xw=="
+    }
+  }
 }

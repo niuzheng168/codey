@@ -1,0 +1,4 @@
+interface:
+  display_name: "Config new Codey machine"
+  short_description: "Windows/macOS/Linux：GitHub 私有 DevTunnel 接入"
+  default_prompt: "使用 $config-new-codey-machine 与本人对应平台完整包。先检查原有服务和目标平台，再确认 DevTunnel 的 GitHub 登录；不自动切换账号、不回退到 Entra。使用对应原生入口先查看计划，获得确认后安装。全部新服务仅监听回环地址，不开放入站端口，不接管原有 Codex、模型代理或节点。自检通过后生成无密钥机器文件，由门户实际验通并添加；分别报告本机检查、隧道连通、升级器状态和真实模型调用。"

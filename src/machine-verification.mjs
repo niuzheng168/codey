@@ -100,7 +100,9 @@ export async function verifyMachine(machine, { principal, master, clientKey, req
     if (!usageAvailable) {
       // The optional Copilot quota API may fail while the node remains usable.
       // Do not turn that into a successful quota result or waive authentication.
-      if (machine.networkMode !== "devtunnel" || health.body?.relay !== "codey-node-relay" ||
+      const ownerBoundData = health.body?.relay === "codey-node-relay" ||
+        (machine.platform === "linux-x64" && health.body?.service === "copilot-api-codey-https");
+      if (machine.networkMode !== "devtunnel" || !ownerBoundData ||
           health.body.nodeId !== machine.id) {
         throw new Error("An unavailable quota API requires a verified owner-bound relay");
       }

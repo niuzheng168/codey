@@ -4,28 +4,28 @@
 Plan or install a fresh owner-bound Windows Codey node, never a Linux/WSL node.
 .DESCRIPTION
 Uses the personalized Windows DevTunnel package while preserving an existing
-model proxy and Codex installation. Legacy VNet packages still take NetworkFile.
+model proxy and Codex installation. DevTunnel uses the owner's GitHub login.
 Default is a read-only plan. -Apply -NetworkApproved approves the private
 outbound tunnel and loopback listeners; firewall/network rules are not changed.
 Services start only while the original Windows owner is logged on.
--Resume verifies and reuses a completed runtime that stopped at tunnel binding,
-before runtime configuration or tasks were created. It never rebuilds or creates
-a replacement tunnel. A successful installation remains verification-only.
+A successful installation remains verification-only. Existing-node recovery
+tools are archived and are not part of this first-install entrypoint.
 #>
 [CmdletBinding()]
 param(
-    [string]$NetworkFile = '',
     [string]$Out = (Join-Path $PSScriptRoot '..\output\codey-machine.json'),
     [string]$Enrollment = (Join-Path $PSScriptRoot '..\assets\enrollment.json'),
     [string]$Name = '',
     [string]$PythonExe = '',
     [string]$OpenSslExe = '',
     [string]$CodexExe = '',
+    [string]$CodexHome = '',
+    [string]$CopilotApiConfig = '',
+    [string]$ModelKeyFile = '',
     [string]$DevTunnelExe = '',
     [string]$UsageKeyFile = '',
     [string]$WorkspaceRoot = '',
     [string]$ExpectedComputerName = '',
-    [switch]$Resume,
     [switch]$Apply,
     [switch]$NetworkApproved
 )
@@ -34,7 +34,7 @@ if ($env:OS -ne 'Windows_NT' -or -not [Environment]::Is64BitOperatingSystem) {
     throw 'This entry point requires native Windows x64. It does not use WSL or install on macOS.'
 }
 if ($Apply -and -not $NetworkApproved) {
-    throw 'Review the private DevTunnel or VNet plan first; confirm with -NetworkApproved. No firewall rules will be changed.'
+    throw 'Review the private DevTunnel plan first; confirm with -NetworkApproved. No firewall rules will be changed.'
 }
 if ($ExpectedComputerName -and $env:COMPUTERNAME -ine $ExpectedComputerName) {
     throw 'Wrong computer. No installation or environment change was attempted.'
@@ -54,25 +54,21 @@ if (-not $PythonExe) {
 if (-not [IO.Path]::IsPathRooted($PythonExe) -or -not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) {
     throw 'PythonExe must name an existing absolute executable path.'
 }
-$tunneled = $invitation.network.mode -eq 'devtunnel'
-if ($tunneled) {
-    if ($NetworkFile) { throw 'A private DevTunnel package must not use a VNet network file.' }
-    $arguments = @('-X', 'utf8', '-I', '-B', (Join-Path $PSScriptRoot 'configure-windows-tunnel.py'),
-        '--enrollment', $Enrollment, '--out', $Out)
-    if ($DevTunnelExe) { $arguments += @('--devtunnel-executable', $DevTunnelExe) }
-    if ($UsageKeyFile) { $arguments += @('--usage-key-file', $UsageKeyFile) }
-    if ($WorkspaceRoot) { $arguments += @('--workspace-root', $WorkspaceRoot) }
-    if ($ExpectedComputerName) { $arguments += @('--expected-computer-name', $ExpectedComputerName) }
-    if ($Resume) { $arguments += '--resume' }
-} else {
-    if ($Resume) { throw '-Resume supports only unfinished Windows DevTunnel setup before task registration.' }
-    if (-not $NetworkFile) { throw 'Legacy private-network packages require their reviewed NetworkFile.' }
-    $arguments = @('-X', 'utf8', '-I', '-B', (Join-Path $PSScriptRoot 'configure-windows.py'),
-        '--enrollment', $Enrollment, '--network-file', $NetworkFile, '--out', $Out)
+if ($invitation.network.mode -ne 'devtunnel') {
+    throw 'Download this account''s current private DevTunnel package. Existing nodes are not migrated by this installer.'
 }
+$arguments = @('-X', 'utf8', '-I', '-B', (Join-Path $PSScriptRoot 'codey.py'), 'windows',
+    '--enrollment', $Enrollment, '--out', $Out)
+if ($DevTunnelExe) { $arguments += @('--devtunnel-executable', $DevTunnelExe) }
+if ($UsageKeyFile) { $arguments += @('--usage-key-file', $UsageKeyFile) }
+if ($WorkspaceRoot) { $arguments += @('--workspace-root', $WorkspaceRoot) }
+if ($ExpectedComputerName) { $arguments += @('--expected-computer-name', $ExpectedComputerName) }
 if ($Name) { $arguments += @('--name', $Name) }
 if ($OpenSslExe) { $arguments += @('--openssl', $OpenSslExe) }
 if ($CodexExe) { $arguments += @('--codex-executable', $CodexExe) }
+if ($CodexHome) { $arguments += @('--codex-home', $CodexHome) }
+if ($CopilotApiConfig) { $arguments += @('--copilot-api-config', $CopilotApiConfig) }
+if ($ModelKeyFile) { $arguments += @('--model-key-file', $ModelKeyFile) }
 if ($Apply) { $arguments += '--apply' }
 if ($NetworkApproved) { $arguments += '--network-approved' }
 & $PythonExe @arguments

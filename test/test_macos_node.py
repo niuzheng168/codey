@@ -8,6 +8,7 @@ import io
 import json
 from pathlib import Path
 import plistlib
+import sys
 import tempfile
 import time
 import unittest
@@ -23,7 +24,8 @@ def load(name, file):
     return value
 
 
-installer = load("mac_installer_test", "skills/config-new-codey-machine/scripts/configure-macos.py")
+sys.path.insert(0, str(ROOT / "skills/config-new-codey-machine/scripts"))
+from codey_node.platforms.macos import install as installer, build
 service = installer.service
 builder = load("mac_bundle_test", "scripts/build-machine-bundle.py")
 
@@ -73,17 +75,17 @@ class MacNodeTests(unittest.TestCase):
             package = {"version": "1.2.3", "integrity": "sha512-original",
                        "resolved": "https://registry.npmmirror.com/pkg/-/pkg-1.2.3.tgz"}
             file.write_text(json.dumps({"packages": {"node_modules/@scope/pkg": package}}))
-            installer.normalize_registry(file, "https://feed.example.test/public/npm/registry/")
+            build.normalize_registry(file, "https://feed.example.test/public/npm/registry/")
             after = json.loads(file.read_text())["packages"]["node_modules/@scope/pkg"]
             self.assertEqual(after["version"], package["version"])
             self.assertEqual(after["integrity"], package["integrity"])
             self.assertEqual(after["resolved"], "https://feed.example.test/public/npm/registry/@scope/pkg/-/pkg-1.2.3.tgz")
             with self.assertRaises(service.ServiceError):
-                installer.normalize_registry(file, "https://user:secret@feed.example.test/")
+                build.normalize_registry(file, "https://user:secret@feed.example.test/")
             package["resolved"] = "https://unreviewed.example.test/pkg.tgz"
             file.write_text(json.dumps({"packages": {"node_modules/pkg": package}}))
             with self.assertRaises(service.ServiceError):
-                installer.normalize_registry(file, "https://registry.npmjs.org/")
+                build.normalize_registry(file, "https://registry.npmjs.org/")
 
     def test_launchd_jobs_are_user_login_scoped_and_renewal_is_periodic(self):
         config = {"worker": "/private/worker.py", "releaseRoot": "/private/release", "configRoot": "/private/state"}

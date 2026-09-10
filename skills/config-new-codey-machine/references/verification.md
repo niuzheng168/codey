@@ -1,85 +1,131 @@
 # 验收与精确回退
 
-## 完成条件
+## 验收
 
-1. 源码包及下载的 Node SHA-256 与 manifest 一致；Node、两个 fork 的 commit/version
-   可追溯，npm/Bun 依赖使用锁文件安装，不要求所有 binary 都包含在 ZIP。
-2. Linux 的 `codey-copilot-api.service` 和 `codey-cloudcli.service` active/enabled；
-   Windows DevTunnel 的 workspace/data/tunnel/renew 四个任务仅在原 owner 登录后运行，
-   使用 InteractiveToken/LeastPrivilege，没有 boot/SYSTEM/S4U 或执行策略变更。
-   保留既有 `4141` 与 Codex；`8443/3001` 仅 loopback。旧 VNet 包是两个服务任务、
-   监听既有 VM 私有 IP；两种入口不能混用。没有修改全局 Node/Codex。
-   Windows 要单独验证注销后不运行、重新登录后自动启动；语法/规划测试不算实机验收。
-3. 本机正确 SNI/CA 的 TLS 握手、带本节点 ticket 的 Usage/History、
-   带本 owner 的 Workspace SSO 均通过；匿名请求 401。
-   DevTunnel 的 Copilot 配额暂不可用时，允许用独立的 `/token-usage` 200 且匿名 401
-   证明数据访问，必须报告 `usage: false` 和警告，不能伪称配额或模型推理已通过。
-4. VNet 包的 Azure 路由按计划建立。Peering 双向 Connected；或 PE Approved，PLS NAT/IP、
-   LB 规则与后端仅指向本机。实际 NSG 只允许正确来源的两个服务端口。
-   DevTunnel 包仅本节点私有隧道与两个 HTTPS 端口，connect-only 令牌续期；不新增入站规则。
-5. **由门户发起的** TLS、Usage/History、SSO 和 WebSocket 通过后，页面才能添加。
-   本地 `/healthz` 200 不能代替 ACA 可达性。
-6. 同 owner 能看到节点与 Workspace；未登录、其他用户/管理员不能访问或认领它。
-   移除后不能用旧机器文件重新认领；需新的预留身份与明确的机器重配。
-7. 如果用户要模型推理，另验证本人 provider 登录与一次真实请求。
-   无 provider 认证不能标“全部就绪”；只读服务和网络通过可单独交付。
-8. Linux 的 `codey-node-updater.service` active/enabled；加机完成后设置页显示升级器在线，
-   owner/ID 和组件/Node 版本正确。私有升级凭据不能登录门户或调用模型，其他账号
-   无法排队升级。后续通过页面确认更新，不借首次安装器重装或改变 enrollment。
-   Windows 尚无签名升级器：总览的“Workspace 在线”来自固定 `/health` 的严格 TLS
-   检查，不写入升级器心跳，不推测 copilot-api 版本，也不开放 Linux 更新入口。
-9. Windows 和 Linux 必须使用各自完整包；重下/添加平台与预留身份一致。
-   未发布的平台或依赖缺失时明确停止；macOS 使用其匹配架构的独立完整包，不用 Linux 包代替。
+1. 使用本人对应平台完整包，确认 owner/node ID、独立凭据、源码与 Node 摘要匹配。
+   独立 Codex CLI 准备步骤验证固定官方包 SHA-512 和 `--version`，不需要预装 Node；
+   保留已有 config/auth，模型登录与本步骤分开。
+2. DevTunnel `user show --json` 显示 GitHub；不接受泛化的“已登录”，不切换现有账号。
+3. 新服务只监听回环地址；私有隧道仅有 HTTPS 3001/8443，没有匿名访问或额外端口。
+   未改防火墙、IP、SSH、现有代理进程或其他节点；Codex/gateway 仅有明确批准的默认配置变更，
+   未知配置、登录凭据和会话保留。
+4. 本机验证固定 leaf/SAN 的 TLS、节点 ticket、History、Workspace SSO，匿名请求 401。
+   配额不可用时，只有绑定本节点的只读数据服务及独立 token-usage 认证均通过才可继续；
+   输出 quota warning，不能据此声称模型推理通过。
+5. Windows 原 owner 的 InteractiveToken/LeastPrivilege 登录任务、macOS 的 launchd、
+   Linux 的 systemd 用户服务使用固定本机运行路径，不以 root/SYSTEM 接管用户会话。
+   服务启动前由 stdlib-only launcher 校验完整的 Python 模块清单和逐文件 SHA-256，
+   再导入目标平台 supervisor。缺文件、变更摘要、陌生模块或链接路径必须拒绝。
+6. **门户实际发起**私有隧道、TLS、认证和 WebSocket 检查，再启用节点。
+   本机 health 200、PID 存在、CLI exit 0 或单元测试不能代替这一步。
+7. 隧道续期只提交同节点 connect-only 令牌，拒绝改绑、回滚、重放和其他 owner。
+   登录过期时由原 owner 完成 GitHub 授权；不静默切换 provider 或创建替代隧道。
+8. Linux 升级器需 active/enabled、添加后在门户在线且 owner/ID 一致。
+   Windows/macOS 仅以实际 Workspace 检查报告在线，不伪造 Linux 更新心跳。
+9. 模型登录与接入分开验收。用户要求聊天能力时，需真实 Codey 和 Codex 回答。
+10. 重跑已成功安装只验收，不改服务、身份或运行版本；重启/注销恢复必须另行实测。
 
-## 故障定位
+## 独立默认配置
 
-- 下载得到说明 ZIP：回到新入口下载“完整机器配置 Skill”，不是手动旧 Skill。
-- 缺失 assets / hash 不匹配：停止执行，重新下载完整包；不拿别人的 enrollment 补齐。
-- Windows 登录报 `A window handle must be configured`，或组织阻止 device-code 登录：
-  不重复设备码/无窗口登录，也不以 `az login` 替代。原 owner 在普通、可见的非管理员
-  PowerShell 执行 `devtunnel user login --entra --use-browser-auth`，以 `devtunnel user show`
-  确认，再继续原安装阶段。CLI 不在 PATH 时使用错误 JSON 中已引用绝对路径的命令。
-  缓存登录已可用时不再发起登录，不注销、重建节点/隧道或重装服务。
-- 原代理 `/usage` 返回 500 “Failed to fetch Copilot usage”：这是配额上游错误，不等于
-  Codex 聊天故障。按新版 Skill 的独立数据认证检查继续并报告配额警告，不改/重启代理。
-  旧包若尚未创建安装状态/服务/隧道，从同一待配置身份重下修正版；不是创建新节点。
-  `/usage` 或 `/token-usage` 的 401/403、独立统计不可用、TLS/SSO 错误仍须停止。
-- NSG 没有可用优先级或 Azure RBAC 不足：报告具体资源，不覆盖企业安全规则。
-- SSH 超时：保持 SSH/公网规则不变；用用户已授权的 Azure 管理渠道。
-- 地址重叠：PLS 路径，不强行 peering、不改 VM IP/默认路由。
-- `installation.json` ID/release 不匹配、端口/服务被占：停止，不重装未知环境。
-- Windows 在隧道绑定时失败、完整 build/TLS/enrollment 已存在但尚未创建 runtime/任务：
-  使用同一身份/release 的修正版完整包，先 `setup-windows.ps1 -Resume` 只读验核，
-  再按授权使用 `-Resume -Apply -NetworkApproved`。核对仍为原 tunnel ID/cluster，
-  Node/后端 build、enrollment、ticket 与 TLS 原字节未变，未重跑下载/npm/构建或创建新隧道。
-  CLI 的 qualified tunnel ID 与独立 cluster 字段必须一致；不能手改 journal 或跳过身份检查。
-  已有 runtime、任务/worker 或激活文件不在此恢复窗口内；成功重跑仍只验收。
-- Windows 已添加且能查看历史，但报 native Codex executable unavailable：
-  检查安装器保存的 Desktop 版本化缓存路径是否已消失；按
-  [已接入节点的原生 Codex 修复](windows-codex-repair.md) 使用独立 repair 入口，
-  不重跑首次安装/Resume，不增加 PATH fallback。验收私有副本及所有 companion SHA-256、
-  原生 stdio/model catalog 和实际 Codey 回复；原代理、Desktop、身份/隧道、构建不变。
-- Windows 防火墙阻止私网访问：先审核精确来源/IP/端口并获得用户确认，不自动放行；
-  现有 Dev Tunnel 节点不用这个首次 VNet 安装器重装。
-- 本机通过、门户添加失败：VNet 包检查 PE/LB/NSG/UDR/ACA egress；DevTunnel 包检查
-  私有隧道、令牌续期与两个回环服务。保留机器文件供重试。
-  不删除正在工作的节点或重新创建多个邀请绕过失败。
+在目标当前用户下运行，POSIX 不用 root/sudo。按实际 Home、有效 `CODEX_HOME` 和 OS 读写权限操作；
+不做 Unix group/ACL 额外判定，不通过 `chmod`/`chown` 改变现有路径权限。
+路径、链接、并发和鉴权保护仍适用；OS 拒绝时报告具体路径，不提权或清空 Home。
 
-## 回退
+Codex Home 优先使用显式 `--codex-home`，否则是目标 owner 的 `CODEX_HOME` 或 Home 下的 `.codex`；
+控制端环境不能代替目标环境。先核对计划的 `ownerHome` / `codexHome`。
+Linux 首次安装自动选择新服务实际 `COPILOT_API_HOME/config.json`；
+Windows/macOS 以及 standalone defaults 必须显式提供正在使用的 gateway config，不能猜旧默认目录。
 
-- 未添加的配置包：在门户“待配置身份”取消，立即拒绝该 ID 后续添加。
-  包有签名 key，应从 Downloads/临时传输位置移入 owner 受保护目录或删除多余副本。
-- 已添加的机器：本人在页面移除；撤销门户访问，但不关 VM、不删项目/会话。
-- Linux 本次首次安装：只 disable/stop `codey-copilot-api.service` 和
-  `codey-cloudcli.service`、`codey-node-updater.service`；仅在它们确属本次新建时操作。
-  保留 `.codex`、业务数据、证书与诊断，别清理用户目录。
-- Windows 本次首次安装：只停止/删除本次新建的、身份/owner/启动路径全部匹配的
-  DevTunnel workspace/data/tunnel/renew 任务；旧 VNet 包仅自己的两个服务任务。
-  不接管原有任务、终止其他进程或递归删除安装目录。现有 Dev Box 服务不在回退范围。
-- Azure：依据对应 `.azure-state.json` 逐项审核本次新建资源。先移除本次 NSG rules，
-  PE → PLS → 本次 NIC backend association → LB → 专属 /28；不要删 NIC 或原 subnet。
-  删除前核实 node-specific name/ownership tags 与当前引用，避免删除后来已复用的资源。
-  新建 peering 仅在确定没有其他节点依赖时撤回，复用的 peering 永不删除。
-- Linger 是 OS user 级设置；若还有其他用户服务依赖它，不回退关闭。
+以下均在解压后的 Skill 根目录执行；占位符替换为目标机器上核对过的绝对路径：
 
-不通过回滚清除真实故障证据，不通过关 TLS 校验、伪造门户会话或共享 master 来“验通”。
+```text
+python -I -B scripts/codey.py defaults --owner-home "<目标 Home>" --codex-home "<有效 Codex Home>" --copilot-api-config "<active config.json>" --provider-env-file "<目标 provider.env>"
+python -I -B scripts/codey.py defaults --owner-home "<目标 Home>" --codex-home "<有效 Codex Home>" --copilot-api-config "<同计划的 config.json>" --provider-env-file "<同计划的 provider.env>" --apply
+```
+
+第一条默认 plan（也可显式 `--plan`），不写文件、不创建备份、不重启服务；第二条需先批准。
+没有文件式 provider.env 时省略该参数。多活动 key 用 `--model-key-file "<已生效 key 的文件>"` 选择，
+不在命令行传 key 内容；Windows 包装器对应 `-CopilotApiConfig` / `-ModelKeyFile`。
+
+- 公共 catalog 只含 `gpt-6-astra`、`gpt-5.6-sol`、`gpt-5.6-sol-fast`，校验包内固定摘要后写到
+  有效 Codex Home 的 `models.json`；`config.toml` 的 `model_catalog_json` 指向该真实路径。
+  计划明确列出模型、context、effort、`danger-full-access` / `never` 等默认值，再做保留式合并。
+- Linux 在新服务首次启动前完成以上文件、实际 gateway 的 `useResponsesApiWebSocket=false`
+  及 `provider.env` 的活动新 key 绑定；旧 key 不加入新 gateway。Windows/macOS 保留已有活动 key。
+- `supports_websockets=false` 与 gateway 的上述 flag 只关闭**模型 Responses WS**，
+  不关闭 Responses HTTP/SSE，也不关闭 DevTunnel/Workspace 的 WebSocket。
+- 仅替换有差异的目标文件，先核对快照并保留私有备份，再原子替换；并发编辑必须拒绝或保留，
+  不能被回退覆盖。报告只含路径、状态、摘要，不含 key/token。
+- 重跑应 `changedFiles=[]`、不新增备份、不改字节或 mtime；哈希核对包括 config、catalog、
+  gateway 与 provider.env。文件落盘不等于旧进程环境或 gateway runtime 已重载，必要重载须另获授权。
+
+## 排障
+
+- 包/摘要/平台不匹配：停止，重下同一待配置身份的完整包，不拼凑凭据。
+- 端口或服务已占用：停止；已有工作节点不能拿首次安装器直接覆盖。
+- CLI 是 Microsoft 登录：保留缓存，要求本人审查 GitHub 登录，不能自动 logout。
+- Linux 新代理模型请求 401：区分 GitHub 模型登录与本机 API key。核对新 CloudCLI 环境、
+  owner 登录环境及 Codex 后台是否都使用新 key；文件更新不会改变已运行进程的环境。
+  获准后仅停止归属明确的旧进程；若 SSH/Desktop 自动拉起它，先修正启动环境。
+  不向新代理加入旧 key 做兼容，不恢复旧服务或删除会话；验收需证明新 key 成功、旧 key 被拒绝。
+- CLI 输出中 ID 已带区域后缀：仅使用经过严格核对的 ID/cluster，不猜区域。
+- 权限不足、公司代理或 GitHub/DevTunnel 策略拒绝：报告具体阶段，不开放匿名访问。
+- TLS、ticket、SSO、匿名拒绝失败：保持未添加，不关闭证书验证或跳过认证。
+- 既有节点恢复与修复工具不随首次安装包分发；先审查归档工具及当前节点，不重新建节点。
+
+## 原生守护检查
+
+Linux（只检查本次安装的已核对单元，不把旧同名单元当作通过）：
+
+```bash
+systemctl --user is-enabled codey-copilot-api.service codey-cloudcli.service \
+  codey-devtunnel.service codey-devtunnel-renew.timer codey-node-updater.service
+systemctl --user is-active codey-copilot-api.service codey-cloudcli.service \
+  codey-devtunnel.service codey-devtunnel-renew.timer codey-node-updater.service
+loginctl show-user "$(id -un)" -p Linger
+```
+
+主服务需 enabled/active、`Restart=always`；renew 是 oneshot，不要求它持续 active。
+timer 每 300 秒检查续期，令牌接近过期时才签发；网络/登录失效必须报告，不创建替代隧道。
+
+Windows：只读检查 `Codey Node <nodeId> workspace/data/tunnel/renew` 四个原 owner 登录任务、
+私有 runtime 中固定的 Python/服务入口，以及各组件 health 文件。任务 Running 不代替 HTTPS 自检。
+macOS：用 `launchctl print gui/<uid>/com.codey.<nodeId>.<mode>` 检查该 owner 的
+codex/workspace/data/tunnel/renew jobs；renew 间歇执行，其他组件使用 KeepAlive。
+两平台均需原 owner 登录；不要通过 SYSTEM/root 规避会话和权限边界。
+
+故障注入须单独批准准确节点、服务/PID 和时间窗口；确认空闲后一次只测试一个目标。
+记录注入前后 PID、自动恢复耗时、监听和认证/SSO/模型结果，不以人工 restart 冒充守护恢复。
+不得广泛 kill Codex、SSH 或模型进程；注销/重启测试同样需授权，未测试就明确标注。
+
+## 签名自动升级验收
+
+仅适用于已接入独立 updater 的受支持 Linux 节点。这里的“自动”是执行 owner 已审核确认的
+签名任务，不是擅自安装任意最新发行版；发行目录需实际读取，不编造 ID 或 sequence。
+
+1. **升级前**：核对 owner/node ID、空闲状态、当前组件及配置/catalog/key 哈希；
+   审核版本、组件、迁移和发布摘要。保留独立 updater、Node/Codex 与身份，不用新节点安装器覆盖。
+2. **任务证据**：观察 `queued/claimed → downloading → staging → waiting_idle → applying → verifying`
+   到最终状态。`busy` 应等待；签名、平台、运行时、迁移或配置不满足就停止，不跳过门禁。
+3. **真实成功**：正常为 `succeeded/ok`；核对非空 `transaction.anchors`、候选包 commit/hash、
+   installed receipt 的 releaseId/sequence/digest，以及后续 heartbeat，不能只看服务 active。
+   Codey 与 ephemeral/read-only Codex 都应给出真实回答；内置探针分别验证
+   `CODEY_NODE_UPDATE_OK` / `CODEX_NODE_UPDATE_OK`，不以健康接口代替模型调用。
+4. **no-op**：version、commit、entrySha256 全相同才是验证型 no-op；无下载、无服务重启、
+   anchors 为空，通常为 `succeeded/up_to_date`，仍须双模型验证。ACK 重试可能报告 `ok`，
+   所以不只看最终 code；相同版本号或入口 hash 也不能证明整个包相同。
+5. **降级与失败**：低于已成功 sequence 的签名发布应被拒绝，同 sequence 不同 digest 也拒绝。
+   不删除 receipt、改 node ID 或放宽签名来通过测试。失败的 code-only rollback 不恢复旧数据库、
+   key 或用户配置；`rolled_back/needs_action/needs_migration` 均不算升级成功，恢复后另做双模型验收。
+   重试同一签名包使用新的批准任务和候选路径，不复用或清空失败 staging 绕过检查。
+
+## 精确回退
+
+- 失败只停止本次新建、归属/路径明确的进程或服务；保留诊断和原有数据。
+- Linux 范围：本次新建的 codey-copilot-api、codey-cloudcli、codey-node-updater、
+  codey-devtunnel、codey-devtunnel-renew 服务/定时器。不能停止同机既有的同名服务。
+- Windows/macOS 只撤回本次明确创建的任务/LaunchAgent，不接管原 Desktop/代理。
+- 隧道/待配置身份的取消或删除需单独确认，只操作本节点已记录的精确 ID。
+- 已添加节点由 owner 在门户移除，仅撤销门户访问；不删除机器文件/项目/会话。
+- 不关闭其他用户服务依赖的 linger，不清理登录缓存，不递归删除用户目录。
+- 含密钥的 ZIP/临时副本留在 owner 受保护目录；公开交付仅含非敏感机器文件和报告。

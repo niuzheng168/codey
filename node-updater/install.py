@@ -62,7 +62,7 @@ Environment=HOME={home}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 WorkingDirectory={runtime.root}
 ExecStart={Path(sys.executable).resolve()} -I -S {destination}/updater.py --config {agent_config} run
-Restart=on-failure
+Restart=always
 RestartSec=15
 TimeoutStopSec=900
 KillMode=mixed

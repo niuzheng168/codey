@@ -161,35 +161,41 @@ async function fixture(t) {
   return { root, base, accounts, policy, auth, credential, member, cookie, admin, manifest, bundleRoot, machineSetup, data, workspace, probes, request, master, ticketMaster };
 }
 
-test("Windows and Mac native packages need no VNet and activate only after scoped tunnel proof", async t => {
+test("all native packages use GitHub DevTunnel without VNet and activate only after scoped tunnel proof", async t => {
   const f = await fixture(t);
   f.machineSetup.network = null;
   f.machineSetup.tunnels.verifyAccess = async () => {};
-  for (const [index, platform] of ["macos-arm64", "macos-x64", "windows-x64"].entries()) {
-    await bundle(path.join(f.bundleRoot, "platforms", platform), platform);
+  for (const [index, platform] of ["macos-arm64", "macos-x64", "windows-x64", "linux-x64"].entries()) {
+    await bundle(platform === "linux-x64" ? f.bundleRoot : path.join(f.bundleRoot, "platforms", platform), platform);
     const response = await f.request(`/api/settings/machines/skill?platform=${platform}`, { method: "POST" });
     assert.equal(response.status, 200);
-    assert.ok(response.headers.get("content-disposition").includes(`-${platform === "windows-x64" ? "windows" : platform}-n-`));
+    assert.ok(response.headers.get("content-disposition").includes(platform === "linux-x64"
+      ? "config-new-codey-machine-n-" : `-${platform === "windows-x64" ? "windows" : platform}-n-`));
     const files = unzip(Buffer.from(await response.arrayBuffer()));
-    for (const file of platform === "windows-x64"
-      ? ["setup-windows.ps1", "configure-windows-tunnel.py", "windows-tunnel-service.py", "windows-tunnel-client.py",
-        "windows-codex-runtime.py", "repair-windows-codex.py", "repair-windows-codex.ps1", "windows-codex-repair-tasks.ps1"]
-      : ["setup-macos.sh", "configure-macos.py", "macos-service.py"]) {
-      assert.ok(files.has(`config-new-codey-machine/scripts/${file}`));
+    for (const file of [...MACHINE_SKILL_FILES, ...MACHINE_PLATFORMS.find(item => item.id === platform).files]) {
+      assert.ok(files.has(`config-new-codey-machine/${file}`), file);
     }
-    assert.ok(files.has("config-new-codey-machine/assets/portal-node-source.tar.gz"));
+    assert.equal(files.has("config-new-codey-machine/assets/portal-node-source.tar.gz"), platform !== "linux-x64");
+    assert.ok(![...files.keys()].some(name => name.includes("archive/") || name.includes("azure-vnet.py") ||
+      name.includes("configure-machine.py") || name.endsWith("/configure-windows.py") ||
+      name.includes("repair-windows") || name.endsWith("/resume.py") || name.includes("windows-recovery")));
     if (platform === "windows-x64") {
       assert.match(files.get("config-new-codey-machine/SKILL.md").toString(), /Copilot 配额不是聊天健康检查/);
-      assert.match(files.get("config-new-codey-machine/scripts/configure-windows-tunnel.py").toString(), /probe\("\/token-usage"\)/);
-      assert.match(files.get("config-new-codey-machine/scripts/configure-machine.py").toString(), /copilot_quota_unavailable_model_inference_not_tested/);
-      assert.ok(files.has("config-new-codey-machine/references/windows-codex-repair.md"));
-      assert.match(files.get("config-new-codey-machine/scripts/configure-windows-tunnel.py").toString(), /native\.pin\(codex, root, node_id/);
+      assert.match(files.get("config-new-codey-machine/scripts/codey_node/platforms/windows/preflight.py").toString(), /probe\("\/token-usage"\)/);
+      assert.match(files.get("config-new-codey-machine/scripts/codey_node/common/verification.py").toString(), /copilot_quota_unavailable_model_inference_not_tested/);
+      assert.match(files.get("config-new-codey-machine/scripts/codey_node/platforms/windows/install.py").toString(), /native\.pin\(codex, root, node_id/);
+    }
+    assert.ok(files.has("config-new-codey-machine/scripts/codey_node/common/codex_cli.py"));
+    assert.equal(JSON.parse(files.get("config-new-codey-machine/dependencies.json")).codexCli.version, "0.146.0");
+    for (const other of ["linux", "macos", "windows"].filter(other => !platform.startsWith(other))) {
+      assert.ok(![...files.keys()].some(name => name.includes(`/platforms/${other}/`)));
     }
     assert.ok(!files.has(`config-new-codey-machine/scripts/${platform === "windows-x64" ? "setup-macos.sh" : "setup-windows.ps1"}`));
-    assert.ok(!files.has("config-new-codey-machine/scripts/setup-linux.sh"));
-    assert.ok(![...files.keys()].some(name => name.includes("assets/codey-updater/")));
+    assert.equal(files.has("config-new-codey-machine/scripts/setup-linux.sh"), platform === "linux-x64");
+    assert.equal([...files.keys()].some(name => name.includes("assets/codey-updater/")), platform === "linux-x64");
     const enrollment = JSON.parse(files.get("config-new-codey-machine/assets/enrollment.json"));
     assert.deepEqual(enrollment.network, { mode: "devtunnel" });
+    assert.equal(enrollment.tunnelAuthProvider, "github");
     assert.equal(enrollment.platform, platform);
     assert.match(enrollment.tunnelUpdateKey, /^[A-Za-z0-9_-]{43}$/);
     assert.notEqual(enrollment.tunnelUpdateKey, enrollment.workspaceSsoKey);
@@ -229,7 +235,7 @@ test("Windows and Mac native packages need no VNet and activate only after scope
     assert.ok(!JSON.stringify(node).includes(connectToken));
     assert.ok(!JSON.stringify(await f.policy.records()).includes(connectToken));
   }
-  assert.equal(f.probes.length, 3);
+  assert.equal(f.probes.length, 4);
 });
 
 test("complete skill download reserves only this user's identity, includes dependencies and no global or provider credentials", async (t) => {
@@ -307,8 +313,8 @@ test("platform downloads are distinct and missing Mac/Windows releases never fal
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-disposition"), /config-new-codey-machine-windows-n-/);
   const files = unzip(Buffer.from(await response.arrayBuffer()));
-  for (const file of ["setup-windows.ps1", "configure-windows.py", "windows-service.py", "windows-tasks.ps1"]) {
-    assert.ok(files.has("config-new-codey-machine/scripts/" + file));
+  for (const file of MACHINE_PLATFORMS.find(item => item.id === "windows-x64").files) {
+    assert.ok(files.has("config-new-codey-machine/" + file));
   }
   assert.ok(!files.has("config-new-codey-machine/scripts/setup-linux.sh"));
   assert.ok(![...files.keys()].some((name) => name.includes("assets/codey-updater/")));

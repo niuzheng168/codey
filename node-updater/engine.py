@@ -245,6 +245,31 @@ class Runtime:
         self.profile_file = self.private / "profile.json"
         self.profile = read(self.profile_file) if self.profile_file.exists() else None
 
+    def model_config_paths(self, cloudcli_env):
+        config_home = Path(cloudcli_env.get("CODEX_HOME", str(self.home / ".codex")))
+        files = [self.home / ".codex/config.toml", config_home / "config.toml",
+                 self.home / ".config/codey-model-auth/api-key"]
+        require(all(file.resolve().is_relative_to(self.home) for file in files), "configuration_changed")
+        config_file = config_home / "config.toml"
+        if config_file.is_file():
+            document = tomllib.loads(config_file.read_text(encoding="utf-8-sig"))
+            reference = document.get("model_catalog_json")
+            if reference is not None:
+                require(isinstance(reference, str) and reference.strip() and "\0" not in reference,
+                        "configuration_changed")
+                if reference.startswith("~/"):
+                    catalog = self.home / reference[2:]
+                else:
+                    require(not reference.startswith("~"), "configuration_changed")
+                    catalog = Path(reference)
+                    if not catalog.is_absolute():
+                        catalog = config_home / catalog
+                catalog = catalog.resolve()
+                # Never follow a configured path into another owner's data, or silently omit a missing catalog.
+                require(catalog.is_relative_to(self.home) and catalog.is_file(), "configuration_changed")
+                files.append(catalog)
+        return list(dict.fromkeys(files))
+
     def snapshot(self):
         require(platform.system() == "Linux" and platform.machine() == "x86_64", "unsupported_platform")
         require(os.getuid() != 0 and self.config["nodeId"] != "local", "unsupported_platform")
@@ -310,7 +335,7 @@ class Runtime:
         require(data.is_relative_to(self.home) and database.is_relative_to(self.home), "configuration_changed")
         require(not any(data.is_relative_to(directory) or database.is_relative_to(directory)
                         for directory in [cloudcli, copilot]), "configuration_changed")
-        protected = [cc_unit, cp_unit, data / "config.json", self.home / ".codex/config.toml"]
+        protected = [cc_unit, cp_unit, data / "config.json", *self.model_config_paths(cc_env)]
         for key in ["COPILOT_API_CODEY_TLS_CERT", "COPILOT_API_CODEY_TLS_KEY", "COPILOT_API_CODEY_SIGNING_KEY_FILE"]:
             if cp_env.get(key):
                 protected.append(Path(cp_env[key]))
@@ -510,8 +535,35 @@ class Runtime:
             env = {"HOME": str(temporary_home), "PATH": str(Path(node).parent) + ":/usr/bin:/bin",
                    "CI": "true", "HUSKY": "0", "ELECTRON_SKIP_BINARY_DOWNLOAD": "1",
                    "DATABASE_PATH": ":memory:", "CODEY_MANAGED": "false", "CODEY_PORTAL_SSO": "false"}
-            run([node, npm, "ci", "--omit=dev", "--no-audit", "--no-fund"], cwd=candidate, env=env,
-                timeout=180, log=Path(job) / "dependency-install.private.log")
+            package_file, lock_file = candidate / "package.json", candidate / "package-lock.json"
+            original = package_file.read_bytes()
+            package = json.loads(original)
+            lock_hash = sha(lock_file)
+            # HUSKY=0 cannot help when --omit=dev removes the husky executable.
+            # Only this known development hook is omitted; native install hooks still run.
+            omit_prepare = (package.get("name") == "@cloudcli-ai/cloudcli"
+                            and package.get("scripts", {}).get("prepare") == "husky"
+                            and "husky" in package.get("devDependencies", {})
+                            and not any("husky" in package.get(group, {})
+                                        for group in ["dependencies", "optionalDependencies", "peerDependencies"]))
+            backup = None
+            try:
+                if omit_prepare:
+                    with tempfile.NamedTemporaryFile(prefix=".codey-package-", dir=candidate, delete=False) as stream:
+                        stream.write(original)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    backup = Path(stream.name)
+                    backup.chmod(package_file.stat().st_mode & 0o777)
+                    del package["scripts"]["prepare"]
+                    save(package_file, package)
+                run([node, npm, "ci", "--omit=dev", "--no-audit", "--no-fund"], cwd=candidate, env=env,
+                    timeout=180, log=Path(job) / "dependency-install.private.log")
+            finally:
+                if backup is not None:
+                    os.replace(backup, package_file)
+                require(not package_file.is_symlink() and package_file.is_file() and package_file.read_bytes() == original
+                        and not lock_file.is_symlink() and lock_file.is_file() and sha(lock_file) == lock_hash, "stage_failed")
         for name in ["dist", ".codey-bin"]:
             if (old / name).is_dir() and not (candidate / name).exists():
                 shutil.copytree(old / name, candidate / name, symlinks=True)
@@ -730,6 +782,8 @@ class Upgrade:
             for name in changed:
                 require(after["components"][name]["entrySha256"] == manifest["components"][name]["entrySha256"], "health_failed")
             runtime.model(after, job)
+            # Both probes must preserve configuration and the just-verified package/runtime.
+            runtime.assert_unchanged(after)
             save(runtime.private / "installed.json", {"releaseId": manifest["id"], "sequence": manifest["sequence"],
                  "digest": digest, "components": after["components"], "updatedAt": int(time.time() * 1000)})
             save(job / "transaction.json", {"state": "succeeded", "anchors": anchors})

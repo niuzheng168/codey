@@ -160,7 +160,7 @@
         <div class="dialog-heading">
           <div>
             <h2 id="add-node-title">添加自己的节点</h2>
-            <p id="add-node-description" class="muted">先选择目标系统、配置机器，再验通添加。Windows / Linux 使用 Azure 私网，macOS 使用私有 DevTunnel。</p>
+            <p id="add-node-description" class="muted">选择目标系统，使用本人 GitHub 登录配置私有 DevTunnel，再验通添加。Windows / macOS / Linux 均无需开放入站端口。</p>
           </div>
           <button id="close-add-node" class="icon-button quiet" type="button" aria-label="关闭添加节点" autofocus>×</button>
         </div>
@@ -193,11 +193,11 @@
             <span class="step-number" aria-hidden="true">2</span>
             <div class="step-content">
               <h3>在 Codex 中配置目标机器</h3>
-              <p class="muted">解压后，让 Codex 使用 <code>config-new-codey-machine/SKILL.md</code>。Windows 执行 PowerShell，Linux/macOS 执行各自 Shell 入口，默认均先显示计划。</p>
+              <p class="muted">解压后按 <code>config-new-codey-machine/SKILL.md</code> 的编号步骤先准备或复用 Codex CLI，再查看节点计划。Windows 执行 PowerShell，Linux/macOS 执行各自 Shell 入口。</p>
               <details class="setup-help">
                 <summary>支持范围与安全说明</summary>
-                <p class="muted">目标为 Azure Windows x64 或 Linux x64，需联网安装依赖。网络、防火墙与模型登录必须本人确认。Windows 服务仅在本人登录后运行，不安装 Linux 升级器；可达性使用真实 Workspace 健康检查。现有 Windows Dev Tunnel 节点不需重新安装。</p>
-                <p class="muted">macOS 通过本人登录的 DevTunnel 主动连接，不开放入站端口，不需要 Azure VM 或节点后台的 Azure 部署权限。安装独立 CloudCLI/HTTPS 数据服务与 launchd 登录服务，复用现有 Codex 和本机模型代理，不修改其配置。令牌自动续期，仅绑定本节点。</p>
+                <p class="muted">支持原生 Windows x64、macOS 和 Linux x64，需联网准备依赖。网络与模型登录必须本人确认。Windows 服务仅在本人登录后运行，不安装 Linux 升级器；可达性使用真实 Workspace 健康检查。现有节点不需重新安装。</p>
+                <p class="muted">三平台均通过本人 GitHub 登录的私有 DevTunnel 主动连接，不需要节点的云资源管理权限。Windows/macOS 保留已有模型代理；Linux 使用独立安装。隧道令牌仅绑定本节点，模型登录另行完成。</p>
                 <p class="muted">每次下载预留一个七天有效的机器身份，尚不加入节点列表。包内含本次专属密钥，请勿分享。</p>
               </details>
             </div>
@@ -206,7 +206,7 @@
             <span class="step-number" aria-hidden="true">3</span>
             <div class="step-content">
               <h3>验通并添加机器</h3>
-              <p class="muted">上传 Skill 生成的 <code>codey-machine.json</code>，不是 ZIP、SHA-256 或 enrollment。门户验证 VNet/DevTunnel、节点身份与 Workspace 后才加入列表；机器文件不含密钥或连接令牌。</p>
+              <p class="muted">上传 Skill 生成的 <code>codey-machine.json</code>，不是 ZIP、SHA-256 或 enrollment。门户验证私有 DevTunnel、节点身份与 Workspace 后才加入列表；机器文件不含密钥或连接令牌。</p>
               <form id="add-prepared-machine-form" class="import-form">
                 <label>配置完成的机器文件<input id="prepared-machine-file" type="file" accept=".json,application/json" required /></label>
                 <button class="primary" type="submit">验通并添加机器</button>

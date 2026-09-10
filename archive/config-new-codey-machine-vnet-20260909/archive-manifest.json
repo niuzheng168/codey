@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "archivedAt": "2026-09-09T21:12:52.6131714+08:00",
+  "sourceCommit": "93381fd444e8295dbc093dad6285d1e2623fc210",
+  "purpose": "Historical Azure VNet onboarding; excluded from active Skill downloads; no private assets",
+  "files": [
+    {
+      "file": "SKILL.md",
+      "sha256": "bdfcbae1af3c10a07fadb44d49e312aca0ab96f11bc69990da263087a7727733"
+    },
+    {
+      "file": "dependencies.json",
+      "sha256": "a4e91f08010eaf44fd9cf4c54e38b32a0f649b00c06f687aa3727aa26f409d20"
+    },
+    {
+      "file": "agents/openai.yaml",
+      "sha256": "f65c237a985063fa616b11e733716ae5696182c1d6d51f4102ccc06c27af1053"
+    },
+    {
+      "file": "references/verification.md",
+      "sha256": "71ac3ef5041a8c1400d067ec4339e5a4aaf4101c6b03f1e8eb8541bd34d50f24"
+    },
+    {
+      "file": "scripts/azure-vnet.py",
+      "sha256": "c49107d1b08045289042701f06b7ec1d65482d291230f7e1714a755654dde02d"
+    },
+    {
+      "file": "scripts/configure-machine.py",
+      "sha256": "7bb08f03be528bc1c0dd661fea7f747cc925032139bd94989c2ff540b9324cc2"
+    },
+    {
+      "file": "scripts/setup-linux.sh",
+      "sha256": "dc1d8bf2581dfba9a8781b8257959b6ad96b7cf884cda117f29bbea81b28d972"
+    },
+    {
+      "file": "scripts/configure-windows.py",
+      "sha256": "e090a168112d58ba78258c0fe26529cb18d1dcae723450915aa5bca5cedfa8ce"
+    },
+    {
+      "file": "scripts/setup-windows.ps1",
+      "sha256": "791134974807a6122e5eeb88dad698d2e4e7f85a9236e0dc0ca995ab8a2c51b0"
+    },
+    {
+      "file": "scripts/windows-service.py",
+      "sha256": "93d2665f78409f7f051439040e222243e35f02289780e10bb1aca658a41674ab"
+    },
+    {
+      "file": "scripts/windows-tasks.ps1",
+      "sha256": "ba16277c7c7f6c0ec2b64b1809201632e6b23ed832fb6a283ad4eb30d0c025d4"
+    },
+    {
+      "file": "docs/codey-machine-setup.md",
+      "sha256": "b53f1f38e00d07d9ad80dc520f73d7643538a5669291f81f355da158dba6182d"
+    }
+  ]
+}

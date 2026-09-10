@@ -35,6 +35,7 @@ test("actual TLS probes require the pinned node, correct owner/tickets, anonymou
   let usageStatus = 200, usageBody = { ok: true }, tokensStatus = 200, tokensBody = { totals: {} };
   let anonymousTokensAllowed = false;
   let relayNodeId = id;
+  let dataService = "relay";
   let requests = 0;
   const sso = (req) => {
     try {
@@ -64,7 +65,8 @@ test("actual TLS probes require the pinned node, correct owner/tickets, anonymou
     res.writeHead(status, { "content-type": "application/json" });
     res.end(JSON.stringify(req.url === "/api/auth/status"
       ? { managedAuthentication: true, needsSetup: false, user: { username: "alice" } }
-      : req.url === "/healthz" ? { ok: true, relay: "codey-node-relay", nodeId: relayNodeId }
+      : req.url === "/healthz" ? { ok: true, nodeId: relayNodeId, ...(dataService === "relay"
+        ? { relay: "codey-node-relay" } : { service: dataService }) }
       : req.url === "/usage" ? usageBody : req.url === "/token-usage" ? tokensBody : { ok: true }));
   });
   const sockets = new Set();
@@ -122,6 +124,19 @@ test("actual TLS probes require the pinned node, correct owner/tickets, anonymou
     assert.deepEqual(result.warnings, ["copilot_quota_unavailable_model_inference_not_tested"]);
   }
   usageStatus = 200; usageBody = null;
+  dataService = "copilot-api-codey-https";
+  const linux = { ...tunnelMachine, platform: "linux-x64" };
+  const linuxResult = await verifyMachine(linux, tunnelOptions);
+  assert.equal(linuxResult.usage, false);
+  assert.equal(linuxResult.tokenUsage, true);
+  assert.equal(linuxResult.websocket, true);
+  await assert.rejects(verifyMachine({ ...linux, platform: "windows-x64" }, tunnelOptions), { status: 502 });
+  relayNodeId = "wrong-linux-node";
+  await assert.rejects(verifyMachine(linux, tunnelOptions), { status: 502 });
+  relayNodeId = id;
+  dataService = "unrecognized-gateway";
+  await assert.rejects(verifyMachine(linux, tunnelOptions), { status: 502 });
+  dataService = "relay";
   assert.equal((await verifyMachine(machine, options)).usage, true, "Preserve headless VNet HTTP 200 behavior");
   usageStatus = 500; usageBody = { error: "quota unavailable" };
   await assert.rejects(verifyMachine(machine, options), { status: 502 }, "VNet behavior is not relaxed");

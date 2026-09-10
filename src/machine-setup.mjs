@@ -14,11 +14,16 @@ import { MachineTunnelService } from "./machine-tunnel.mjs";
 export const MACHINE_SKILL = "config-new-codey-machine";
 export const MACHINE_SKILL_FILES = Object.freeze([
   "SKILL.md", "agents/openai.yaml", "dependencies.json",
-  "scripts/configure-machine.py", "scripts/azure-vnet.py", "references/verification.md",
+  "scripts/codey.py", "references/verification.md",
+  "scripts/codey_node/__init__.py", "scripts/codey_node/platforms/__init__.py",
+  ...["__init__.py", "errors.py", "files.py", "archives.py", "verification.py", "codex_cli.py"]
+    .map(file => `scripts/codey_node/common/${file}`),
+  ...["__init__.py", "auth.py", "binding.py", "renewal.py"].map(file => `scripts/codey_node/devtunnel/${file}`),
+  ...["__init__.py", "bundle.py", "launcher.py"].map(file => `scripts/codey_node/service/${file}`),
 ]);
 export const machineArtifacts = (platform) => [
   "cloudcli-source.tar.gz", "copilot-api-source.tar.gz",
-  ...(machinePlatform(platform).tunnel ? ["portal-node-source.tar.gz"] : []),
+  ...(machinePlatform(platform).dataRelay ? ["portal-node-source.tar.gz"] : []),
 ];
 const defaultSkillRoot = fileURLToPath(new URL(`../skills/${MACHINE_SKILL}/`, import.meta.url));
 const json = (res, status, value) => {
@@ -232,9 +237,10 @@ export class MachineSetup {
       expiresAt: Math.min(node.setup.expiresAt, acceptance?.expiresAt ?? Infinity),
       releaseId: manifest.releaseId, platform: platformId,
       ...(acceptance ? { acceptance } : {}),
-      ...(definition.tunnel ? { network: { mode: "devtunnel" }, tunnelUpdateKey: this.nodePolicy.tunnelUpdateKey(node.id) }
+      ...(definition.tunnel ? { network: { mode: "devtunnel" }, tunnelAuthProvider: "github",
+        tunnelUpdateKey: this.nodePolicy.tunnelUpdateKey(node.id) }
         : { network: this.network }),
-      ...(definition.tunnel ? { note: "仅用于此机器的私有 DevTunnel 节点；保留现有模型代理，不需要节点后台的 Azure 部署权限。" } : {}),
+      ...(definition.tunnel ? { note: "仅用于此机器的私有 DevTunnel；使用本人 GitHub 登录，不需要节点的 Azure 部署权限。隧道登录不等于模型登录。" } : {}),
     };
     if (definition.updater && this.machineUpdates) {
       entries.push(...(await this.machineUpdates.newMachineEntries(req.codeyPrincipal.id, node.id))

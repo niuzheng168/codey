@@ -280,10 +280,10 @@ export class NodePolicy {
     };
   }
 
-  /** Only reserved or enabled owner-bound Windows/Mac tunnel nodes may renew. */
+  /** Only reserved or enabled owner-bound native tunnel nodes may renew. */
   async tunnelMachine(nodeId, now = Date.now()) {
     const node = (await this.records()).data.nodes.find(item => item.id === nodeId);
-    if (!node || !["windows-x64", "macos-arm64", "macos-x64"].includes(node.setup?.platform) ||
+    if (!node || !["windows-x64", "linux-x64", "macos-arm64", "macos-x64"].includes(node.setup?.platform) ||
         !((node.enabled && node.machine?.networkMode === "devtunnel") ||
           (!node.enabled && node.setup.status === "reserved" && node.setup.expiresAt > now))) {
       throw requestError("Machine authentication failed", 401);
@@ -300,7 +300,7 @@ export class NodePolicy {
     const sealedToken = sealMachineTunnelToken(this.master, nodeId, input.connectToken);
     return this.store.mutate(data => {
       const node = data.nodes.find(item => item.id === nodeId);
-      if (!node || !["windows-x64", "macos-arm64", "macos-x64"].includes(node.setup?.platform) ||
+      if (!node || !["windows-x64", "linux-x64", "macos-arm64", "macos-x64"].includes(node.setup?.platform) ||
           !((node.enabled && node.machine?.networkMode === "devtunnel") ||
             (!node.enabled && node.setup.status === "reserved" && node.setup.expiresAt > now))) {
         throw requestError("Machine authentication failed", 401);

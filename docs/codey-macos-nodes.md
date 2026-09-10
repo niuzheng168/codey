@@ -20,13 +20,15 @@ sent to the browser. The existing Windows tunnel/env-secret path is unchanged.
 
 ## Native installer
 
-The personalized package includes `scripts/setup-macos.sh`,
-`configure-macos.py`, `macos-service.py`, the reviewed CloudCLI/copilot-api source
+The personalized package includes `scripts/setup-macos.sh`, the shared
+`scripts/codey_node/` modules and its `platforms/macos/` adapter, the reviewed CloudCLI/copilot-api source
 archives, and a minimal Portal data-runtime archive. Node is downloaded from the
 pinned official architecture-specific distribution and verified by SHA-256.
 
-The Mac must already have its normal Codex/provider login and local model proxy.
-This installer reuses them; it does not replace the proxy, rewrite Codex config,
+The separate `scripts/codey.py codex` preparation step reuses a native CLI or installs
+the pinned official platform package without requiring Node or Codex Desktop.
+Model authentication and the local model proxy are separate prerequisites.
+The node installer preserves them; it does not replace the proxy, rewrite Codex config,
 copy another machine's credentials, change global Node/npm, or open inbound ports.
 The data adapter reads the existing loopback proxy with its existing key file.
 The package's copilot-api source/version is not a claim that the existing proxy

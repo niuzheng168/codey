@@ -22,9 +22,9 @@ def load(name, file):
     return module
 
 
-network = load("machine_network", "skills/config-new-codey-machine/scripts/azure-vnet.py")
-installer = load("machine_installer", "skills/config-new-codey-machine/scripts/configure-machine.py")
-windows = load("machine_windows", "skills/config-new-codey-machine/scripts/configure-windows.py")
+network = load("machine_network", "archive/config-new-codey-machine-vnet-20260909/scripts/azure-vnet.py")
+installer = load("machine_installer", "archive/config-new-codey-machine-vnet-20260909/scripts/configure-machine.py")
+windows = load("machine_windows", "archive/config-new-codey-machine-vnet-20260909/scripts/configure-windows.py")
 ID = "n-0123456789abcdef01234567"
 VNET = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/test/providers/Microsoft.Network/virtualNetworks/node"
 
@@ -407,7 +407,7 @@ class WindowsInstallerTests(unittest.TestCase):
         ]:
             with self.assertRaisesRegex(RuntimeError, "original_logged_on"):
                 windows.service.validate({"schema": 1, "ownerSid": "owner"}, "workspace", context)
-        script = (ROOT / "skills/config-new-codey-machine/scripts/windows-tasks.ps1").read_text()
+        script = (ROOT / "archive/config-new-codey-machine-vnet-20260909/scripts/windows-tasks.ps1").read_text()
         self.assertIn("LogonType = 3", script)
         self.assertIn("RunLevel = 0", script)
         self.assertIn("Triggers.Create(9)", script)
