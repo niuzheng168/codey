@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import subprocess
 import uuid
 import zipfile
@@ -19,6 +20,16 @@ MAX_PACKAGE = 1536 * 1024 * 1024
 
 class PublishError(Exception):
     pass
+
+
+def azure_cli_command(arguments):
+    executable = shutil.which("az")
+    if not executable:
+        raise PublishError("AZURE_CLI_NOT_FOUND")
+    command = [executable, *arguments]
+    if os.name == "nt" and Path(executable).suffix.lower() in {".bat", ".cmd"}:
+        command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", *command]
+    return command
 
 
 def sha256(file):
@@ -125,13 +136,13 @@ class AzureStore:
         self.exists = ResourceExistsError
         self.not_found = ResourceNotFoundError
         self.directory = config["directory"]
-        result = subprocess.run([
-            "az", "storage", "account", "keys", "list",
+        result = subprocess.run(azure_cli_command([
+            "storage", "account", "keys", "list",
             "--subscription", config["subscription"],
             "--resource-group", config["resourceGroup"],
             "--account-name", config["storageAccount"],
             "--query", "[0].value", "--only-show-errors", "-o", "json",
-        ], capture_output=True, text=True, timeout=60)
+        ]), capture_output=True, text=True, timeout=60)
         if result.returncode:
             raise PublishError("AZURE_CREDENTIAL_LOOKUP_FAILED")
         self.share = ShareClient(
