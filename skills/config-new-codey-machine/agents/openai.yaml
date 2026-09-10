@@ -1,4 +1,4 @@
 interface:
   display_name: "Config new Codey machine"
-  short_description: "Windows/macOS/Linux 原生接入、模型默认配置与验收"
-  default_prompt: "使用 $config-new-codey-machine，按 1–6 步报告准备检查、目标、执行脚本与验收标准，核对实际 Home/CODEX_HOME 和 gateway 路径，先 plan 后批准 apply；依当前用户 OS 权限，不增加 Unix group/ACL 门禁或改现有路径权限，并分别验收真实 Codey/Codex、获授权的守护恢复及签名升级。"
+  short_description: "三平台原生接入、默认配置与 Linux legacy 显式迁移"
+  default_prompt: "使用 $config-new-codey-machine，按 1–6 步报告准备检查、目标、执行脚本与验收标准；先普通 plan，同用户已识别的 Linux 旧 Codey 服务才进入 --replace-existing plan，批准后再 apply，当前 ready 安装或未知进程不适用；保留 Home/.codex/session/auth，不恢复旧 key/服务，依当前 OS 权限完成默认配置、真实模型与获授权的恢复及升级验收。"

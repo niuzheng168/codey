@@ -22,7 +22,7 @@ from ...common.files import digest, protected_write
 from ...common.verification import verify
 from ...devtunnel import auth, binding as tunnels, renewal
 from ...service.bundle import install_bundle
-from . import cli, supervisor as worker
+from . import cli, legacy_takeover, supervisor as worker
 from .build import prepare_runtime, run
 from .systemd import unit
 
@@ -127,7 +127,16 @@ def configure(args):
     if any(path.resolve() != path or not path.is_relative_to(home) for path in (root, config)):
         raise SetupError("Installation/configuration paths must not be linked or leave this owner home")
     state_file = config / "installation.json"
-    state = worker.private_json(state_file) if state_file.exists() else None
+    state = None
+    state_error = None
+    if state_file.exists():
+        try:
+            state = worker.private_json(state_file)
+        except (worker.ServiceError, ValueError) as error:
+            state_error = error
+    if state_error and not args.replace_existing:
+        raise SetupError("An unrecognized Codey installation state exists; rerun with --replace-existing only "
+                         "to review an identified legacy service migration") from state_error
     artifacts = validate_inputs(enrollment, manifest, network, ready=bool(state and state.get("ready")))
     for artifact in artifacts:
         archive = SKILL / "assets" / artifact["file"]
@@ -138,35 +147,59 @@ def configure(args):
         raise SetupError("This OS account already has a different Codey machine/release; do not overwrite its identity")
     if state and state.get("releaseId") != manifest["releaseId"] and (state.get("ready") or not args.retry_failed):
         raise SetupError("A different release exists; only an unfinished installation may be retried with --retry-failed")
+    if state and args.replace_existing:
+        raise SetupError("--replace-existing is only for an identified legacy install without current installation state")
     service_dir = home / ".config/systemd/user"
+    def port_available(port):
+        try:
+            with socket.socket() as probe:
+                probe.bind((network["listenIp"], port))
+            return True
+        except OSError:
+            return False
+    takeover = None
     if not state:
-        if config.exists() and any(config.iterdir()):
-            raise SetupError("An unrecognized Codey configuration exists; review instead of overwriting")
-        if root.exists() and any(root.iterdir()):
-            raise SetupError("An unrecognized Codey runtime exists; no files will be reused or overwritten")
-        for name in SERVICES + ["copilot-api.service", "codey-node-updater.service",
-                                "codey-devtunnel.service", "codey-devtunnel-renew.service", "codey-devtunnel-renew.timer"]:
-            existing = run(["systemctl", "--user", "show", name, "-p", "FragmentPath", "--value"], check=False)
-            if existing.stdout.strip():
-                raise SetupError(f"An existing {name} must be reviewed before any takeover")
-        for host, port in [(network["listenIp"], 8443), (network["listenIp"], 3001), ("127.0.0.1", 4141)]:
-            try:
-                with socket.socket() as probe:
-                    probe.bind((host, port))
-            except OSError:
-                raise SetupError(f"Required listener {host}:{port} is occupied or not local; no process was stopped")
+        takeover = legacy_takeover.inspect(home, root, config, run, port_available=port_available)
+        if takeover["detected"] and not args.replace_existing:
+            raise SetupError("Recognized legacy Codey user services exist; rerun with --replace-existing to review "
+                             "the exact stop/disable/archive plan. No process was stopped")
+        if not takeover["detected"]:
+            if config.exists() and any(config.iterdir()):
+                raise SetupError("An unrecognized Codey configuration exists; review instead of overwriting")
+            if root.exists() and any(root.iterdir()):
+                raise SetupError("An unrecognized Codey runtime exists; no files will be reused or overwritten")
+            occupied = [port for port in legacy_takeover.PORTS if not port_available(port)]
+            if occupied:
+                raise SetupError("Required listeners are occupied by an unknown process; no process was stopped")
     codex = (Path(state["codexExecutable"]) if state and state.get("ready") else
              codex_cli.require_cli(SKILL, args.codex_bin))
     if not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(codex)):
         raise SetupError("This systemd installer requires a Codex path without whitespace or shell/systemd specifiers")
     defaults = None
     if not (state and state.get("ready")):
-        defaults = config_defaults.prepare(
-            SKILL, codex_home=args.codex_home,
-            copilot_api_config=root / "data/copilot-api/config.json",
-            provider_env_file=config / "provider.env", new_gateway=True,
-        )
-        if not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(defaults.codex_home)):
+        if takeover and takeover["detected"]:
+            preflight_root = home / (".codey-takeover-preflight-" + enrollment["nodeId"])
+            try:
+                preflight_root.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise SetupError("Reserved takeover preflight path already exists; review it before migration")
+            preflight = config_defaults.prepare(
+                SKILL, codex_home=args.codex_home,
+                copilot_api_config=preflight_root / "copilot-api-config.json",
+                provider_env_file=preflight_root / "provider.env", new_gateway=True,
+            )
+            preflight.require_ready()
+            target_codex_home = preflight.codex_home
+        else:
+            defaults = config_defaults.prepare(
+                SKILL, codex_home=args.codex_home,
+                copilot_api_config=root / "data/copilot-api/config.json",
+                provider_env_file=config / "provider.env", new_gateway=True,
+            )
+            target_codex_home = defaults.codex_home
+        if not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(target_codex_home)):
             raise SetupError("This systemd installer requires a Codex home without whitespace or systemd specifiers")
     summary = {
         "nodeId": enrollment["nodeId"], "releaseId": manifest["releaseId"],
@@ -174,7 +207,12 @@ def configure(args):
         "listenIp": network["listenIp"], "modelApi": "127.0.0.1:4141",
         "installationRoot": str(root), "configRoot": str(config),
         "enableLinger": args.enable_linger, "existingCodexConfig": "only approved defaults merged; other values and credentials preserved",
-        "modelDefaults": defaults.report() if defaults else {"mode": "verification-only; use the explicit defaults command for changes"},
+        "modelDefaults": (
+            defaults.report() if defaults else
+            {"mode": "fresh defaults will be prepared after the approved legacy archive"}
+            if takeover and takeover["detected"] else
+            {"mode": "verification-only; use the explicit defaults command for changes"}
+        ),
         "codexExecutable": str(codex),
         "dependencyInstallation": f"Download verified Node {manifest['node']}; install locked npm/Bun dependencies and build in a separate release",
         "providerLogin": "Owner authentication is separate; no shared provider credentials are bundled",
@@ -182,6 +220,7 @@ def configure(args):
         "azurePermissionsRequired": False, "inboundFirewallChanges": False,
         "supervisor": "systemd; Restart=always; 5-second restart delay",
         "bootAutostart": "requires this owner's linger; enabled services survive SSH logout",
+        "legacyTakeover": legacy_takeover.public(takeover) if takeover else {"detected": False},
     }
     if not args.apply:
         print(json.dumps(summary, indent=2))
@@ -215,6 +254,17 @@ def configure(args):
     was_ready = state and state.get("ready")
     try:
         enrollment_file.chmod(0o600)
+        if takeover and takeover["detected"]:
+            result = legacy_takeover.execute(
+                home, root, config, enrollment["nodeId"], run, port_available=port_available)
+            summary["legacyTakeover"] = result
+            state = None
+            defaults = config_defaults.prepare(
+                SKILL, codex_home=args.codex_home,
+                copilot_api_config=root / "data/copilot-api/config.json",
+                provider_env_file=config / "provider.env", new_gateway=True,
+            )
+            summary["modelDefaults"] = defaults.report()
         config.mkdir(parents=True, exist_ok=True, mode=0o700)
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         config.chmod(0o700)
@@ -385,6 +435,8 @@ def arguments(argv=None):
     parser.add_argument("--codex-home", help="Absolute target Codex home; otherwise the owner's CODEX_HOME or .codex")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--retry-failed", action="store_true")
+    parser.add_argument("--replace-existing", action="store_true",
+                        help="Plan/apply replacement of recognized owner legacy Codey user services")
     parser.add_argument("--enable-linger", action="store_true",
                         help="Explicitly keep this owner's user services running after logout")
     return parser.parse_args(argv)

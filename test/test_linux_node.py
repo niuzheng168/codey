@@ -196,6 +196,23 @@ class LinuxTransactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             f = fixture(Path(directory))
             calls = []
+            service_dir = f.home / ".config/systemd/user"
+            legacy_specs = {
+                "copilot-api.service": (True, 4242, "/legacy/copilot-api"),
+                "copilot-api-update.service": (False, 0, "/legacy/copilot-api-update"),
+                "copilot-api-update.timer": (True, 0, None),
+                "codey-cloudcli.service": (True, 4343, "/legacy/cloudcli"),
+                "codey-node-updater.service": (True, 4444, "/legacy/codey-updater"),
+            }
+            service_states, legacy_units = {}, {}
+            if existing:
+                service_dir.mkdir(parents=True)
+                for name, (active, pid, executable) in legacy_specs.items():
+                    unit = service_dir / name
+                    unit.write_text(("[Timer]\nOnCalendar=daily\n" if executable is None else
+                                     f"[Service]\nExecStart={executable}\n"))
+                    legacy_units[name] = unit
+                    service_states[name] = {"active": active, "pid": pid}
             def run(args, **kwargs):
                 nonlocal linger
                 args = [str(arg) for arg in args]
@@ -207,8 +224,24 @@ class LinuxTransactionTests(unittest.TestCase):
                     text = "yes" if linger else "no"
                 elif args[:2] == ["loginctl", "enable-linger"]:
                     linger = True
-                elif existing and args[:4] == ["systemctl", "--user", "show", "copilot-api.service"]:
-                    text = "/existing/protected/copilot-api.service"
+                elif args[:3] == ["systemctl", "--user", "show"]:
+                    name = args[3]
+                    if name in service_states:
+                        state = service_states[name]
+                        text = "\n".join([
+                            "Id=" + name, "LoadState=loaded",
+                            "ActiveState=" + ("active" if state["active"] else "inactive"),
+                            "MainPID=" + str(state["pid"]),
+                            "FragmentPath=" + str(legacy_units[name]), "DropInPaths=", "",
+                        ])
+                    else:
+                        text = "\n".join([
+                            "Id=" + name, "LoadState=not-found", "ActiveState=inactive",
+                            "MainPID=0", "FragmentPath=", "DropInPaths=", "",
+                        ])
+                elif args[:4] == ["systemctl", "--user", "disable", "--now"]:
+                    if args[-1] in service_states:
+                        service_states[args[-1]].update(active=False, pid=0)
                 elif args[0] == "openssl":
                     Path(args[args.index("-keyout") + 1]).write_text("PRIVATE_TEST_CERT_KEY")
                     Path(args[args.index("-out") + 1]).write_text("PUBLIC_TEST_CERTIFICATE")
@@ -233,10 +266,14 @@ class LinuxTransactionTests(unittest.TestCase):
                      patch.object(auth, "require_github_login") as login, \
                      patch.object(tunnels, "ensure_tunnel", return_value={"tunnelId": "codey-" + ID, "clusterId": "jpe1"}) as create, \
                      patch.object(renewal, "renew", return_value={"ok": True}), \
-                     contextlib.redirect_stdout(io.StringIO()):
-                    socket_factory.return_value.__enter__.return_value.bind.side_effect = (
-                        OSError("occupied test listener") if occupied else None)
+                     contextlib.redirect_stdout(io.StringIO()) as output:
+                    def bind(_address):
+                        if occupied or any(state["active"] and state["pid"] for state in service_states.values()):
+                            raise OSError("occupied test listener")
+                    socket_factory.return_value.__enter__.return_value.bind.side_effect = bind
                     f.calls, f.builder, f.cli, f.login, f.create = calls, builder, cli, login, create
+                    f.output, f.legacy_units, f.service_states = output, legacy_units, service_states
+                    f.legacy_unit = legacy_units.get("copilot-api.service", service_dir / "copilot-api.service")
                     yield f
             finally:
                 os.umask(old_mask)
@@ -251,18 +288,92 @@ class LinuxTransactionTests(unittest.TestCase):
             self.assertFalse((f.home / ".config/codey-machine").exists())
             self.assertFalse(any("enable" in call for call in f.calls))
 
-    def test_existing_services_are_not_taken_over(self):
+    def test_existing_services_require_explicit_takeover_and_default_never_stops_them(self):
         with self.setup(existing=True) as f:
             f.args.apply = True
-            with self.assertRaises(installer.SetupError):
+            with self.assertRaisesRegex(installer.SetupError, "--replace-existing"):
                 installer.configure(f.args)
             f.cli.assert_not_called()
             self.assertFalse(any("stop" in call or "disable" in call for call in f.calls))
 
+    def test_takeover_rejects_a_linked_or_external_unit_file(self):
+        with self.setup(existing=True) as f:
+            external = f.home / "external-copilot-api.service"
+            external.write_text("[Service]\nExecStart=/unknown/copilot-api\n")
+            f.legacy_unit.unlink()
+            f.legacy_unit.symlink_to(external)
+            f.args.replace_existing = True
+            with self.assertRaisesRegex(installer.SetupError, "not an ordinary unit owned by this user"):
+                installer.configure(f.args)
+            self.assertFalse(any("stop" in call or "disable" in call for call in f.calls))
+
+    def test_takeover_plan_is_read_only_and_apply_archives_only_legacy_codey_paths(self):
+        with self.setup(existing=True) as f:
+            root = f.home / ".local/share/codey-machine"
+            config = f.home / ".config/codey-machine"
+            root.mkdir(parents=True)
+            config.mkdir(parents=True)
+            (root / "old-runtime.txt").write_text("preserve old runtime")
+            (config / "old-config.txt").write_text("preserve old config")
+            legacy_copilot = f.home / ".local/share/copilot-api"
+            legacy_cloudcli_config = f.home / ".config/codey-cloudcli"
+            legacy_copilot.mkdir()
+            legacy_cloudcli_config.mkdir()
+            (legacy_copilot / "config.json").write_text('{"legacy":"credential-bearing config"}')
+            (legacy_cloudcli_config / "service.env").write_text("LEGACY_CONFIG=preserve\n")
+            codex_home = Path(f.args.codex_home)
+            sessions = codex_home / "sessions"
+            sessions.mkdir()
+            session = sessions / "original.jsonl"
+            session.write_text('{"preserve":"session"}\n')
+            auth_before = (codex_home / "auth.json").read_bytes()
+            session_before = session.read_bytes()
+            f.args.replace_existing = True
+            installer.configure(f.args)
+            plan = json.loads(f.output.getvalue())
+            self.assertTrue(plan["legacyTakeover"]["detected"])
+            self.assertEqual(plan["legacyTakeover"]["occupiedPorts"], [3001, 8443, 4141])
+            self.assertEqual(plan["modelDefaults"]["mode"],
+                             "fresh defaults will be prepared after the approved legacy archive")
+            self.assertFalse(any(call[:4] == ["systemctl", "--user", "disable", "--now"] for call in f.calls))
+            self.assertTrue(f.legacy_unit.exists())
+            f.output.seek(0)
+            f.output.truncate(0)
+            f.args.apply = True
+            installer.configure(f.args)
+            backups = list((f.home / ".local/state/codey-service-backups").iterdir())
+            self.assertEqual(len(backups), 1)
+            backup = backups[0]
+            self.assertEqual((backup / "runtime/old-runtime.txt").read_text(), "preserve old runtime")
+            self.assertEqual((backup / "config/old-config.txt").read_text(), "preserve old config")
+            self.assertEqual((backup / "legacy-copilot-api-runtime/config.json").read_text(),
+                             '{"legacy":"credential-bearing config"}')
+            self.assertEqual((backup / "legacy-cloudcli-config/service.env").read_text(),
+                             "LEGACY_CONFIG=preserve\n")
+            self.assertEqual((backup / "units/copilot-api.service").read_text(),
+                             "[Service]\nExecStart=/legacy/copilot-api\n")
+            self.assertEqual((backup / "units/codey-node-updater.service").read_text(),
+                             "[Service]\nExecStart=/legacy/codey-updater\n")
+            self.assertEqual((backup / "units/copilot-api-update.timer").read_text(),
+                             "[Timer]\nOnCalendar=daily\n")
+            self.assertTrue((backup / "takeover.json").is_file())
+            self.assertTrue(json.loads((f.home / ".config/codey-machine/installation.json").read_text())["ready"])
+            self.assertFalse(any(state["active"] for state in f.service_states.values()))
+            stopped = {call[-1] for call in f.calls
+                       if call[:4] == ["systemctl", "--user", "disable", "--now"]}
+            self.assertTrue({"copilot-api.service", "copilot-api-update.service",
+                             "copilot-api-update.timer", "codey-cloudcli.service",
+                             "codey-node-updater.service"}.issubset(stopped))
+            self.assertEqual((codex_home / "auth.json").read_bytes(), auth_before)
+            self.assertEqual(session.read_bytes(), session_before)
+            codex_config = tomllib.loads((codex_home / "config.toml").read_text())
+            self.assertEqual(codex_config["mcp_servers"]["keep"]["command"], "preserve")
+            self.assertEqual(codex_config["model_provider"], "copilot_api")
+
     def test_occupied_ports_fail_before_any_download_or_takeover(self):
         with self.setup(occupied=True) as f:
             f.args.apply = True
-            with self.assertRaisesRegex(installer.SetupError, "occupied or not local"):
+            with self.assertRaisesRegex(installer.SetupError, "unknown process"):
                 installer.configure(f.args)
             f.cli.assert_not_called()
             f.builder.assert_not_called()
@@ -359,6 +470,9 @@ class LinuxTransactionTests(unittest.TestCase):
             self.assertEqual(len(f.calls), before)
             f.builder.assert_not_called()
             f.create.assert_not_called()
+            f.args.replace_existing = True
+            with self.assertRaisesRegex(installer.SetupError, "only for an identified legacy install"):
+                installer.configure(f.args)
 
     def test_failure_only_disables_new_services_and_never_marks_ready(self):
         with self.setup() as f:
