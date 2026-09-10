@@ -25,12 +25,12 @@ function data() {
   ] };
 }
 
-async function page({ failPlan = false, pendingPlan = null } = {}) {
+async function page({ failPlan = false, pendingPlan = null, initialData } = {}) {
   const { document, elements } = settingsDom();
   const requests = [];
   const timers = [];
   const redirects = [];
-  const status = data();
+  const status = initialData ?? data();
   runInNewContext(source, {
     document, clearTimeout() {},
     window: { confirm: () => true, location: { replace: (url) => redirects.push(url) },
@@ -72,6 +72,23 @@ test("machine update controls include single-node, selected/all batch, setup and
   assert.ok(!rows[3].querySelectorAll("button").some((button) => button.textContent === "接入升级器"));
   assert.equal(p.get("all").disabled, false);
   assert.equal(p.get("selected").disabled, true);
+});
+
+test("npm node controls never offer split component updates and show the Codey package version", async () => {
+  const status = data();
+  status.nodes[0].report = { ...status.nodes[0].report, layout: "npm", components: {
+    ...status.nodes[0].report.components,
+    codey: { version: "0.1.0", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24 },
+  } };
+  const split = await page({ initialData: status });
+  assert.equal(split.get("list").children[0].children[0].children[0].disabled, true);
+  assert.equal(split.get("list").children[1].children[0].children[0].disabled, false);
+  status.releases[0].components = { codey: {
+    version: "0.2.0", commit: "b".repeat(40), entrySha256: "b".repeat(64), nodeMajors: [24],
+  } };
+  const unified = await page({ initialData: status });
+  assert.equal(unified.get("list").children[0].children[0].children[0].disabled, false);
+  assert.equal(unified.get("list").children[1].children[0].children[0].disabled, true);
 });
 
 test("single-machine action only previews its node; no job is sent until explicit confirmation", async () => {

@@ -15,9 +15,8 @@
     "sha256": "ff6911548907b5abaea4ed5baa36b2420be7c5debcb637a4f50f7a4002b10b60",
     "provider": "github"
   },
-  "bundledPayloads": [
-    "cloudcli.tar.gz",
-    "copilot-api.tar.gz",
-    "updater.tar.gz"
-  ]
+  "npmPackage": {
+    "name": "codey",
+    "dependencies": "npm-shrinkwrap.json"
+  }
 }

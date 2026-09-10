@@ -50,6 +50,7 @@ if (root) {
     const release = target();
     if (!current?.enabled || node.protected || !node.enrolled || !node.report || node.activeJob || !release) return false;
     if (node.report.platform !== release.platform || node.report.highestSequence > release.sequence || node.report.blockedReason) return false;
+    if ((node.report.layout === "npm") !== Object.hasOwn(release.components, "codey")) return false;
     if (release.migrations.some((id) => !node.report.readyMigrations.includes(id))) return false;
     if (Object.entries(release.components).some(([name, item]) => !item.nodeMajors.includes(node.report.components[name]?.nodeMajor))) return false;
     return node.report.highestSequence < release.sequence || node.report.currentRelease !== release.id ||
@@ -124,7 +125,9 @@ if (root) {
       label.append(check, element("strong", node.name));
       const components = node.report?.components;
       const info = element("div", null, "node-update-info");
-      info.append(element("span", `CloudCLI ${components?.cloudcli?.version || "未知"} · copilot-api ${components?.copilotApi?.version || "未知"}`, "muted"));
+      info.append(element("span", components?.codey
+        ? `Codey ${components.codey.version}`
+        : `CloudCLI ${components?.cloudcli?.version || "未知"} · copilot-api ${components?.copilotApi?.version || "未知"}`, "muted"));
       const status = element("span", null, "update-status");
       status.append(element("span", node.connected ? "升级器在线" : node.enrolled ? "离线/等待首次连接" : "未接入", "muted"));
       if (node.reason) status.append(element("span", labels[node.reason] || node.reason, "muted"));

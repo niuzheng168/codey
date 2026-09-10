@@ -8,14 +8,19 @@ const hash = (value) => createHash("sha256").update(value).digest("hex");
 const parseMajors = (value = "24") => value.split(",").map((item) => Number(item));
 
 export async function createNodeUpdateRelease({
-  manifestPath, output, privateKey, sequence, components = ["cloudcli", "copilotApi"],
-  cloudcliNodeMajors = [24], gatewayNodeMajors = [24], notes = "", migrations,
+  manifestPath, output, privateKey, sequence, components,
+  cloudcliNodeMajors = [24], gatewayNodeMajors = [24], codeyNodeMajors = [24], notes = "", migrations,
   now = Date.now(), expiresAt = now + 30 * 86400000,
 }) {
   const directory = path.dirname(path.resolve(manifestPath));
   const source = JSON.parse(await readFile(manifestPath, "utf8"));
-  if (!source.cloudcli || !source.gateway || !components.length ||
-      components.some((name) => !["cloudcli", "copilotApi"].includes(name)) ||
+  const npm = source.name === "codey" && source.codey;
+  const npmArtifact = source.artifact ?? source.artifacts?.[0];
+  components ??= npm ? ["codey"] : ["cloudcli", "copilotApi"];
+  if ((!npm && (!source.cloudcli || !source.gateway)) || !components.length ||
+      components.some((name) => !["cloudcli", "copilotApi", "codey"].includes(name)) ||
+      (npm ? components.length !== 1 || components[0] !== "codey" || !npmArtifact
+        : components.includes("codey")) ||
       new Set(components).size !== components.length) throw new Error("A full, reviewed node build manifest is required");
   let evidence;
   try { evidence = JSON.parse(await readFile(path.join(directory, "validation.json"), "utf8")); }
@@ -25,23 +30,27 @@ export async function createNodeUpdateRelease({
   }
   if (evidence.passed !== true && evidence.status !== "complete") throw new Error("Build validation has not passed");
   const release = {
-    schema: 1, kind: "codey-node-release", id: source.release, sequence, createdAt: now, expiresAt,
+    schema: 1, kind: "codey-node-release",
+    id: npm ? source.releaseId ?? `codey-${npmArtifact.sha256.slice(0, 16)}` : source.release,
+    sequence, createdAt: now, expiresAt,
     protocol: 1, platform: "linux-x64", configSchema: 1, rollback: "code-only", notes,
-    migrations: migrations ?? (components.includes("copilotApi") ? ["gateway-api-key-v1"] : []), components: {},
+    migrations: migrations ?? (npm || components.includes("copilotApi") ? ["gateway-api-key-v1"] : []), components: {},
   };
   const files = [];
   for (const name of components) {
-    const item = source[name === "cloudcli" ? "cloudcli" : "gateway"];
-    const filename = name === "cloudcli" ? "cloudcli.tar.gz" : "gateway.tar.gz";
+    const item = npm ? source.codey : source[name === "cloudcli" ? "cloudcli" : "gateway"];
+    const filename = npm ? `codey-${item.version}.tgz` : name === "cloudcli" ? "cloudcli.tar.gz" : "gateway.tar.gz";
+    if (npm && npmArtifact.file !== filename) throw new Error("Invalid Codey npm package filename");
     const body = await readFile(path.join(directory, filename));
-    if (hash(body) !== item.archiveSha256) throw new Error("Node artifact checksum mismatch");
+    const archiveSha256 = npm ? npmArtifact.sha256 : item.archiveSha256;
+    if (hash(body) !== archiveSha256 || (npm && body.length !== npmArtifact.size)) throw new Error("Node artifact checksum mismatch");
     release.components[name] = {
-      version: item.version, commit: item.sourceCommit, file: filename,
-      sha256: item.archiveSha256, size: body.length, entrySha256: item.entrySha256,
-      ...(name === "cloudcli" ? { lockSha256: item.lockSha256 } : {}),
-      nodeMajors: name === "cloudcli" ? cloudcliNodeMajors : gatewayNodeMajors,
+      version: item.version, commit: npm ? item.commit : item.sourceCommit, file: filename,
+      sha256: archiveSha256, size: body.length, entrySha256: item.entrySha256,
+      ...(name === "cloudcli" || npm ? { lockSha256: item.lockSha256 } : {}),
+      nodeMajors: npm ? codeyNodeMajors : name === "cloudcli" ? cloudcliNodeMajors : gatewayNodeMajors,
     };
-    files.push({ name: filename, source: path.join(directory, filename) });
+    files.push({ name: filename, component: name, source: path.join(directory, filename) });
   }
   validateNodeRelease(release, now);
   const key = createPrivateKey(privateKey);
@@ -78,7 +87,7 @@ export async function createNodeUpdateRelease({
     for (const file of files) {
       const destination = path.join(target, file.name);
       await copyFile(file.source, destination);
-      if (hash(await readFile(destination)) !== release.components[file.name === "cloudcli.tar.gz" ? "cloudcli" : "copilotApi"].sha256) {
+      if (hash(await readFile(destination)) !== release.components[file.component].sha256) {
         throw new Error("Published artifact verification failed");
       }
     }
@@ -113,9 +122,10 @@ async function main() {
     const result = await createNodeUpdateRelease({
       manifestPath: options.get("manifest"), output: options.get("output"),
       privateKey: await readFile(options.get("private-key"), "utf8"), sequence: Number(options.get("sequence")),
-      components: (options.get("components") || "cloudcli,copilotApi").split(","),
+      components: options.has("components") ? options.get("components").split(",") : undefined,
       cloudcliNodeMajors: parseMajors(options.get("cloudcli-node-majors")),
-      gatewayNodeMajors: parseMajors(options.get("gateway-node-majors")), notes: options.get("notes") || "",
+      gatewayNodeMajors: parseMajors(options.get("gateway-node-majors")),
+      codeyNodeMajors: parseMajors(options.get("codey-node-majors")), notes: options.get("notes") || "",
       migrations: options.has("migrations") ? options.get("migrations").split(",").filter(Boolean) : undefined,
     });
     console.log(JSON.stringify(result));

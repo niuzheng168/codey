@@ -24,6 +24,8 @@
     "skill:build": "node scripts/build-node-skill.mjs",
     "skill:check": "node scripts/build-node-skill.mjs --check",
     "machine:build": "python3 scripts/build-machine-bundle.py",
+    "codey:build": "python3 scripts/build-codey-package.py",
+    "codey:test": "node --test \"test/codey-package*.test.mjs\"",
     "machine:publish": "python3 scripts/publish-machine-skill.py",
     "machine:check": "node --check src/machine-platforms.mjs && node --check src/machine-credentials.mjs && node --check src/machine-registration.mjs && node --check src/machine-identity.mjs && node --check src/machine-setup.mjs && node --check src/machine-verification.mjs && node --check src/machine-tunnel.mjs && node --check src/devtunnel-transport.mjs && node --check src/zip-stream.mjs",
     "updates:check": "node --check src/machine-updates.mjs && node --check src/node-update-release.mjs && node --check public/machine-updates.js && node --check scripts/publish-node-update.mjs && node --check node-updater/probe.mjs",

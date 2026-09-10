@@ -15,6 +15,25 @@ cd codey
 主仓库只保存 submodule 指针，不重复提交 CloudCLI 或 copilot-api 源码。
 仓库结构、上游许可和提交顺序见 [源码仓库说明](./docs/repository-layout.md)。
 
+## Codey npm 包
+
+节点应用定义在 `packages/codey/`：一份主 `package.json`、统一依赖锁和一个
+`codey` CLI，直接包含 CloudCLI 与 copilot-api 的构建产物，不依赖两个应用 npm 包。
+源码仍保留为 submodule，构建、安装和升级产物统一为 Codey。
+
+```sh
+npm run codey:build -- --output artifacts/codey-npm
+npm install --global ./artifacts/codey-npm/codey-0.1.0.tgz
+codey --version
+codey start
+```
+
+**公共 npm 的 `codey` 名称已被其他项目占用**；当前使用本地 `.tgz` 或私有
+registry，不要从公共源安装同名包。构建不会自动发布或部署。
+完整的一键安装与整包升级见 [节点接入说明](./docs/codey-machine-setup.md)。
+
+## Portal 本地检查
+
 实际机器配置、`.env`、证书、账号/会话数据及构建产物不在 Git 中。新 clone 先按
 [配置说明](./config/README.md) 复制示例；本地只读运行可复制
 `config/nodes.example.json` 为 `config/nodes.json`，然后执行：

@@ -412,6 +412,42 @@ test("missing migration prerequisites and incompatible runtimes remain explicit 
   assert.equal(plan.targets[0].reason, "runtime_incompatible");
 });
 
+test("npm nodes accept only whole Codey releases and can download only their assigned npm artifact", async t => {
+  const f = await fixture(t);
+  const alpha = await f.enroll("alpha");
+  const beta = await f.enroll("beta");
+  const base = report();
+  await f.heartbeat(alpha, {
+    ...base, layout: "npm", components: { ...base.components, codey: {
+      version: "0.0.1", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24,
+    } },
+  });
+  await f.heartbeat(beta);
+  const split = await f.updates.plan("owner-a", ["alpha"], f.built.release.id);
+  assert.equal(split.targets[0].reason, "runtime_incompatible");
+  assert.equal(split.targets[0].eligible, false);
+
+  f.built.release.components = { codey: {
+    ...f.built.release.components.cloudcli, version: "0.1.0", file: "codey-0.1.0.tgz",
+  } };
+  const body = Buffer.from(JSON.stringify(f.built.release));
+  const envelope = { payload: body.toString("base64"), signature: sign(null, body, keys.privateKey).toString("base64url") };
+  await writeFile(path.join(f.catalogRoot, "catalog.json"), JSON.stringify({ schema: 1, releases: [envelope] }));
+  await writeFile(path.join(f.catalogRoot, "releases", f.built.release.id, "codey-0.1.0.tgz"), f.built.archive);
+  const plan = await f.updates.plan("owner-a", ["alpha", "beta"], f.built.release.id);
+  assert.equal(plan.targets.find(node => node.nodeId === "alpha").eligible, true);
+  assert.equal(plan.targets.find(node => node.nodeId === "beta").reason, "runtime_incompatible");
+  await f.enqueue(["alpha"]);
+  await f.heartbeat(alpha, { ...base, layout: "npm", components: { ...base.components, codey: {
+    version: "0.0.1", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24,
+  } } });
+  const endpoint = `/api/node-updater/releases/${f.built.release.id}/codey-0.1.0.tgz`;
+  const downloaded = await f.agent(alpha, endpoint);
+  assert.equal(downloaded.status, 200);
+  assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()), f.built.archive);
+  assert.equal((await f.agent(beta, endpoint)).status, 403);
+});
+
 test("expired plans, rotated/revoked credentials, account disable and downgrade reports fail closed", async (t) => {
   const f = await fixture(t);
   const alpha = await f.enroll();

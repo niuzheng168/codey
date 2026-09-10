@@ -147,6 +147,7 @@ export class MachineSetup {
         ...identity, enabled: true, platform: manifest.platform, releaseId: manifest.releaseId,
         bytes: packageInfo.size,
         node: manifest.node, cloudcli: manifest.cloudcli.version, copilotApi: manifest.copilotApi.version,
+        ...(manifest.codey ? { codey: manifest.codey.version } : {}),
       };
     } catch { return { ...identity, enabled: false, reason: `${definition.name} 完整配置包尚未发布或不可用；不会退回其他平台或仅说明的 ZIP` }; }
   }

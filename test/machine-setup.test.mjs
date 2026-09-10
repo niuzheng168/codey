@@ -48,8 +48,7 @@ async function bundle(root, platform = "linux-x64") {
     ["SKILL.md", "---\nname: config-new-codey-machine\ndescription: fixture\n---\n"],
     ["dependencies.json", "{}\n"], ["agents/openai.yaml", "interface: {}\n"],
     ["scripts/install.sh", "#!/usr/bin/env bash\n"], ["templates/a100-models.json", '{"models":[]}\n'],
-    ["assets/cloudcli.tar.gz", "cloudcli"], ["assets/copilot-api.tar.gz", "copilot"],
-    ["assets/updater.tar.gz", "updater"], ["assets/manifest.json", '{"schema":1}\n'],
+    ["assets/codey-0.1.0.tgz", "codey"], ["assets/manifest.json", '{"schema":2,"name":"codey"}\n'],
     ["assets/setup.json", '{"schema":1}\n'], ["assets/SHA256SUMS", "fixture\n"],
   ].map(([name, data]) => ({ name: `config-new-codey-machine/${name}`, data }));
   const stream = zipStream(entries);
@@ -61,6 +60,7 @@ async function bundle(root, platform = "linux-x64") {
     schema: 2, kind: "codey-machine-skill", platform, registrationSchema: 2,
     releaseId: `machine-${packageSha256.slice(0, 16)}`, installerReleaseId: "machine-" + "a".repeat(16),
     node: "24.20.0", cloudcli: { version: "test-cloudcli" }, copilotApi: { version: "test-copilot" },
+    runtimePackage: { name: "codey", file: "codey-0.1.0.tgz" }, codey: { version: "0.1.0" },
     bundledRuntimes: ["cloudcli", "copilot-api", "updater"],
     downloadedOfficialRuntimes: ["node", "codex", "devtunnel"],
     package: {
@@ -214,7 +214,8 @@ test("the independently published Linux Skill streams unchanged and activates on
   assert.deepEqual(bytes, f.manifest.packageBytes);
   const files = unzip(bytes);
   assert.ok(files.has("config-new-codey-machine/scripts/install.sh"));
-  assert.ok(files.has("config-new-codey-machine/assets/cloudcli.tar.gz"));
+  assert.ok(files.has("config-new-codey-machine/assets/codey-0.1.0.tgz"));
+  assert.equal([...files.keys()].filter(name => name.endsWith(".tgz") || name.endsWith(".tar.gz")).length, 1);
   assert.ok(![...files.keys()].some(name => name.includes("codey_node/") || name.includes("setup-windows")));
   const repeated = await f.request("/api/settings/machines/skill", { method: "POST" });
   assert.deepEqual(Buffer.from(await repeated.arrayBuffer()), bytes);
@@ -264,7 +265,7 @@ test("complete Skill download is deterministic, owner-independent and contains n
   const entries = unzip(bytes);
   assert.ok(entries.has("config-new-codey-machine/SKILL.md"));
   assert.ok(entries.has("config-new-codey-machine/scripts/install.sh"));
-  assert.ok(entries.has("config-new-codey-machine/assets/updater.tar.gz"));
+  assert.ok(entries.has("config-new-codey-machine/assets/codey-0.1.0.tgz"));
   for (const data of entries.values()) {
     assert.ok(!data.includes(f.master));
     assert.ok(!data.includes(f.ticketMaster));

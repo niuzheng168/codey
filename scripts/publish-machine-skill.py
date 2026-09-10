@@ -3,14 +3,17 @@
 import argparse
 import datetime
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
+import tarfile
 import uuid
 import zipfile
+from codey_package import inspect_npm_package
 
 MARKER = b'{"schema":1,"kind":"codey-machine-skill-store"}\n'
 RELEASE = re.compile(r"machine-[a-f0-9]{16}")
@@ -67,14 +70,13 @@ def inspect_package(file):
                     or record.file_size > MAX_PACKAGE or record.compress_size != record.file_size):
                 raise PublishError("UNSAFE_PACKAGE_ENTRY")
         root = "config-new-codey-machine/"
-        required = {
+        base = {
             root + "SKILL.md", root + "dependencies.json", root + "agents/openai.yaml",
             root + "scripts/install.sh", root + "templates/a100-models.json",
-            root + "assets/cloudcli.tar.gz", root + "assets/copilot-api.tar.gz",
-            root + "assets/updater.tar.gz", root + "assets/manifest.json",
+            root + "assets/manifest.json",
             root + "assets/setup.json", root + "assets/SHA256SUMS",
         }
-        if names != required:
+        if not base.issubset(names):
             raise PublishError("INCOMPLETE_SKILL_PACKAGE")
         manifest_raw = archive.read(root + "assets/manifest.json")
         setup_raw = archive.read(root + "assets/setup.json")
@@ -82,24 +84,39 @@ def inspect_package(file):
             raise PublishError("OVERSIZED_PACKAGE_METADATA")
         manifest = json.loads(manifest_raw)
         setup = json.loads(setup_raw)
-        if (manifest.get("schema") != 1 or manifest.get("platform") != "linux-x64"
-                or manifest.get("dependencyMode") != "prebuilt-private-components"
+        if (manifest.get("schema") != 2 or manifest.get("name") != "codey"
+                or manifest.get("platform") != "linux-x64"
+                or manifest.get("dependencyMode") != "npm-codey-package"
                 or not RELEASE.fullmatch(manifest.get("releaseId", ""))
                 or setup.get("schema") != 1 or setup.get("platform") != "linux-x64"
                 or setup.get("releaseId") != manifest["releaseId"]
                 or setup.get("network") != {"mode": "devtunnel"}
                 or setup.get("tunnelAuthProvider") != "github"):
             raise PublishError("INVALID_PACKAGE_METADATA")
+        artifacts = manifest.get("artifacts")
+        if not isinstance(artifacts, list) or len(artifacts) != 1:
+            raise PublishError("INVALID_PACKAGE_ARTIFACTS")
         expected = {
-            item["file"]: item for item in manifest.get("artifacts", [])
+            item["file"]: item for item in artifacts
             if isinstance(item, dict) and isinstance(item.get("file"), str)
         }
-        if set(expected) != {"cloudcli.tar.gz", "copilot-api.tar.gz", "updater.tar.gz"}:
+        version = manifest.get("codey", {}).get("version", "")
+        filename = f"codey-{version}.tgz"
+        if (not re.fullmatch(r"\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?", version)
+                or set(expected) != {filename}):
             raise PublishError("INVALID_PACKAGE_ARTIFACTS")
+        if names != base | {root + "assets/" + filename}:
+            raise PublishError("INCOMPLETE_SKILL_PACKAGE")
         for name, item in expected.items():
             body = archive.read(root + "assets/" + name)
             if len(body) != item.get("size") or hashlib.sha256(body).hexdigest() != item.get("sha256"):
                 raise PublishError("PACKAGE_ARTIFACT_MISMATCH")
+            try:
+                npm_info = inspect_npm_package(io.BytesIO(body))
+            except (RuntimeError, ValueError, KeyError, TypeError, AttributeError, tarfile.TarError) as error:
+                raise PublishError("INVALID_CODEY_NPM_PACKAGE") from error
+            if npm_info != manifest["codey"]:
+                raise PublishError("CODEY_NPM_METADATA_MISMATCH")
         checksums = archive.read(root + "assets/SHA256SUMS").decode("ascii").splitlines()
         expected_sums = {}
         for line in checksums:
@@ -107,6 +124,8 @@ def inspect_package(file):
             if name in expected_sums or not re.fullmatch(r"[a-f0-9]{64}", digest):
                 raise PublishError("INVALID_PACKAGE_CHECKSUMS")
             expected_sums[name] = digest
+        if set(expected_sums) != {*expected, "manifest.json", "setup.json"}:
+            raise PublishError("INVALID_PACKAGE_CHECKSUMS")
         for name in [*expected, "manifest.json", "setup.json"]:
             if expected_sums.get(name) != hashlib.sha256(
                 archive.read(root + "assets/" + name)
@@ -122,6 +141,8 @@ def inspect_package(file):
         "node": manifest["node"],
         "cloudcli": manifest["cloudcli"],
         "copilotApi": manifest["copilotApi"],
+        "runtimePackage": {"name": "codey", **expected[filename]},
+        "codey": manifest["codey"],
         "bundledRuntimes": ["cloudcli", "copilot-api", "updater"],
         "downloadedOfficialRuntimes": ["node", "codex", "devtunnel"],
         "package": {"file": PACKAGE_NAME, "size": size, "sha256": package_sha},

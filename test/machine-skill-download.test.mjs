@@ -122,6 +122,16 @@ test("only Linux download is enabled while Windows and macOS native launchers ar
   assert.equal(p.elements.get("#download-machine-macos-intel-skill").disabled, true);
 });
 
+test("the package status presents one Codey npm version rather than two installable apps", async () => {
+  const p = await page({ machineSetup: {
+    enabled: true, bytes: 7 * 1024 * 1024, node: "24.20.0",
+    codey: "0.1.0", cloudcli: "1.37.2", copilotApi: "2.5.3",
+  } });
+  const status = p.elements.get("#machine-package-status").textContent;
+  assert.match(status, /Codey 0\.1\.0（统一 npm 包）/);
+  assert.doesNotMatch(status, /CloudCLI|copilot-api/);
+});
+
 test("static downloads ignore legacy pending identities and disable all download buttons in flight", async () => {
   let finish;
   const gate = new Promise((resolve) => { finish = resolve; });

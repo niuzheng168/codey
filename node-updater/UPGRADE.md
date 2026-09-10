@@ -39,6 +39,12 @@ database backups, and switches only changed components. It verifies metadata,
 authentication, a Codey model reply and an ephemeral read-only Codex CLI reply.
 These synthetic replies may incur normal model usage.
 
+Nodes installed from the single `codey` npm package report the `npm` layout.
+They accept only a whole `codey-<version>.tgz` release, prepare dependencies from
+its shrinkwrap, and stop both internal services around one atomic package switch.
+Rollback restores the entire package. Legacy per-app releases and npm releases
+are not interchangeable; the agent rejects the wrong layout before downloading.
+
 **Finish native Codex tasks before confirming maintenance.** The updater never
 terminates Codex clients. It checks Codey's running-session API, active model
 connections and independent `codex exec` processes; it does not claim a

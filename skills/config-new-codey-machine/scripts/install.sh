@@ -79,23 +79,43 @@ fi
 NODE="$NODE_DIR/bin/node"
 "$NODE" --version | grep -qx "v$NODE_VERSION" || die "Official Node installation failed."
 
-readarray -t PACKAGE < <("$NODE" - "$ASSETS/manifest.json" "$ASSETS/setup.json" <<'NODE'
+readarray -t PACKAGE < <("$NODE" - "$ASSETS/manifest.json" "$ASSETS/setup.json" "$NODE_VERSION" <<'NODE'
 const fs = require("node:fs");
+const path = require("node:path");
 const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const setup = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
-if (manifest.schema !== 1 || setup.schema !== 1 ||
+const artifact = manifest.artifacts?.[0];
+const assets = path.dirname(process.argv[2]);
+const sums = fs.readFileSync(path.join(assets, "SHA256SUMS"), "utf8").trim().split("\n");
+if (manifest.schema !== 2 || manifest.name !== "codey" || setup.schema !== 1 ||
     manifest.platform !== "linux-x64" || setup.platform !== "linux-x64" ||
+    manifest.node !== process.argv[4] ||
+    !/^machine-[a-f0-9]{16}$/.test(manifest.releaseId ?? "") ||
     manifest.releaseId !== setup.releaseId ||
-    manifest.dependencyMode !== "prebuilt-private-components") process.exit(2);
+    manifest.dependencyMode !== "npm-codey-package" ||
+    !Array.isArray(manifest.artifacts) || manifest.artifacts.length !== 1 ||
+    !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(manifest.codey?.version ?? "") ||
+    artifact?.file !== `codey-${manifest.codey.version}.tgz` ||
+    !/^[a-f0-9]{64}$/.test(artifact.sha256 ?? "") ||
+    !Number.isSafeInteger(artifact.size) || artifact.size <= 0 ||
+    fs.statSync(path.join(assets, artifact.file)).size !== artifact.size ||
+    !sums.includes(`${artifact.sha256}  ${artifact.file}`) ||
+    JSON.stringify(manifest.bundledRuntimes) !== JSON.stringify(["cloudcli", "copilot-api", "updater"])) process.exit(2);
+const origin = new URL(setup.portalOrigin);
+if (origin.protocol !== "https:" || origin.origin !== setup.portalOrigin) process.exit(2);
 console.log(manifest.releaseId);
 console.log(setup.portalOrigin);
+console.log(artifact.file);
 NODE
 )
-[[ "${#PACKAGE[@]}" -eq 2 ]] || die "Invalid package metadata."
+[[ "${#PACKAGE[@]}" -eq 3 ]] || die "Invalid package metadata."
 RELEASE_ID="${PACKAGE[0]}"
 PORTAL_ORIGIN="${PACKAGE[1]}"
+NPM_PACKAGE="${PACKAGE[2]}"
 RELEASE="$RUNTIME_ROOT/releases/$RELEASE_ID"
 STAGE="$RUNTIME_ROOT/releases/.${RELEASE_ID}.stage"
+STAGE_PACKAGE="$STAGE/lib/node_modules/codey"
+RELEASE_PACKAGE="$RELEASE/lib/node_modules/codey"
 
 IDENTITY="$STATE_ROOT/identity.json"
 if [[ ! -f "$IDENTITY" ]]; then
@@ -134,6 +154,34 @@ UPDATER_KEY="${ID[6]}"
 
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
+
+# Install exactly one application through npm, with one shared dependency tree.
+# Native dependencies are prepared before stopping any existing service.
+PATH="$NODE_DIR/bin:$PATH" "$NODE_DIR/bin/npm" install --global --prefix "$STAGE" \
+  --omit=dev --no-audit --no-fund "$ASSETS/$NPM_PACKAGE"
+for file in package.json npm-shrinkwrap.json bin/codey.mjs codey-build.json \
+  dist-server/server/index.js gateway/main.js \
+  updater/install.py updater/updater.py updater/engine.py updater/probe.mjs; do
+  [[ -f "$STAGE_PACKAGE/$file" ]] || die "Codey npm package is incomplete: $file"
+done
+"$NODE" - "$STAGE_PACKAGE" "$ASSETS/manifest.json" <<'NODE'
+const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
+const root = process.argv[2];
+const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json")));
+const manifest = JSON.parse(fs.readFileSync(process.argv[3]));
+const hash = name => crypto.createHash("sha256").update(fs.readFileSync(path.join(root, name))).digest("hex");
+if (pkg.name !== "codey" || pkg.version !== manifest.codey.version ||
+    hash("codey-build.json") !== manifest.codey.entrySha256 ||
+    hash("npm-shrinkwrap.json") !== manifest.codey.lockSha256) process.exit(2);
+for (const name of ["@cloudcli-ai/cloudcli", "@jeffreycao/copilot-api", "@openai/codex"]) {
+  if (pkg.dependencies?.[name] || fs.existsSync(path.join(root, "node_modules", name))) process.exit(2);
+}
+const requireFromPackage = require("node:module").createRequire(path.join(root, "package.json"));
+requireFromPackage("better-sqlite3")(":memory:").close();
+const pty = requireFromPackage("node-pty").spawn("/bin/sh", ["-c", "exit 0"], {env: process.env});
+pty.onExit(event => process.exit(event.exitCode));
+setTimeout(() => process.exit(1), 5000).unref();
+NODE
 
 log 1 "Install and configure private GitHub DevTunnel"
 stop_user_unit codey-devtunnel-renew.timer
@@ -233,18 +281,16 @@ openssl req -x509 -newkey rsa:3072 -noenc -days 365 \
 printf '%s\n' "$CLIENT_KEY" >"$CONFIG_ROOT/client-signing.key"
 chmod 600 "$CERT" "$KEY" "$CONFIG_ROOT/client-signing.key"
 
-log 2 "Stop old copilot-api, install the packaged latest build, configure and start it"
+log 2 "Stop old copilot-api, configure and start the Codey gateway"
 for unit in codey-copilot-api.service copilot-api.service copilot-api-update.service copilot-api-update.timer; do
   stop_user_unit "$unit"
   stop_system_unit "$unit"
 done
 kill_matches '[c]opilot-api'
+kill_matches '[/]bin/codey\.mjs gateway'
 free_port 4141
 free_port 8443
 
-mkdir -p "$STAGE/copilot-api"
-tar -xzf "$ASSETS/copilot-api.tar.gz" -C "$STAGE/copilot-api"
-[[ -f "$STAGE/copilot-api/dist/main.js" ]] || die "copilot-api payload is incomplete."
 MODEL_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 ADMIN_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 HISTORY_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
@@ -252,8 +298,7 @@ HISTORY_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 const fs = require("node:fs");
 const [file, apiKey, adminApiKey, sessionHistoryApiKey] = process.argv.slice(2);
 const value = {
-  auth: {apiKeys: [apiKey], adminApiKey, sessionHistoryApiKey},
-  useResponsesApiWebSocket: false
+  auth: {apiKeys: [apiKey], adminApiKey, sessionHistoryApiKey}
 };
 fs.writeFileSync(file + ".next", JSON.stringify(value, null, 2) + "\n", {mode: 0o600});
 fs.renameSync(file + ".next", file);
@@ -285,8 +330,8 @@ Environment=HOME=$HOME_DIR
 Environment=NODE_ENV=production
 Environment=NODE_USE_SYSTEM_CA=1
 EnvironmentFile=$CONFIG_ROOT/copilot.env
-WorkingDirectory=$STAGE/copilot-api
-ExecStart=$NODE $STAGE/copilot-api/dist/main.js start --headless --host 127.0.0.1 --port 4141
+WorkingDirectory=$STAGE_PACKAGE
+ExecStart=$NODE $STAGE_PACKAGE/bin/codey.mjs gateway start --headless --host 127.0.0.1 --port 4141
 Restart=always
 RestartSec=5
 UMask=0077
@@ -298,7 +343,7 @@ systemctl --user daemon-reload
 systemctl --user start codey-copilot-api.service
 if [[ ! -s "$COPILOT_HOME/github_token" ]]; then
   HOME="$HOME_DIR" COPILOT_API_HOME="$COPILOT_HOME" \
-    "$NODE" "$STAGE/copilot-api/dist/main.js" auth login --provider copilot
+    "$NODE" "$STAGE_PACKAGE/bin/codey.mjs" auth login --provider copilot
 fi
 systemctl --user restart codey-copilot-api.service
 for _ in $(seq 1 60); do
@@ -390,17 +435,12 @@ if ! HOME="$HOME_DIR" CODEX_HOME="$HOME_DIR/.codex" CODEY_MODEL_API_KEY="$MODEL_
   die "Codex model test failed; see $CODEX_LOG"
 fi
 
-log 4 "Stop old CloudCLI, install the packaged latest build and start it"
+log 4 "Stop old CloudCLI and start the Codey workspace"
 stop_user_unit codey-cloudcli.service
 stop_system_unit codey-cloudcli.service
 kill_matches '[d]ist-server/server/index.js'
+kill_matches '[/]bin/codey\.mjs workspace'
 free_port 3001
-mkdir -p "$STAGE/cloudcli"
-tar -xzf "$ASSETS/cloudcli.tar.gz" -C "$STAGE/cloudcli"
-[[ -f "$STAGE/cloudcli/dist-server/server/index.js" ]] || die "CloudCLI payload is incomplete."
-[[ ! -e "$STAGE/cloudcli/node_modules/@openai/codex-linux-x64" ]] ||
-  die "CloudCLI payload incorrectly contains a Codex runtime."
-
 cat >"$CONFIG_ROOT/cloudcli.env" <<EOF
 CODEY_MANAGED=true
 CODEY_PORTAL_SSO=true
@@ -432,8 +472,8 @@ Environment=HOME=$HOME_DIR
 Environment=NODE_ENV=production
 EnvironmentFile=$CONFIG_ROOT/provider.env
 EnvironmentFile=$CONFIG_ROOT/cloudcli.env
-WorkingDirectory=$STAGE/cloudcli
-ExecStart=$NODE $STAGE/cloudcli/dist-server/server/index.js
+WorkingDirectory=$STAGE_PACKAGE
+ExecStart=$NODE $STAGE_PACKAGE/bin/codey.mjs workspace
 Restart=always
 RestartSec=5
 UMask=0077
@@ -453,10 +493,10 @@ done
 
 CLOUDCLI_TEST_LOG="$CONFIG_ROOT/cloudcli-codex-test.log"
 if ! (
-  cd "$STAGE/cloudcli"
+  cd "$STAGE_PACKAGE"
   HOME="$HOME_DIR" CODEX_HOME="$HOME_DIR/.codex" CODEY_MODEL_API_KEY="$MODEL_KEY" \
     CODEY_CODEX_EXECUTABLE="$CODEX" "$NODE" --input-type=module <<'NODE'
-import { Codex } from "@openai/codex-sdk";
+import { Codex } from "#codey/codex-sdk";
 const codex = new Codex({codexPathOverride: process.env.CODEY_CODEX_EXECUTABLE});
 const thread = codex.startThread({
   workingDirectory: process.env.HOME,
@@ -483,6 +523,12 @@ sed -i "s#WorkingDirectory=$STAGE/#WorkingDirectory=$RELEASE/#; s# $STAGE/# $REL
 systemctl --user daemon-reload
 systemctl --user restart codey-copilot-api.service codey-cloudcli.service
 
+cat >"$HOME_DIR/.local/bin/codey" <<EOF
+#!/bin/sh
+exec "$NODE" "$RELEASE_PACKAGE/bin/codey.mjs" "\$@"
+EOF
+chmod 700 "$HOME_DIR/.local/bin/codey"
+
 "$NODE" - "$ASSETS/manifest.json" "$RELEASE/release.json" <<'NODE'
 const fs = require("node:fs");
 const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -496,7 +542,7 @@ fs.writeFileSync(process.argv[3], JSON.stringify({
 }, null, 2) + "\n", {mode: 0o600});
 NODE
 
-log 5 "Install the packaged updater"
+log 5 "Install the Codey updater"
 stop_user_unit codey-node-updater.service
 stop_system_unit codey-node-updater.service
 rm -rf "$HOME_DIR/.local/share/codey-updater" "$HOME_DIR/.config/codey-updater"
@@ -512,10 +558,7 @@ for candidate in /opt/az/bin/python3 "$HOME_DIR/miniconda3/bin/python" \
   fi
 done
 [[ -n "$PYTHON" ]] || die "The updater requires Python 3.12+."
-UPDATER_SOURCE="$RUNTIME_ROOT/updater-source"
-rm -rf "$UPDATER_SOURCE"
-mkdir -p "$UPDATER_SOURCE"
-tar -xzf "$ASSETS/updater.tar.gz" -C "$UPDATER_SOURCE"
+UPDATER_SOURCE="$RELEASE_PACKAGE/updater"
 UPDATER_CONFIG="$CONFIG_ROOT/updater-bootstrap.json"
 "$NODE" - "$ASSETS/setup.json" "$IDENTITY" "$UPDATER_CONFIG" <<'NODE'
 const fs = require("node:fs");

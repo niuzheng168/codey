@@ -7,8 +7,10 @@ distributed to nodes. Windows local copilot-api is excluded.
 
 ## Release once, update many
 
-1. Build/test one immutable full release with the deploy Skill. Retain its `manifest.json`,
-   `validation.json` and the two prebuilt `cloudcli.tar.gz` / `gateway.tar.gz` archives.
+1. For npm-layout nodes, build/test one Codey npm package with `npm run codey:build`.
+   Retain `codey-package.json`, `codey-<version>.tgz` and independent `validation.json`
+   evidence. For legacy nodes, retain the deploy Skill's `manifest.json`,
+   `validation.json` and two prebuilt `cloudcli.tar.gz` / `gateway.tar.gz` archives.
    A changed upstream commit is not itself sufficient evidence of compatibility.
 2. Generate an Ed25519 signing pair once on the owner-only build host:
    `node scripts/publish-node-update.mjs keygen --private-key <private.pem> --public-key <public.pem>`.
@@ -16,8 +18,10 @@ distributed to nodes. Windows local copilot-api is excluded.
    operator key custody; do not regenerate it during every deploy.
 3. Publish using `publish --manifest <manifest.json> --output <feed> --private-key <private.pem>
    --sequence <increasing integer>`. Optional `--components cloudcli` supports a CloudCLI-only
-   release. Specify `--cloudcli-node-majors` / `--gateway-node-majors` only for runtimes actually
-   tested; the default is Node 24. The publisher verifies evidence and artifact hashes.
+   legacy release. A `codey-package.json` automatically selects the sole `codey` component.
+   Specify `--codey-node-majors` or the legacy `--cloudcli-node-majors` /
+   `--gateway-node-majors` only for runtimes actually tested; the default is Node 24.
+   The publisher verifies evidence and artifact hashes; it never installs an npm package by name.
 4. Upload the immutable `releases/<release>/` files and public PEM to the existing private
    Azure Files share. Upload `catalog.json` **last** under an operator publishing lock and
    atomically rename it into place. Never expose the signing private key or an unauthenticated
@@ -39,10 +43,10 @@ Never set a version from `latest` or execute an arbitrary command supplied by a 
   `python3 install.py` to inspect the plan and `python3 install.py --apply` to install only
   the updater. Use an existing Python 3.12+ interpreter (including the separately installed
   Azure CLI Python if appropriate); do not upgrade global Node/Codex or restart the apps.
-- New nodes: the personalized `config-new-codey-machine` download includes the updater
-  source, public trust key and a separate per-node credential. The installer installs it
-  automatically after the two new apps pass TLS/auth checks. Re-downloading a pending
-  identity reuses its updater credential. It cannot claim work until Portal activation.
+- New nodes: the fixed, credential-free `config-new-codey-machine` download includes one
+  Codey npm package and the public trust key. The installer generates per-node credentials
+  locally and installs the updater after both internal services pass checks. It cannot
+  claim work until Portal activation.
 - Re-pair/revoke requires explicit owner confirmation. Rotation preserves the reported
   anti-downgrade high-water mark. Revocation stops new work, not the model services.
 
@@ -57,6 +61,13 @@ The agent preserves service units, original Node executables, model/SSO/TLS conf
 databases. It stages prebuilt packages and reuses dependencies only for a matching lock and
 install fingerprint. Cold mismatches install locked production dependencies, not another
 full backend build. Only changed services are stopped.
+
+The `npm` layout uses one application directory and one `npm-shrinkwrap.json`.
+Only a sole `components.codey` release is eligible: both services stop before one
+atomic package-pointer switch and both restart afterward. Rollback restores that
+one package and its gateway build marker together. Mixed/split releases are rejected
+before download; legacy nodes cannot consume npm-layout releases. Deploy the updated
+Portal/agent protocol implementation before distributing the new onboarding package.
 
 Codey running sessions, native `codex exec` processes and active model sockets defer
 activation. Native app-server tasks may be between requests: finish those tasks before

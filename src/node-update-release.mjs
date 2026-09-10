@@ -5,7 +5,7 @@ import { requestError } from "./signed-store.mjs";
 
 export const UPDATE_PROTOCOL = 1;
 export const UPDATE_RELEASE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
-export const UPDATE_COMPONENTS = Object.freeze(["cloudcli", "copilotApi"]);
+export const UPDATE_COMPONENTS = Object.freeze(["cloudcli", "copilotApi", "codey"]);
 const HASH = /^[a-f0-9]{64}$/;
 const COMMIT = /^[a-f0-9]{40}$/;
 const VERSION = /^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/;
@@ -27,12 +27,14 @@ export function validateNodeRelease(value, now = Date.now(), allowExpired = fals
       value.migrations.some((id) => !/^[a-z0-9][a-z0-9-]{0,79}$/.test(id)) ||
       new Set(value.migrations).size !== value.migrations.length ||
       !fields(value.components, UPDATE_COMPONENTS) || !Object.keys(value.components).length) throw invalid();
+  if (Object.hasOwn(value.components, "codey") && Object.keys(value.components).length !== 1) throw invalid();
   for (const [name, component] of Object.entries(value.components)) {
     if (!fields(component, ["version", "commit", "file", "sha256", "size", "entrySha256", "lockSha256", "nodeMajors"]) ||
         !VERSION.test(component.version ?? "") || !COMMIT.test(component.commit ?? "") ||
-        component.file !== (name === "cloudcli" ? "cloudcli.tar.gz" : "gateway.tar.gz") ||
+        component.file !== (name === "codey" ? `codey-${component.version}.tgz`
+          : name === "cloudcli" ? "cloudcli.tar.gz" : "gateway.tar.gz") ||
         !HASH.test(component.sha256 ?? "") || !HASH.test(component.entrySha256 ?? "") ||
-        (name === "cloudcli" && !HASH.test(component.lockSha256 ?? "")) ||
+        (["cloudcli", "codey"].includes(name) && !HASH.test(component.lockSha256 ?? "")) ||
         !Number.isSafeInteger(component.size) || component.size < 1 || component.size > 512 * 1024 * 1024 ||
         !Array.isArray(component.nodeMajors) || !component.nodeMajors.length || component.nodeMajors.length > 10 ||
         component.nodeMajors.some((major) => !Number.isInteger(major) || major < 20 || major > 40)) throw invalid();

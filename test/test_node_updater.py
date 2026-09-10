@@ -67,10 +67,19 @@ class FakeRuntime(engine.Runtime):
         values = {}
         for name, anchor in self.anchors.items():
             directory = anchor.resolve()
-            entry = directory / ("dist-server/server/index.js" if name == "cloudcli" else "dist/main.js")
-            values[name] = {"version": engine.read(directory / "package.json")["version"],
-                            "commit": engine.read(directory / "codey-release.json")["sourceCommit"],
+            npm = self.profile["layout"] == "npm"
+            entry = directory / ("gateway/main.js" if npm and name == "copilotApi" else engine.component_entry(name))
+            metadata = engine.read(directory / "codey-build.json")[name] if npm else {
+                "version": engine.read(directory / "package.json")["version"],
+                "commit": engine.read(directory / "codey-release.json")["sourceCommit"],
+            }
+            values[name] = {"version": metadata["version"], "commit": metadata["commit"],
                             "entrySha256": engine.sha(entry), "nodeMajor": 24}
+        if self.profile["layout"] == "npm":
+            directory = self.anchors["cloudcli"].resolve()
+            build = engine.read(directory / "codey-build.json")
+            values["codey"] = {"version": build["version"], "commit": build["sourceCommit"],
+                               "entrySha256": engine.sha(directory / "codey-build.json"), "nodeMajor": 24}
         installed_file = self.private / "installed.json"
         installed = engine.read(installed_file) if installed_file.exists() else {}
         return {"nodeId": self.config["nodeId"], "ownerId": self.config["ownerId"],
@@ -79,6 +88,7 @@ class FakeRuntime(engine.Runtime):
                 "cloudcliPath": str(self.anchors["cloudcli"].resolve()), "copilotPath": str(self.anchors["copilotApi"].resolve()),
                 "cloudcliAnchor": str(self.anchors["cloudcli"]), "copilotAnchor": str(self.anchors["copilotApi"]),
                 "copilotService": self.profile.get("copilotService", "copilot-api.service"),
+                **({"codeyAnchor": str(self.anchors["cloudcli"])} if self.profile["layout"] == "npm" else {}),
                 "copilotHome": str(self.data), "database": str(self.data / "absent.sqlite"),
                 "components": values, "highestSequence": installed.get("sequence", 0), "installedDigest": installed.get("digest"),
                 "currentRelease": installed.get("releaseId"), "readyMigrations": ["gateway-api-key-v1"],
@@ -111,6 +121,40 @@ class FakeRuntime(engine.Runtime):
             raise AssertionError("The fixture must never execute an unmocked command")
         self.actions.append(arguments)
         return ""
+
+
+class FakeNpmRuntime(FakeRuntime):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        directory = self.home / "old/codey"
+        self.npm_package(directory, "1.0.0", "a" * 40)
+        anchor = self.home / "anchors/codey"
+        if kwargs.get("directory_anchor"):
+            os.rename(directory, anchor)
+        else:
+            anchor.symlink_to(directory, target_is_directory=True)
+        self.anchors = {"cloudcli": anchor, "copilotApi": anchor}
+        self.profile = {"layout": "npm", "copilotService": "codey-copilot-api.service"}
+
+    @staticmethod
+    def npm_package(directory, version, commit):
+        directory.mkdir(parents=True)
+        engine.save(directory / "package.json", {
+            "name": "codey", "version": version, "type": "module", "scripts": {},
+        })
+        engine.save(directory / "npm-shrinkwrap.json", {
+            "name": "codey", "version": version, "lockfileVersion": 3,
+        })
+        for entry in ["bin/codey.mjs", "dist-server/server/index.js", "gateway/main.js"]:
+            file = directory / entry
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text(f"// {version} {entry}\n")
+        engine.save(directory / "codey-build.json", {
+            "schema": 1, "name": "codey", "version": version, "sourceCommit": commit,
+            "lockSha256": engine.sha(directory / "npm-shrinkwrap.json"),
+            "cloudcli": {"version": version, "commit": commit},
+            "copilotApi": {"version": version, "commit": commit},
+        })
 
 
 class NodeUpdaterTests(unittest.TestCase):
@@ -809,6 +853,15 @@ fs.writeFileSync(process.argv[3],key.publicKey.export({type:'spki',format:'pem'}
         public = (self.root / "public.pem").read_text()
         actual, _ = engine.verify_envelope(envelope, public, self.root)
         self.assertEqual(actual, manifest)
+        manifest["components"] = {"codey": {
+            **manifest["components"]["copilotApi"], "file": "codey-2.0.0.tgz", "lockSha256": "d" * 64,
+        }}
+        engine.save(self.root / "manifest.json", manifest)
+        subprocess.run(["node", "-e", helper, str(self.root / "manifest.json"), str(self.root / "signed.json"),
+                        str(self.root / "public.pem")], check=True)
+        envelope = engine.read(self.root / "signed.json")
+        public = (self.root / "public.pem").read_text()
+        self.assertEqual(engine.verify_envelope(envelope, public, self.root)[0], manifest)
         envelope["payload"] = base64.b64encode(b'{"changed":true}').decode()
         with self.assertRaisesRegex(engine.UpdateError, "signature_invalid"):
             engine.verify_envelope(envelope, public, self.root)
@@ -860,6 +913,114 @@ fs.writeFileSync(process.argv[3],key.publicKey.export({type:'spki',format:'pem'}
                                         cwd=self.root, env=env, capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertFalse(marker.exists())
+
+    def npm_release(self, runtime):
+        directory = self.root / "npm-build"
+        FakeNpmRuntime.npm_package(directory, "2.0.0", "b" * 40)
+        archive = self.root / "codey-2.0.0.tgz"
+        with tarfile.open(archive, "w:gz") as output:
+            for file in directory.rglob("*"):
+                if file.is_file():
+                    output.add(file, arcname="package/" + file.relative_to(directory).as_posix(), recursive=False)
+        manifest = {
+            "id": "codey-npm-release", "sequence": 1, "platform": "linux-x64",
+            "migrations": [], "expiresAt": int(time.time() * 1000) + 60000,
+            "components": {"codey": {
+                "version": "2.0.0", "commit": "b" * 40, "file": archive.name,
+                "sha256": engine.sha(archive), "size": archive.stat().st_size, "nodeMajors": [24],
+                "entrySha256": engine.sha(directory / "codey-build.json"),
+                "lockSha256": engine.sha(directory / "npm-shrinkwrap.json"),
+            }},
+        }
+        return manifest, lambda _release, _component, target: shutil.copy2(archive, target)
+
+    def test_npm_release_replaces_one_shared_package_and_restarts_both_services(self):
+        runtime = FakeNpmRuntime(self.root / "home", directory_anchor=True)
+        before = runtime.snapshot()
+        manifest, download = self.npm_release(runtime)
+        job = runtime.root / "jobs" / ("a" * 32)
+        with patch.object(engine, "run", side_effect=runtime.runner):
+            result = engine.Upgrade(runtime, lambda *_: None, download).execute(manifest, "d" * 64, job)
+        self.assertEqual(result, {"state": "succeeded", "changed": ["codey"]})
+        after = runtime.snapshot()
+        self.assertEqual(after["cloudcliPath"], after["copilotPath"])
+        self.assertNotEqual(after["cloudcliPath"], before["cloudcliPath"])
+        self.assertEqual(after["components"]["codey"]["version"], "2.0.0")
+        self.assertEqual(after["components"]["cloudcli"]["version"], "2.0.0")
+        transaction = engine.read(job / "transaction.json")
+        self.assertEqual(len(transaction["anchors"]), 1)
+        self.assertEqual(runtime.actions, [
+            ["systemctl", "--user", "stop", "codey-cloudcli.service", "codey-copilot-api.service"],
+            ["systemctl", "--user", "start", "codey-cloudcli.service", "codey-copilot-api.service"],
+        ])
+        self.assertEqual((runtime.data / "config.json").read_bytes(), runtime.before_data)
+
+    def test_npm_rollback_restores_the_whole_package_and_pin_without_restoring_stale_user_data(self):
+        runtime = FakeNpmRuntime(self.root / "home", model_failure=True)
+        before = runtime.snapshot()
+        manifest, download = self.npm_release(runtime)
+        job = runtime.root / "jobs" / ("a" * 32)
+        with patch.object(engine, "run", side_effect=runtime.runner):
+            result = engine.Upgrade(runtime, lambda *_: None, download).execute(manifest, "d" * 64, job)
+        self.assertEqual(result["state"], "rolled_back")
+        after = runtime.snapshot()
+        self.assertEqual(after["components"], before["components"])
+        self.assertEqual(after["cloudcliPath"], before["cloudcliPath"])
+        self.assertEqual(after["copilotPath"], before["copilotPath"])
+        self.assertEqual((runtime.data / "portal-build.json").read_bytes(), runtime.before_pin)
+        self.assertEqual((runtime.data / "user-data.txt").read_text(), "new user data written during verification")
+        self.assertTrue(all(len(action) == 5 for action in runtime.actions))
+
+    def test_npm_node_refuses_legacy_component_release_before_any_download_or_service_change(self):
+        runtime = FakeNpmRuntime(self.root / "home")
+        manifest, _ = self.package(runtime)
+        events = []
+        def download(*_):
+            self.fail("A split application release must not be downloaded")
+        with self.assertRaisesRegex(engine.UpdateError, "runtime_incompatible"):
+            engine.Upgrade(runtime, lambda *event: events.append(event), download).execute(
+                manifest, "d" * 64, runtime.root / "jobs" / ("a" * 32))
+        self.assertEqual(events, [])
+        self.assertEqual(runtime.actions, [])
+
+    @unittest.skipUnless(sys.platform == "linux" and os.getuid() != 0, "Linux user process discovery")
+    def test_real_process_discovery_identifies_two_services_as_one_npm_installation(self):
+        home = self.root / "home"
+        root = home / ".local/share/codey-machine/releases/fixture/lib/node_modules/codey"
+        FakeNpmRuntime.npm_package(root, "1.0.0", "a" * 40)
+        (root / "bin/codey.mjs").write_text("setInterval(() => {}, 1000);\n")
+        units = home / ".config/systemd/user"
+        units.mkdir(parents=True)
+        for name in ["codey-cloudcli.service", "codey-copilot-api.service"]:
+            (units / name).write_text("fixture service\n")
+        data = home / ".local/share/copilot-api"
+        data.mkdir(parents=True)
+        engine.save(data / "config.json", {"auth": {"apiKeys": ["x" * 64]}})
+        env = {
+            **os.environ, "HOME": str(home), "CODEY_PORTAL_NODE_ID": "alpha",
+            "CODEX_HOME": str(home / ".codex"),
+            "COPILOT_API_CODEY_NODE_ID": "alpha", "CODEY_PORTAL_PRINCIPAL_ID": "owner-a",
+            "COPILOT_API_HOME": str(data), "DATABASE_PATH": str(home / "data/auth.db"),
+        }
+        processes = []
+        def cleanup():
+            for process in processes:
+                process.terminate()
+                process.wait(timeout=5)
+        self.addCleanup(cleanup)
+        for command in ["workspace", "gateway"]:
+            processes.append(subprocess.Popen(["node", str(root / "bin/codey.mjs"), command],
+                                              cwd=root, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        def services(name):
+            return processes[0 if name == "codey-cloudcli.service" else 1].pid, units / name
+        runtime = engine.Runtime({"nodeId": "alpha", "ownerId": "owner-a"}, home=home)
+        with patch.object(engine, "service", side_effect=services):
+            before = runtime.snapshot()
+            runtime.assert_unchanged(before)
+        self.assertEqual(before["layout"], "npm")
+        self.assertEqual(before["cloudcliPath"], before["copilotPath"])
+        self.assertEqual(before["codeyAnchor"], str(root))
+        self.assertEqual(before["components"]["codey"]["version"], "1.0.0")
 
 
 if __name__ == "__main__":

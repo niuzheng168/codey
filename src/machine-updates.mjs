@@ -62,7 +62,7 @@ export function safeAgentReport(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
       Object.keys(value).some((key) => !keys.includes(key)) ||
       typeof value.platform !== "string" || !/^[a-z0-9-]{1,40}$/.test(value.platform) ||
-      !["managed", "legacy", "unsupported"].includes(value.layout) ||
+      !["managed", "legacy", "npm", "unsupported"].includes(value.layout) ||
       !Number.isSafeInteger(value.highestSequence) || value.highestSequence < 0 ||
       !Array.isArray(value.readyMigrations) || value.readyMigrations.length > 20 ||
       value.readyMigrations.some((item) => !/^[a-z0-9-]{1,80}$/.test(item)) ||
@@ -71,13 +71,14 @@ export function safeAgentReport(value) {
       (value.currentRelease && !/^[a-z0-9-]{1,64}$/.test(value.currentRelease))) throw requestError("Invalid agent report");
   const components = {};
   for (const [name, item] of Object.entries(value.components ?? {})) {
-    if (!["cloudcli", "copilotApi"].includes(name) || !item ||
+    if (!["cloudcli", "copilotApi", "codey"].includes(name) || !item ||
         Object.keys(item).some((key) => !["version", "commit", "entrySha256", "nodeMajor"].includes(key)) ||
         !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(item.version ?? "") ||
         (item.commit && !/^[a-f0-9]{40}$/.test(item.commit)) || !HEX.test(item.entrySha256 ?? "") ||
         !Number.isInteger(item.nodeMajor) || item.nodeMajor < 1 || item.nodeMajor > 100) throw requestError("Invalid component report");
     components[name] = { ...item };
   }
+  if ((value.layout === "npm") !== Object.hasOwn(components, "codey")) throw requestError("Invalid npm package report");
   return { platform: value.platform, layout: value.layout, highestSequence: value.highestSequence,
     currentRelease: value.currentRelease || null, readyMigrations: [...value.readyMigrations],
     blockedReason: value.blockedReason || null, busy: value.busy === true, components };
@@ -89,6 +90,9 @@ function eligibility(node, device, release) {
   if (!device || device.revoked || !device.report) return { eligible: false, reason: "needs_setup" };
   const report = device.report;
   if (report.platform !== release.platform || report.layout === "unsupported") return { eligible: false, reason: "unsupported_platform" };
+  if ((report.layout === "npm") !== Object.hasOwn(release.components, "codey")) {
+    return { eligible: false, reason: "runtime_incompatible" };
+  }
   if (report.highestSequence > release.sequence) return { eligible: false, reason: "downgrade_blocked" };
   if (report.blockedReason) return { eligible: false, reason: report.blockedReason };
   if (release.migrations.some((migration) => !report.readyMigrations.includes(migration))) {
@@ -478,7 +482,7 @@ export class MachineUpdates {
       } else if (pathname === "/api/node-updater/report" && req.method === "POST") {
         send(res, 200, await this.report(device, await body(req, ["jobId", "leaseToken", "state", "code"])));
       } else {
-        const match = pathname.match(/^\/api\/node-updater\/releases\/([a-z0-9][a-z0-9-]{0,63})\/(cloudcli\.tar\.gz|gateway\.tar\.gz)$/);
+        const match = pathname.match(/^\/api\/node-updater\/releases\/([a-z0-9][a-z0-9-]{0,63})\/(cloudcli\.tar\.gz|gateway\.tar\.gz|codey-\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?\.tgz)$/);
         if (!match || req.method !== "GET") throw requestError("Not found", 404);
         const data = (await this.store.read()).data;
         if (!data.jobs.some((job) => job.nodeId === device.nodeId && job.ownerId === device.ownerId &&

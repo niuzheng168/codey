@@ -22,6 +22,34 @@ PROTOCOL = 1
 RELEASE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 HASH = re.compile(r"^[a-f0-9]{64}$")
 COMPONENTS = ("cloudcli", "copilotApi")
+NPM_COMPONENT = "codey"
+
+
+def component_entry(name):
+    return {"cloudcli": "dist-server/server/index.js", "copilotApi": "dist/main.js",
+            "codey": "codey-build.json"}[name]
+
+
+def dependency_lock(directory):
+    directory = Path(directory)
+    return directory / ("npm-shrinkwrap.json" if read(directory / "package.json").get("name") == "codey"
+                        else "package-lock.json")
+
+
+def transaction_units(anchors):
+    units = []
+    for item in anchors:
+        selected = item.get("services", [item["service"]])
+        require(isinstance(selected, list) and 1 <= len(selected) <= 2
+                and all(unit in {"codey-cloudcli.service", "copilot-api.service", "codey-copilot-api.service"}
+                        for unit in selected), "configuration_changed")
+        if item.get("component") == NPM_COMPONENT:
+            require(len(selected) == 2 and selected[0] == "codey-cloudcli.service"
+                    and selected[1] in {"copilot-api.service", "codey-copilot-api.service"}, "configuration_changed")
+        else:
+            require(selected == [item["service"]], "configuration_changed")
+        units.extend(selected)
+    return list(dict.fromkeys(units))
 
 
 class UpdateError(Exception):
@@ -112,19 +140,25 @@ def verify_envelope(envelope, public_key, work, now=None):
             and all(isinstance(item, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", item)
                     for item in manifest["migrations"]), "signature_invalid")
     require(isinstance(manifest.get("components"), dict) and manifest["components"]
-            and set(manifest["components"]).issubset(COMPONENTS), "signature_invalid")
+            and (set(manifest["components"]).issubset(COMPONENTS)
+                 or set(manifest["components"]) == {NPM_COMPONENT}), "signature_invalid")
     for name, component in manifest["components"].items():
-        require(component.get("file") == ("cloudcli.tar.gz" if name == "cloudcli" else "gateway.tar.gz")
+        expected_file = (f"codey-{component.get('version')}.tgz" if name == NPM_COMPONENT
+                         else "cloudcli.tar.gz" if name == "cloudcli" else "gateway.tar.gz")
+        require(isinstance(component.get("version"), str)
+                and re.fullmatch(r"\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?", component["version"])
+                and component.get("file") == expected_file
                 and HASH.fullmatch(component.get("sha256", "")) and HASH.fullmatch(component.get("entrySha256", ""))
                 and re.fullmatch(r"[a-f0-9]{40}", component.get("commit", ""))
                 and isinstance(component.get("size"), int) and 0 < component["size"] <= 512 * 1024 * 1024
                 and isinstance(component.get("nodeMajors"), list) and component["nodeMajors"]
                 and all(isinstance(major, int) and 20 <= major <= 40 for major in component["nodeMajors"])
-                and (name != "cloudcli" or HASH.fullmatch(component.get("lockSha256", ""))), "signature_invalid")
+                and (name not in {"cloudcli", NPM_COMPONENT} or HASH.fullmatch(component.get("lockSha256", ""))),
+                "signature_invalid")
     return manifest, hashlib.sha256(payload).hexdigest()
 
 
-def extract(archive, destination):
+def extract(archive, destination, npm=False):
     destination = Path(destination)
     require(not destination.exists(), "stage_failed")
     with tarfile.open(archive, "r:gz") as source:
@@ -139,12 +173,21 @@ def extract(archive, destination):
                     and "\\" not in member.name and ":" not in member.name
                     and (member.isfile() or member.isdir()) and name.as_posix() not in names, "stage_failed")
             names.add(name.as_posix())
+            if npm:
+                require(name.parts[0] == "package" and len(name.parts) > 1
+                        and "node_modules" not in name.parts
+                        and not member.name.endswith((".tgz", ".tar.gz"))
+                        and (name.name != "package.json" or name.as_posix() == "package/package.json"),
+                        "stage_failed")
             expanded += member.size
             require(expanded <= 4 * 1024 ** 3, "stage_failed")
         destination.mkdir(mode=0o700, parents=True)
         root = destination.resolve()
         for member in members:
-            target = destination / member.name
+            relative = PurePosixPath(member.name)
+            if npm:
+                relative = PurePosixPath(*relative.parts[1:])
+            target = destination / relative
             require(target.resolve().is_relative_to(root), "stage_failed")
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
@@ -223,7 +266,7 @@ def gateway_config_hash(file):
 def install_fingerprint(directory):
     directory = Path(directory)
     package = read(directory / "package.json")
-    result = {"lock": sha(directory / "package-lock.json"), "scripts": package.get("scripts", {})}
+    result = {"lock": sha(dependency_lock(directory)), "scripts": package.get("scripts", {})}
     for relative in ["scripts/fix-node-pty.js", "scripts/postinstall.js"]:
         file = directory / relative
         if file.is_file():
@@ -288,18 +331,27 @@ class Runtime:
                 "configuration_changed")
         require(cc_env.get("CODEY_PORTAL_PRINCIPAL_ID") == self.config["ownerId"], "configuration_changed")
         cloudcli = Path(f"/proc/{cc_pid}/cwd").resolve(strict=True)
-        require(read(cloudcli / "package.json")["name"] == "@cloudcli-ai/cloudcli", "configuration_changed")
+        npm = read(cloudcli / "package.json").get("name") == "codey"
+        require(npm or read(cloudcli / "package.json")["name"] == "@cloudcli-ai/cloudcli", "configuration_changed")
         command = Path(f"/proc/{cp_pid}/cmdline").read_bytes().decode().split("\0")
         candidates = []
-        for item in command[1:]:
+        for index, item in enumerate(command[1:], 1):
             file = Path(item) if item.startswith("/") else None
             if file and file.is_file():
                 file = file.resolve()
-                if file.name == "main.js" and file.parent.name == "dist":
+                if npm and file.name == "codey.mjs" and file.parent.name == "bin":
+                    require(command[index + 1:index + 2] == ["gateway"], "configuration_changed")
+                    candidates.append(file.parent.parent)
+                elif not npm and file.name == "main.js" and file.parent.name == "dist":
                     candidates.append(file.parent.parent)
         require(len(candidates) == 1, "configuration_changed")
         copilot = candidates[0]
-        require(read(copilot / "package.json")["name"] == "@jeffreycao/copilot-api", "configuration_changed")
+        require(read(copilot / "package.json")["name"] == ("codey" if npm else "@jeffreycao/copilot-api"),
+                "configuration_changed")
+        if npm:
+            require(copilot == cloudcli
+                    and Path(f"/proc/{cp_pid}/exe").resolve() == Path(f"/proc/{cc_pid}/exe").resolve(),
+                    "configuration_changed")
         allowed = [self.home / name for name in [".local/share", ".local/lib/node_modules",
                                                   ".npm-global/lib/node_modules", ".nvm/versions/node"]]
         for directory in [cloudcli, copilot]:
@@ -314,10 +366,15 @@ class Runtime:
                     "configuration_changed")
             cc_anchor, cp_anchor = Path(self.profile["cloudcliAnchor"]), Path(self.profile["copilotAnchor"])
             require(cc_anchor.resolve() == cloudcli and cp_anchor.resolve() == copilot, "configuration_changed")
+            require((self.profile["layout"] == "npm") == npm, "configuration_changed")
+            if npm:
+                require(Path(self.profile["codeyAnchor"]) == cc_anchor == cp_anchor, "configuration_changed")
         else:
             legacy_link = self.home / ".local/share/codey-cloudcli/current"
             cc_anchor = legacy_link if legacy_link.is_symlink() and legacy_link.resolve() == cloudcli else cloudcli
             cp_anchor = copilot
+            if npm:
+                cc_anchor = cp_anchor = cloudcli
             for item in command[1:]:
                 launch = Path(item) if item.startswith("/") and Path(item).name == "copilot-api" else None
                 if launch:
@@ -325,8 +382,10 @@ class Runtime:
                     if guessed.exists() and guessed.resolve() == copilot:
                         cp_anchor = guessed
             profile = {"schema": 1, "nodeId": self.config["nodeId"], "ownerId": self.config["ownerId"],
-                       "layout": "managed" if managed else "legacy", "copilotService": cp_name,
+                       "layout": "npm" if npm else "managed" if managed else "legacy", "copilotService": cp_name,
                        "cloudcliAnchor": str(cc_anchor), "copilotAnchor": str(cp_anchor)}
+            if npm:
+                profile["codeyAnchor"] = str(cloudcli)
             if self.create:
                 save(self.profile_file, profile)
             self.profile = profile
@@ -346,21 +405,27 @@ class Runtime:
                 protected.extend(directory.glob("*.key"))
                 protected.extend(directory.glob("*.pem"))
         versions = {}
+        npm_build = read(cloudcli / "codey-build.json") if npm else None
         for name, directory, process in [("cloudcli", cloudcli, cc_pid), ("copilotApi", copilot, cp_pid)]:
             node = str(Path(f"/proc/{process}/exe").resolve(strict=True))
             version = run([node, "-p", "process.versions.node"], timeout=10)
-            metadata = read(directory / "package.json")
+            metadata = npm_build[name] if npm else read(directory / "package.json")
             marker = directory / "codey-release.json"
-            source_commit = read(marker).get("sourceCommit") if marker.is_file() else None
+            source_commit = metadata["commit"] if npm else read(marker).get("sourceCommit") if marker.is_file() else None
             if not source_commit:
                 machine_manifest = directory.parent / "release.json"
                 if machine_manifest.is_file():
                     source_commit = read(machine_manifest).get("cloudcli" if name == "cloudcli" else "copilotApi", {}).get("commit")
                 elif name == "copilotApi" and (data / "portal-build.json").is_file():
                     source_commit = read(data / "portal-build.json").get("sourceCommit")
-            entry = "dist-server/server/index.js" if name == "cloudcli" else "dist/main.js"
+            entry = "gateway/main.js" if npm and name == "copilotApi" else component_entry(name)
             versions[name] = {"version": metadata["version"], "commit": source_commit,
                               "entrySha256": sha(directory / entry), "nodeMajor": int(version.split(".")[0])}
+        if npm:
+            versions[NPM_COMPONENT] = {
+                "version": read(cloudcli / "package.json")["version"], "commit": npm_build["sourceCommit"],
+                "entrySha256": sha(cloudcli / "codey-build.json"), "nodeMajor": versions["cloudcli"]["nodeMajor"],
+            }
         installed = read(self.private / "installed.json") if (self.private / "installed.json").exists() else {}
         keys = read(data / "config.json").get("auth", {}).get("apiKeys", [])
         return {
@@ -535,7 +600,7 @@ class Runtime:
             env = {"HOME": str(temporary_home), "PATH": str(Path(node).parent) + ":/usr/bin:/bin",
                    "CI": "true", "HUSKY": "0", "ELECTRON_SKIP_BINARY_DOWNLOAD": "1",
                    "DATABASE_PATH": ":memory:", "CODEY_MANAGED": "false", "CODEY_PORTAL_SSO": "false"}
-            package_file, lock_file = candidate / "package.json", candidate / "package-lock.json"
+            package_file, lock_file = candidate / "package.json", dependency_lock(candidate)
             original = package_file.read_bytes()
             package = json.loads(original)
             lock_hash = sha(lock_file)
@@ -570,7 +635,7 @@ class Runtime:
 
     def switch(self, anchors, job):
         save(Path(job) / "transaction.json", {"state": "applying", "anchors": anchors})
-        units = list(dict.fromkeys(item["service"] for item in anchors))
+        units = transaction_units(anchors)
         run(["systemctl", "--user", "stop", *units], timeout=35, log=Path(job) / "stop.private.log")
         for item in anchors:
             anchor, target, backup = Path(item["anchor"]), Path(item["target"]), Path(item["backup"])
@@ -593,7 +658,7 @@ class Runtime:
     def prepare_metadata(self, manifest, before, changed, job):
         records = []
         pairs = [(self.private / "installed.json", "installed-before.json")]
-        if "copilotApi" in changed:
+        if "copilotApi" in changed or NPM_COMPONENT in changed:
             pairs.append((Path(before["copilotHome"]) / "portal-build.json", "pin-before.json"))
         for file, backup_name in pairs:
             record = {"file": str(file), "backup": str(Path(job) / backup_name),
@@ -605,9 +670,12 @@ class Runtime:
         save(Path(job) / "metadata-rollback.json", records)
 
     def update_pin(self, manifest, before, changed):
-        if "copilotApi" not in changed:
+        if "copilotApi" not in changed and NPM_COMPONENT not in changed:
             return
-        component = manifest["components"]["copilotApi"]
+        component = manifest["components"].get("copilotApi")
+        if NPM_COMPONENT in changed:
+            source = read(Path(before["codeyAnchor"]) / "codey-build.json")["copilotApi"]
+            component = {**manifest["components"][NPM_COMPONENT], **source}
         save(Path(before["copilotHome"]) / "portal-build.json", {
             "artifactId": "codey-updater-" + manifest["id"], "releaseId": manifest["id"],
             "version": component["version"], "sourceCommit": component["commit"],
@@ -653,7 +721,7 @@ class Runtime:
             else:
                 require(item["kind"] == "directory" and backup.is_dir(), "rollback_failed")
         self.check_metadata_rollback(job)
-        units = list(dict.fromkeys(item["service"] for item in anchors))
+        units = transaction_units(anchors)
         run(["systemctl", "--user", "stop", *units], timeout=35)
         for item in reversed(anchors):
             anchor, target, backup = Path(item["anchor"]), Path(item["target"]), Path(item["backup"])
@@ -693,6 +761,8 @@ class Upgrade:
         if manifest["sequence"] == before["highestSequence"] and before["highestSequence"] > 0:
             require(before.get("installedDigest") == digest, "signature_invalid")
         require(manifest["platform"] == before["platform"], "unsupported_platform")
+        require((before["layout"] == "npm") == (set(manifest["components"]) == {NPM_COMPONENT}),
+                "runtime_incompatible")
         for migration in manifest["migrations"]:
             if migration not in before["readyMigrations"]:
                 raise UpdateError("model_auth_migration_required" if migration == "gateway-api-key-v1" else "migration_unsupported")
@@ -727,19 +797,30 @@ class Upgrade:
         for name in changed:
             component = manifest["components"][name]
             candidate = runtime.candidate(name, manifest["id"], job.name)
-            extract(job / component["file"], candidate)
-            entry = "dist-server/server/index.js" if name == "cloudcli" else "dist/main.js"
+            extract(job / component["file"], candidate, npm=name == NPM_COMPONENT)
+            entry = component_entry(name)
             require(sha(candidate / entry) == component["entrySha256"], "signature_invalid")
             require(read(candidate / "package.json")["version"] == component["version"], "signature_invalid")
-            if name == "cloudcli":
-                require(sha(candidate / "package-lock.json") == component["lockSha256"], "signature_invalid")
+            if name == NPM_COMPONENT:
+                package, build = read(candidate / "package.json"), read(candidate / "codey-build.json")
+                require(package["name"] == "codey" and build["name"] == "codey"
+                        and build["sourceCommit"] == component["commit"] and build["version"] == package["version"]
+                        and all((candidate / file).is_file() for file in
+                                ["bin/codey.mjs", "dist-server/server/index.js", "gateway/main.js"]),
+                        "signature_invalid")
+            if name in {"cloudcli", NPM_COMPONENT}:
+                require(sha(dependency_lock(candidate)) == component["lockSha256"], "signature_invalid")
                 runtime.prepare_dependencies(before, candidate, job)
             save(candidate / "codey-release.json", {"release": manifest["id"], "sourceCommit": component["commit"]})
-            anchor = Path(before["cloudcliAnchor" if name == "cloudcli" else "copilotAnchor"])
+            anchor = Path(before["codeyAnchor" if name == NPM_COMPONENT
+                                 else "cloudcliAnchor" if name == "cloudcli" else "copilotAnchor"])
             anchors.append({"component": name, "anchor": str(anchor), "target": str(candidate),
                             "kind": "symlink" if anchor.is_symlink() else "directory",
                             "previousTarget": str(anchor.resolve()), "backup": str(job / "backup" / name),
-                            "service": "codey-cloudcli.service" if name == "cloudcli" else before["copilotService"]})
+                            "service": "codey-cloudcli.service" if name in {"cloudcli", NPM_COMPONENT}
+                                       else before["copilotService"],
+                            **({"services": ["codey-cloudcli.service", before["copilotService"]]}
+                               if name == NPM_COMPONENT else {})})
         runtime.assert_unchanged(before)
         self.notify("waiting_idle", "busy")
         deadline = time.monotonic() + 120
