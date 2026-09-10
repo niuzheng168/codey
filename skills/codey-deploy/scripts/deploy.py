@@ -20,6 +20,7 @@ class Deploy:
         expected = {name: value for name, value in [
             ("portal", getattr(args, "expected_portal_commit", None)),
             ("cloudcli", getattr(args, "expected_cloudcli_commit", None)),
+            ("copilot-api", getattr(args, "expected_copilot_api_commit", None)),
         ] if value}
         require(all(len(value) == 40 and set(value) <= set("0123456789abcdef") for value in expected.values()),
                 "Expected source commits must be full lowercase SHA-1 values")
@@ -158,13 +159,30 @@ class Deploy:
 
     def node_services(self, nodes=None, services=("codey-cloudcli.service", "copilot-api.service")):
         def inspect(node):
+            aliases = {
+                "copilot-api.service": ("copilot-api.service", "codey-copilot-api.service"),
+            }
+            units = tuple(dict.fromkeys(
+                candidate for service in services for candidate in aliases.get(service, (service,))
+            ))
             output = self.ssh(node, [
-                "systemctl", "--user", "show", *services,
+                "systemctl", "--user", "show", *units,
                 "--property=Id,ActiveState,MainPID,ExecMainStartTimestampMonotonic",
             ], timeout=20)
-            require(output.count("ActiveState=active") == len(services) and "\nMainPID=0" not in output,
-                    "A protected remote service is not active: " + node)
-            return node, output
+            records = []
+            for block in output.strip().split("\n\n"):
+                record = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+                if record.get("Id"):
+                    records.append(record)
+            selected = {}
+            for service in services:
+                candidates = set(aliases.get(service, (service,)))
+                active = [record for record in records if record.get("Id") in candidates
+                          and record.get("ActiveState") == "active"
+                          and record.get("MainPID", "0").isdigit() and int(record["MainPID"]) > 0]
+                require(len(active) == 1, "A protected remote service is not active or is duplicated: " + node)
+                selected[service] = active[0]
+            return node, selected
         return dict(self.pool.map(inspect, nodes if nodes is not None else getattr(self, "nodes", NODES)))
 
     def native_idle(self):
@@ -540,6 +558,7 @@ def arguments():
     parser.add_argument("--verify-steering", action="store_true",
                         help="Workspace scope: prove a correction reaches the same native Codex turn")
     parser.add_argument("--expected-cloudcli-commit", help="Fail rather than publishing an unexpected remote CloudCLI tip")
+    parser.add_argument("--expected-copilot-api-commit", help="Fail rather than publishing an unexpected remote copilot-api tip")
     parser.add_argument("--expected-portal-commit", help="Fail rather than publishing an unexpected remote parent tip")
     parser.add_argument("--resume-release", help="Explicitly resume a failed Workspace release without rebuilding or signing again")
     parser.add_argument("--refresh-updater", action="store_true",

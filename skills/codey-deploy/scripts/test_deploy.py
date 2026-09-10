@@ -142,13 +142,15 @@ class DeploymentSafety(unittest.TestCase):
         from deploy import arguments, Deploy
         with patch.object(sys, "argv", [
             "deploy.py", "--scope", "workspace", "--nodes", "zhn-a100", "--verify-steering",
-            "--expected-cloudcli-commit", "a" * 40, "--expected-portal-commit", "b" * 40,
+            "--expected-cloudcli-commit", "a" * 40, "--expected-copilot-api-commit", "c" * 40,
+            "--expected-portal-commit", "b" * 40,
         ]):
             args = arguments()
         self.assertEqual(args.nodes, ["zhn-a100"])
         self.assertEqual(args.node_transport, "updater")
         self.assertTrue(args.verify_steering)
         self.assertEqual(args.expected_cloudcli_commit, "a" * 40)
+        self.assertEqual(args.expected_copilot_api_commit, "c" * 40)
         worker = object.__new__(Deploy)
         worker.args = args
         with patch.object(worker, "run_workspace", return_value=0) as workspace, \
@@ -156,6 +158,35 @@ class DeploymentSafety(unittest.TestCase):
                 patch.object(worker, "run_portal", side_effect=AssertionError("ACA must not deploy")):
             self.assertEqual(worker.run(), 0)
             workspace.assert_called_once()
+
+    def test_remote_service_baseline_accepts_exactly_one_old_or_new_gateway_unit(self):
+        from deploy import Deploy
+        worker = object.__new__(Deploy)
+        worker.nodes = ("zhn-a100", "jpe2")
+        worker.pool = SimpleNamespace(map=lambda function, values: map(function, values))
+
+        def ssh(node, _arguments, **_kwargs):
+            active = "codey-copilot-api.service" if node == "zhn-a100" else "copilot-api.service"
+            inactive = "copilot-api.service" if node == "zhn-a100" else "codey-copilot-api.service"
+            return (
+                "Id=codey-cloudcli.service\nActiveState=active\nMainPID=10\n"
+                "ExecMainStartTimestampMonotonic=100\n\n"
+                f"Id={active}\nActiveState=active\nMainPID=20\nExecMainStartTimestampMonotonic=200\n\n"
+                f"Id={inactive}\nActiveState=inactive\nMainPID=0\nExecMainStartTimestampMonotonic=0\n"
+            )
+
+        worker.ssh = ssh
+        result = worker.node_services()
+        self.assertEqual(result["zhn-a100"]["copilot-api.service"]["Id"], "codey-copilot-api.service")
+        self.assertEqual(result["jpe2"]["copilot-api.service"]["Id"], "copilot-api.service")
+
+        worker.ssh = lambda *_args, **_kwargs: (
+            "Id=codey-cloudcli.service\nActiveState=active\nMainPID=10\n\n"
+            "Id=copilot-api.service\nActiveState=active\nMainPID=20\n\n"
+            "Id=codey-copilot-api.service\nActiveState=active\nMainPID=30\n"
+        )
+        with self.assertRaisesRegex(RuntimeError, "duplicated"):
+            worker.node_services(nodes=("zhn-a100",))
 
     def test_test_home_and_tmp_stay_outside_source_worktrees_without_credentials(self):
         from builder import Builder
