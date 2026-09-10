@@ -10,6 +10,48 @@
     "url": "https://chatgpt.com/codex/install.sh",
     "release": "latest"
   },
+  "cloudcliBuild": {
+    "defaultProfile": "codex-only",
+    "serverRuntimeDependencies": [
+      "@iarna/toml",
+      "@octokit/rest",
+      "@openai/codex-sdk",
+      "@vscode/ripgrep",
+      "bcrypt",
+      "better-sqlite3",
+      "chokidar",
+      "cors",
+      "cross-spawn",
+      "express",
+      "gray-matter",
+      "ignore",
+      "jsonwebtoken",
+      "mime-types",
+      "multer",
+      "node-pty",
+      "web-push",
+      "ws"
+    ],
+    "profiles": {
+      "codex-only": {
+        "enabledProviders": [
+          "codex"
+        ],
+        "providerDependencies": []
+      },
+      "full": {
+        "enabledProviders": [
+          "claude",
+          "codex",
+          "cursor",
+          "opencode"
+        ],
+        "providerDependencies": [
+          "@anthropic-ai/claude-agent-sdk"
+        ]
+      }
+    }
+  },
   "devTunnel": {
     "url": "https://tunnelsassetsprod.blob.core.windows.net/cli/linux-x64-devtunnel",
     "sha256": "ff6911548907b5abaea4ed5baa36b2420be7c5debcb637a4f50f7a4002b10b60",

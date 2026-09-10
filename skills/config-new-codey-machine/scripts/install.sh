@@ -89,11 +89,14 @@ if (manifest.schema !== 1 || setup.schema !== 1 ||
     manifest.dependencyMode !== "prebuilt-private-components") process.exit(2);
 console.log(manifest.releaseId);
 console.log(setup.portalOrigin);
+if (!manifest.cloudcli || !["codex-only", "full"].includes(manifest.cloudcli.profile)) process.exit(2);
+console.log(manifest.cloudcli.profile);
 NODE
 )
-[[ "${#PACKAGE[@]}" -eq 2 ]] || die "Invalid package metadata."
+[[ "${#PACKAGE[@]}" -eq 3 ]] || die "Invalid package metadata."
 RELEASE_ID="${PACKAGE[0]}"
 PORTAL_ORIGIN="${PACKAGE[1]}"
+CLOUDCLI_PROFILE="${PACKAGE[2]}"
 RELEASE="$RUNTIME_ROOT/releases/$RELEASE_ID"
 STAGE="$RUNTIME_ROOT/releases/.${RELEASE_ID}.stage"
 
@@ -400,10 +403,18 @@ tar -xzf "$ASSETS/cloudcli.tar.gz" -C "$STAGE/cloudcli"
 [[ -f "$STAGE/cloudcli/dist-server/server/index.js" ]] || die "CloudCLI payload is incomplete."
 [[ ! -e "$STAGE/cloudcli/node_modules/@openai/codex-linux-x64" ]] ||
   die "CloudCLI payload incorrectly contains a Codex runtime."
+if [[ "$CLOUDCLI_PROFILE" == codex-only ]]; then
+  [[ ! -e "$STAGE/cloudcli/node_modules/@anthropic-ai" ]] ||
+    die "Codex-only CloudCLI payload incorrectly contains Anthropic packages."
+else
+  [[ -d "$STAGE/cloudcli/node_modules/@anthropic-ai/claude-agent-sdk" ]] ||
+    die "Full CloudCLI payload is missing the Claude SDK."
+fi
 
 cat >"$CONFIG_ROOT/cloudcli.env" <<EOF
 CODEY_MANAGED=true
 CODEY_PORTAL_SSO=true
+CLOUDCLI_PROVIDER_PROFILE=$CLOUDCLI_PROFILE
 SERVER_PORT=3001
 HOST=127.0.0.1
 DATABASE_PATH=$DATA_ROOT/cloudcli/auth.db

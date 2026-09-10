@@ -109,7 +109,10 @@ test("machine skill submits an authenticated same-origin POST without navigating
 });
 
 test("only Linux download is enabled while Windows and macOS native launchers are pending", async () => {
-  const entry = { enabled: true, bytes: 4194304, node: "24.20.0", cloudcli: "1.37.2", copilotApi: "2.5.1" };
+  const entry = {
+    enabled: true, bytes: 4194304, node: "24.20.0", cloudcli: "1.37.2",
+    cloudcliProfile: "codex-only", copilotApi: "2.5.1",
+  };
   const machineSetup = { ...entry, platforms: [
     { platform: "windows-x64", enabled: false, planned: true }, { ...entry, platform: "linux-x64" },
     { platform: "macos-arm64", enabled: false, planned: true },
@@ -120,6 +123,10 @@ test("only Linux download is enabled while Windows and macOS native launchers ar
   assert.equal(p.elements.get("#download-machine-windows-skill").disabled, true);
   assert.equal(p.elements.get("#download-machine-macos-skill").disabled, true);
   assert.equal(p.elements.get("#download-machine-macos-intel-skill").disabled, true);
+  assert.match(
+    p.elements.get("#machine-package-status").textContent,
+    /安装时下载 Node 24\.20\.0.*CloudCLI 1\.37\.2（仅 Codex）/,
+  );
 });
 
 test("static downloads ignore legacy pending identities and disable all download buttons in flight", async () => {

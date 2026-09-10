@@ -17,6 +17,12 @@ import zipfile
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
+CLOUDCLI_SERVER_RUNTIME_DEPENDENCIES = [
+    "@iarna/toml", "@octokit/rest", "@openai/codex-sdk", "@vscode/ripgrep",
+    "bcrypt", "better-sqlite3", "chokidar", "cors", "cross-spawn", "express",
+    "gray-matter", "ignore", "jsonwebtoken", "mime-types", "multer", "node-pty",
+    "web-push", "ws",
+]
 
 
 def run(args, *, cwd=None, env=None):
@@ -115,7 +121,66 @@ def build_copilot(source_root, output, node, bun_version, env):
     shutil.rmtree(tools)
 
 
-def build_cloudcli(source_root, output, node, env):
+def resolve_cloudcli_profile(dependencies, requested):
+    config = dependencies.get("cloudcliBuild", {})
+    name = requested or config.get("defaultProfile")
+    profiles = config.get("profiles", {})
+    if name not in profiles:
+        raise RuntimeError(f"Unknown CloudCLI profile: {name}")
+    profile = profiles[name]
+    providers = profile.get("enabledProviders")
+    runtime_dependencies = config.get("serverRuntimeDependencies")
+    provider_dependencies = profile.get("providerDependencies")
+    if not isinstance(providers, list) or not providers or len(set(providers)) != len(providers):
+        raise RuntimeError(f"Invalid enabled providers for CloudCLI profile {name}")
+    if runtime_dependencies != CLOUDCLI_SERVER_RUNTIME_DEPENDENCIES:
+        raise RuntimeError("CloudCLI server runtime dependency allowlist was changed without builder review")
+    expected = {
+        "codex-only": (["codex"], []),
+        "full": (["claude", "codex", "cursor", "opencode"], ["@anthropic-ai/claude-agent-sdk"]),
+    }
+    if name not in expected or (providers, provider_dependencies) != expected[name]:
+        raise RuntimeError(f"Unsupported CloudCLI profile definition: {name}")
+    return {
+        "name": name,
+        "enabledProviders": providers,
+        "runtimeDependencies": [*runtime_dependencies, *provider_dependencies],
+        "providerDependencies": provider_dependencies,
+    }
+
+
+def configure_cloudcli_dependencies(output, profile, node, env):
+    package_file = output / "package.json"
+    package = json.loads(package_file.read_text())
+    original = package.get("dependencies", {})
+    included = profile["runtimeDependencies"]
+    missing = [name for name in included if name not in original]
+    if missing:
+        raise RuntimeError(f"CloudCLI runtime dependencies are missing: {', '.join(missing)}")
+    excluded = sorted(set(original) - set(included))
+    package["dependencies"] = {name: original[name] for name in included}
+    package.pop("devDependencies", None)
+    package.pop("optionalDependencies", None)
+    package_file.write_text(json.dumps(package, indent=2) + "\n")
+    run([
+        node / "bin/npm", "install", "--package-lock-only", "--ignore-scripts",
+        "--no-audit", "--no-fund",
+    ], cwd=output, env=env)
+    lock = json.loads((output / "package-lock.json").read_text())
+    packages = lock.get("packages", {})
+    root = packages.get("", {})
+    if set(root.get("dependencies", {})) != set(included) or any(
+        root.get(name) for name in ("devDependencies", "optionalDependencies")
+    ):
+        raise RuntimeError("Pruned CloudCLI lock does not match the runtime dependency allowlist")
+    if profile["name"] == "codex-only" and any(
+        name.startswith("node_modules/@anthropic-ai/") for name in packages
+    ):
+        raise RuntimeError("Pruned CloudCLI lock still contains Anthropic packages")
+    return excluded
+
+
+def build_cloudcli(source_root, output, node, env, profile):
     run([node / "bin/npm", "ci", "--no-audit", "--no-fund"], cwd=source_root, env=env)
     build_env = {**env, "VITE_BASE_PATH": "/", "VITE_CODEY_MANAGED": "true", "VITE_CODEY_PORTAL_SSO": "true"}
     run([node / "bin/npm", "run", "build"], cwd=source_root, env=build_env)
@@ -127,6 +192,7 @@ def build_cloudcli(source_root, output, node, env):
     for name in ("prepare", "postinstall", "prepublishOnly"):
         package.get("scripts", {}).pop(name, None)
     package_file.write_text(json.dumps(package, indent=2) + "\n")
+    excluded_dependencies = configure_cloudcli_dependencies(output, profile, node, env)
     run([node / "bin/npm", "ci", "--omit=dev", "--no-audit", "--no-fund"], cwd=output, env=env)
     for relative in [
         "node_modules/@openai/codex", "node_modules/@openai/codex-linux-x64",
@@ -138,18 +204,42 @@ def build_cloudcli(source_root, output, node, env):
         shutil.rmtree(output / relative, ignore_errors=True)
     if (output / "node_modules/@openai/codex-linux-x64").exists():
         raise RuntimeError("CloudCLI payload still contains a Codex runtime")
+    anthropic = output / "node_modules/@anthropic-ai"
+    if profile["name"] == "codex-only" and anthropic.exists():
+        raise RuntimeError("Codex-only CloudCLI payload still contains Anthropic packages")
+    if profile["name"] == "full" and not (anthropic / "claude-agent-sdk").exists():
+        raise RuntimeError("Full CloudCLI payload is missing the Claude SDK")
     script = (
         "require('better-sqlite3')(':memory:').close();"
         "const p=require('node-pty').spawn('/bin/sh',['-c','exit 0'],{env:process.env});"
         "p.onExit(e=>process.exit(e.exitCode));setTimeout(()=>process.exit(1),5000).unref();"
     )
     run([node / "bin/node", "-e", script], cwd=output, env=env)
+    registry_smoke = (
+        "const {providerRegistry}=await import('./dist-server/server/modules/providers/provider.registry.js');"
+        f"const expected={json.dumps(profile['enabledProviders'])};"
+        "if(providerRegistry.profile!==process.env.CLOUDCLI_PROVIDER_PROFILE"
+        "||JSON.stringify(providerRegistry.listProviderIds())!==JSON.stringify(expected))process.exit(2);"
+    )
+    run(
+        [node / "bin/node", "--input-type=module", "-e", registry_smoke],
+        cwd=output,
+        env={**env, "CLOUDCLI_PROVIDER_PROFILE": profile["name"]},
+    )
+    return {
+        "profile": profile["name"],
+        "enabledProviders": profile["enabledProviders"],
+        "runtimeDependencies": profile["runtimeDependencies"],
+        "providerDependencies": profile["providerDependencies"],
+        "excludedDependencies": excluded_dependencies,
+    }
 
 
 def build(args):
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise RuntimeError("Build Linux payloads on Linux x86_64")
     dependencies = json.loads((ROOT / "skills/config-new-codey-machine/dependencies.json").read_text())
+    cloudcli_profile = resolve_cloudcli_profile(dependencies, args.cloudcli_profile)
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     if (output / "manifest.json").exists():
@@ -170,7 +260,9 @@ def build(args):
     cloud_info["repository"] = "https://github.com/niuzheng168/claudecodeui.git"
     copilot_info["repository"] = "https://github.com/niuzheng168/copilot-api.git"
     stages = {name: work / name for name in ("cloudcli", "copilot-api", "updater")}
-    build_cloudcli(cloud_source, stages["cloudcli"], node, env)
+    cloud_info.update(build_cloudcli(
+        cloud_source, stages["cloudcli"], node, env, cloudcli_profile,
+    ))
     build_copilot(copilot_source, stages["copilot-api"], node, "1.4.2", env)
     copy_required(ROOT / "node-updater", stages["updater"], [
         "install.py", "updater.py", "engine.py", "probe.mjs", "UPGRADE.md",
@@ -239,7 +331,7 @@ def build(args):
     shutil.rmtree(work)
     print(json.dumps({
         "ok": True, "releaseId": manifest["releaseId"], "artifacts": artifacts,
-        "package": package_metadata,
+        "cloudcliProfile": cloudcli_profile["name"], "package": package_metadata,
     }, indent=2))
 
 
@@ -249,5 +341,6 @@ if __name__ == "__main__":
     parser.add_argument("--platform", choices=["linux-x64"], default="linux-x64")
     parser.add_argument("--portal-origin", required=True)
     parser.add_argument("--updater-public-key-file", required=True)
+    parser.add_argument("--cloudcli-profile", choices=["codex-only", "full"])
     parser.add_argument("--allow-reviewed-diff", action="store_true")
     build(parser.parse_args())

@@ -13,6 +13,30 @@ import { verifyDevTunnelAccess } from "./devtunnel-transport.mjs";
 
 export const MACHINE_SKILL = "config-new-codey-machine";
 const MACHINE_STORE = "packages-v2";
+const CLOUDCLI_SERVER_RUNTIME_DEPENDENCIES = [
+  "@iarna/toml", "@octokit/rest", "@openai/codex-sdk", "@vscode/ripgrep",
+  "bcrypt", "better-sqlite3", "chokidar", "cors", "cross-spawn", "express",
+  "gray-matter", "ignore", "jsonwebtoken", "mime-types", "multer", "node-pty",
+  "web-push", "ws",
+];
+const validCloudCliProfile = (cloudcli) => {
+  if (cloudcli?.profile === undefined) return true;
+  const providerDependencies = cloudcli.profile === "codex-only" ? []
+    : cloudcli.profile === "full" ? ["@anthropic-ai/claude-agent-sdk"] : null;
+  const enabledProviders = cloudcli.profile === "codex-only" ? ["codex"]
+    : ["claude", "codex", "cursor", "opencode"];
+  return providerDependencies !== null &&
+    JSON.stringify(cloudcli.enabledProviders) === JSON.stringify(enabledProviders) &&
+    JSON.stringify(cloudcli.providerDependencies) === JSON.stringify(providerDependencies) &&
+    JSON.stringify(cloudcli.runtimeDependencies) === JSON.stringify([
+      ...CLOUDCLI_SERVER_RUNTIME_DEPENDENCIES, ...providerDependencies,
+    ]) &&
+    Array.isArray(cloudcli.excludedDependencies) &&
+    new Set(cloudcli.excludedDependencies).size === cloudcli.excludedDependencies.length &&
+    cloudcli.excludedDependencies.every((name) => typeof name === "string") &&
+    cloudcli.excludedDependencies.includes("@anthropic-ai/claude-agent-sdk") ===
+      (cloudcli.profile === "codex-only");
+};
 const json = (res, status, value) => {
   const bytes = Buffer.from(JSON.stringify(value));
   res.writeHead(status, {
@@ -70,6 +94,7 @@ export async function loadMachineBundle(root, platformId = "linux-x64") {
       JSON.stringify(manifest.downloadedOfficialRuntimes) !== JSON.stringify(["node", "codex", "devtunnel"]) ||
       !/^\d+\.\d+\.\d+$/.test(manifest.node ?? "") ||
       typeof manifest.cloudcli?.version !== "string" || typeof manifest.copilotApi?.version !== "string" ||
+      !validCloudCliProfile(manifest.cloudcli) ||
       packageInfo?.file !== `${MACHINE_SKILL}.zip` ||
       !Number.isInteger(packageInfo?.size) || packageInfo.size <= 0 || packageInfo.size > 1536 * 1024 * 1024 ||
       !/^[a-f0-9]{64}$/.test(packageInfo?.sha256 ?? "")) {
@@ -146,7 +171,9 @@ export class MachineSetup {
       return {
         ...identity, enabled: true, platform: manifest.platform, releaseId: manifest.releaseId,
         bytes: packageInfo.size,
-        node: manifest.node, cloudcli: manifest.cloudcli.version, copilotApi: manifest.copilotApi.version,
+        node: manifest.node, cloudcli: manifest.cloudcli.version,
+        cloudcliProfile: manifest.cloudcli.profile ?? "full",
+        copilotApi: manifest.copilotApi.version,
       };
     } catch { return { ...identity, enabled: false, reason: `${definition.name} 完整配置包尚未发布或不可用；不会退回其他平台或仅说明的 ZIP` }; }
   }
