@@ -16,7 +16,9 @@ clone is not a production deployment.
   node ownership is managed by Codey's enrollment workflow.
 - `cloudcli-nodes.aca.json`: administrator-approved HTTPS Workspace routes.
 - `node-data.aca.json`: administrator-approved private HTTPS usage/history routes.
-- `session-share.aca.json`: MCP/Entra resource metadata, not OAuth credentials.
+- `session-share.aca.json`: retained local metadata for an optional standalone
+  Session Share MCP. It is no longer copied into or referenced by the production
+  ACA Portal deployment.
 - `codey-node-ca.pem`: this deployment's public node CA certificate, provisioned
   separately. Never add its signing private key to the repository.
 

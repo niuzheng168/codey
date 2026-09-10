@@ -36,7 +36,7 @@ class Portal:
         self.cookie = None
         self.session_file = None
         self.created = False
-        self.report = {"passed": False, "mcpTests": "skipped-by-user", "existingUserSessionsModified": 0}
+        self.report = {"passed": False, "existingUserSessionsModified": 0}
 
     def http(self, path, *, authenticated=True, expected=200, origin=None, method="GET"):
         require(path.startswith("/") and not path.startswith("//"), "Unsafe probe URL")
@@ -158,7 +158,10 @@ class Portal:
     def verify_portal(self):
         manifest = read(self.job / "manifest.json")
         require(manifest["scope"] == "portal", "Not a Portal-only release")
-        require(read(self.job / "aca-result.json")["ready"], "ACA is not ready")
+        aca = read(self.job / "aca-result.json")
+        require(aca["ready"], "ACA is not ready")
+        require({row["name"] for row in aca["containers"]} == {"portal"},
+                "The production revision still deploys a sidecar")
         self.http("/api/health", authenticated=False)
         for pathname, digest in manifest["publicSha256"].items():
             require(hashlib.sha256(self.http(pathname).content).hexdigest() == digest,
@@ -171,6 +174,7 @@ class Portal:
         return {"portalHealth": 200, "sessionHistoryHidden": history_hidden,
                 "publicFilesVerified": len(manifest["publicSha256"]), "authenticatedPortalSession": True,
                 "nodeChecksPerformed": False, "realModelCalls": 0,
+                "deploymentContainers": ["portal"], "mcpDeployed": False,
                 "acceptanceScope": "ACA Portal health, authenticated session, deployed public source and navigation"}
 
     def run(self):

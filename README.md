@@ -74,8 +74,10 @@ Browser
 文件编辑、Git、Skill、MCP 和 terminal 均由 CloudCLI 原生实现。fork 源码位于
 [`cloudcli/`](./cloudcli)，Codey 只增加子路径适配和 VNet reverse proxy。
 
-顶部的 **Session History** 标签通过 Portal 后端连接
-`codex-session-share` 服务，支持搜索共享会话、查看 metadata/handoff/transcript、
+`codex-session-share-mcp/` 源码继续保留供本地或独立部署使用。自
+**2026-09-10** 起，生产 ACA 不再部署该 sidecar，Portal 也不再配置 MCP proxy 或
+Session Share upstream；当前 **Session History** 入口保持关闭。若以后独立启用，
+该服务支持搜索共享会话、查看 metadata/handoff/transcript、
 下载 archive，以及管理员重命名、移入回收站、恢复、直接永久删除和批量操作。All
 sources 会按 source session ID 合并节点与 Shared 副本并优先显示 Shared；回收站
 条目固定排在非回收站条目之后，也可单独筛选全部回收站内容。Portal 使用当前
@@ -310,9 +312,10 @@ Portal 只会访问 `config/nodes.json` 的白名单地址，不接受浏览器�
 
 可通过 `COPILOT_ARTIFACTS_DIR` 指向另一份日构建目录；默认使用项目根目录下的 `copilot-api-artifacts/`。
 
-Session History 的非敏感连接配置位于
+可选 Session Share 服务的非敏感连接配置位于
 [`config/session-share.json`](./config/session-share.json)。可用
-`SESSION_SHARE_PORTAL_CONFIG` 指向其他配置。运行 Portal 的用户需要先执行
+`SESSION_SHARE_PORTAL_CONFIG` 指向其他配置；生产 Portal 当前不设置该变量，也不
+部署 Session Share MCP。独立运行该功能的用户需要先执行
 `az login`；读取需要 `SessionShare.Contributor`，变更操作还需要
 `SessionShare.Admin`。
 

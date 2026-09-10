@@ -37,7 +37,7 @@ class Deploy:
         self.remote = args.remote_root + "/artifacts/" + self.release
         self.node_job = "/home/zhn/.local/share/codey-deploy/" + self.release
         self.report = {"release": self.release, "startedAt": time.time(), "targetSeconds": args.target_seconds,
-                       "status": "running", "forceActualRollout": True, "mcpTests": "skipped-by-user",
+                       "status": "running", "forceActualRollout": True,
                        "protectedLocalCopilot": True, "phases": []}
         self.record = self.job / "report.json"
         if resumed:
@@ -289,7 +289,6 @@ class Deploy:
                 self.report["ui"] = self.worker("publish_ui", timeout=200)
                 self.report["aca"] = self.worker("verify_aca_unchanged", timeout=60)
                 self.report["e2e"] = self.worker("verify", script="portal.py", extra={"modelNodes": []}, timeout=100)
-                self.report["mcp"] = self.worker("mcp_health", timeout=60)
             with phase(self.report, "protected-services-and-worktree-check", self.record):
                 self.report["nodesAfter"] = self.node_services(nodes=NODES)
                 self.report["gatewayAfter"] = self.node_services(services=("copilot-api.service",))
@@ -329,9 +328,7 @@ class Deploy:
             with phase(self.report, "portal-aca-revision-rollout", self.record):
                 self.report["aca"] = self.worker("activate", timeout=330)
             with phase(self.report, "portal-production-acceptance", self.record):
-                mcp = self.pool.submit(self.worker, "mcp_health", timeout=60)
                 self.report["e2e"] = self.worker("verify_portal", script="portal.py", timeout=100)
-                self.report["mcp"] = mcp.result()
             self.report["status"] = "complete"
         except Exception as error:
             self.report["status"] = "needs-attention"
@@ -388,10 +385,8 @@ class Deploy:
                 self.report["aca"] = aca.result()
                 self.report["ui"] = ui.result()
             with phase(self.report, "final-codey-models-and-fleet-acceptance", self.record):
-                mcp = self.pool.submit(self.worker, "mcp_health", timeout=60)
                 self.report["e2e"] = self.worker("verify", script="portal.py",
                                                  extra={"modelNodes": list(self.nodes[1:])}, timeout=150)
-                self.report["mcp"] = mcp.result()
                 self.report["localAfter"] = self.protected_local()
                 require(self.report["localBefore"] == self.report["localAfter"], "Protected local gateway changed")
                 self.report["worktreeAfter"] = command(["git", "status", "--short"], cwd=self.root)[0]
@@ -505,9 +500,7 @@ print(json.dumps({'node':json.loads(config.read_text())['nodeId'],'updaterInstal
                 self.report["nativeAtConfirmation"] = self.native_idle()
                 self.report["nodeUpdates"] = self.worker("rollout", script="updates.py", timeout=510)
             with phase(self.report, "final-aca-fleet-and-local-acceptance", self.record):
-                mcp = self.pool.submit(self.worker, "mcp_health", timeout=60)
                 self.report["e2e"] = self.worker("verify", script="portal.py", extra={"modelNodes": []}, timeout=100)
-                self.report["mcp"] = mcp.result()
                 self.report["nodesAfter"] = self.node_services()
                 self.report["localAfter"] = self.protected_local()
                 require(self.report["localAfter"] == self.report["localBefore"], "Protected local gateway changed")

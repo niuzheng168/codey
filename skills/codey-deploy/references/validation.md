@@ -1,5 +1,11 @@
 # Validation evidence
 
+> Current deployment status as of September 10, 2026: ACA deploys only the
+> `portal` container. `codex-session-share-mcp/` remains in the repository for
+> local reference, but its image, sidecar, proxy configuration and health probe
+> are no longer part of a release. MCP references below are historical evidence
+> from releases completed before this removal.
+
 ## First measured full E2E: September 7, 2026
 
 Run: `fast-20260907-120150-509f08`. **432.468 seconds (7 minutes 12.468

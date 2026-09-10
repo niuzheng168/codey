@@ -224,7 +224,6 @@ class DeploymentSafety(unittest.TestCase):
             "build_portal": {"scope": "portal"},
             "activate": {"ready": True},
             "verify_portal": {"portalHealth": 200, "nodeChecksPerformed": False},
-            "mcp_health": {"health": 200},
         }
         with patch("deploy.phase", side_effect=lambda *_: nullcontext()), \
                 patch.object(worker, "upload"), patch.object(worker, "finish"), \
@@ -236,6 +235,41 @@ class DeploymentSafety(unittest.TestCase):
         self.assertEqual(worker.report["selectedNodes"], [])
         self.assertEqual(worker.report["skippedNodes"], ["zhn-a100", "jpe2", "jpe3", "westus2"])
         self.assertFalse(worker.report["nodeChecksPerformed"])
+        self.assertNotIn("mcp", worker.report)
+
+    def test_portal_deployment_removes_the_legacy_mcp_sidecar_and_proxy_configuration(self):
+        from builder import portal_deployment_template
+        original = {
+            "revisionSuffix": "before",
+            "containers": [
+                {"name": "portal", "image": "portal@sha256:old", "env": [
+                    {"name": "PORTAL_MCP_PROXY_URL", "value": "http://127.0.0.1:8000"},
+                    {"name": "SESSION_SHARE_PORTAL_CONFIG", "value": "/app/config/session-share.aca.json"},
+                    {"name": "KEEP", "secretRef": "keep-this"},
+                ]},
+                {"name": "mcp", "image": "mcp@sha256:old"},
+            ],
+            "scale": {"minReplicas": 1, "maxReplicas": 1},
+        }
+        template, removed = portal_deployment_template(
+            original, "registry.example/codey@sha256:" + "a" * 64,
+        )
+        self.assertTrue(removed)
+        self.assertEqual([row["name"] for row in template["containers"]], ["portal"])
+        portal = template["containers"][0]
+        self.assertEqual([row["name"] for row in portal["env"]], ["KEEP"])
+        self.assertEqual(original["containers"][0]["image"], "portal@sha256:old")
+        self.assertEqual(original["containers"][1]["name"], "mcp")
+
+    def test_portal_deployment_rejects_any_new_sidecar(self):
+        from builder import portal_deployment_template
+        with self.assertRaisesRegex(RuntimeError, "at most the removable legacy MCP"):
+            portal_deployment_template({
+                "containers": [
+                    {"name": "portal", "image": "portal@sha256:old"},
+                    {"name": "new-sidecar", "image": "other@sha256:old"},
+                ],
+            }, "registry.example/codey@sha256:" + "a" * 64)
 
     def test_portal_only_verifier_never_requests_node_routes(self):
         import hashlib
@@ -255,7 +289,10 @@ class DeploymentSafety(unittest.TestCase):
             "publicSha256": {"/settings": hashlib.sha256(public).hexdigest()},
             "features": {"sessionHistory": False},
         })
-        save(worker.job / "aca-result.json", {"ready": True})
+        save(worker.job / "aca-result.json", {
+            "ready": True,
+            "containers": [{"name": "portal", "ready": True, "restartCount": 0}],
+        })
         paths = []
 
         def http(path, **_kwargs):
@@ -271,6 +308,8 @@ class DeploymentSafety(unittest.TestCase):
         self.assertEqual(paths, ["/api/health", "/settings", "/?view=sessions"])
         self.assertFalse(result["nodeChecksPerformed"])
         self.assertTrue(result["authenticatedPortalSession"])
+        self.assertEqual(result["deploymentContainers"], ["portal"])
+        self.assertFalse(result["mcpDeployed"])
         self.assertNotIn("nodes", result)
         self.assertFalse(any(path.startswith("/cloudcli/") or path.startswith("/api/node-data/")
                              for path in paths))

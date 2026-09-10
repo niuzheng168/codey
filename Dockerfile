@@ -14,11 +14,9 @@ ENV NODE_ENV=production \
     PORTAL_READ_ONLY=true \
     PORTAL_CLIENT_ONLY=true \
     PORTAL_SESSION_HISTORY_HTTP_ONLY=true \
-    PORTAL_MCP_PROXY_URL=http://127.0.0.1:8000 \
     PORTAL_CONFIG=/app/config/nodes.aca.json \
     PORTAL_CLOUDCLI_CONFIG=/app/config/cloudcli-nodes.aca.json \
-    PORTAL_NODE_DATA_CONFIG=/app/config/node-data.aca.json \
-    SESSION_SHARE_PORTAL_CONFIG=/app/config/session-share.aca.json
+    PORTAL_NODE_DATA_CONFIG=/app/config/node-data.aca.json
 
 # Workspace UI releases are published separately to the existing persistent
 # share, not copied to VMs or baked into this backend image. After the first
@@ -32,7 +30,7 @@ COPY --chown=node:node public ./public
 COPY --from=node-skill-builder --chown=node:node /build/public/downloads ./public/downloads
 COPY --chown=node:node src ./src
 COPY --chown=node:node node-updater ./node-updater
-COPY --chown=node:node config/nodes.aca.json config/session-share.aca.json config/cloudcli-nodes.aca.json config/node-data.aca.json config/codey-node-ca.pem ./config/
+COPY --chown=node:node config/nodes.aca.json config/cloudcli-nodes.aca.json config/node-data.aca.json config/codey-node-ca.pem ./config/
 
 USER node
 

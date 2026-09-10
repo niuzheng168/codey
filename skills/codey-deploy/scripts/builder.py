@@ -6,13 +6,38 @@ import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
 
 from common import archive_tree, canonical, command, read, release_name, require, safe_extract, save, sha
 from gateway_routes import freeze as freeze_gateway_routes, verify_frozen as verify_gateway_routes
+
+
+REMOVED_MCP_ENV = frozenset({"PORTAL_MCP_PROXY_URL", "SESSION_SHARE_PORTAL_CONFIG"})
+
+
+def portal_topology(template):
+    names = [row.get("name") for row in template.get("containers", [])]
+    require(len(names) == len(set(names))
+            and set(names) in ({"portal"}, {"portal", "mcp"}),
+            "ACA must contain Portal and at most the removable legacy MCP sidecar")
+    return "mcp" in names
+
+
+def portal_deployment_template(before, portal_image):
+    legacy_mcp = portal_topology(before)
+    require(isinstance(portal_image, str) and "@sha256:" in portal_image,
+            "Portal image must use an immutable digest")
+    template = copy.deepcopy(before)
+    portal = next(row for row in template["containers"] if row["name"] == "portal")
+    portal["image"] = portal_image
+    portal["env"] = [
+        item for item in portal.get("env", [])
+        if item.get("name") not in REMOVED_MCP_ENV
+    ]
+    template["containers"] = [portal]
+    return template, legacy_mcp
 
 
 class Builder:
@@ -24,7 +49,7 @@ class Builder:
         self.source = self.job / "source"
         self.config = read(self.root / "config/workspace-ui-publish.json")
         self.registry = request.get("registry", "codexshareef492f53f0")
-        self.report = {"release": self.release, "mcpTests": "skipped-by-user", "checks": []}
+        self.report = {"release": self.release, "checks": []}
         self.bun = ["npx", "--yes", "--package=bun@1.4.2", "bun"]
         self.lease = self.root / "artifacts/.codey-deploy-lock"
 
@@ -90,9 +115,8 @@ class Builder:
                 and properties["latestRevisionName"] == properties["latestReadyRevisionName"],
                 "ACA has an unfinished deployment")
         require(properties["configuration"]["activeRevisionsMode"] == "Single", "Unsupported ACA revision mode")
-        require({row["name"] for row in properties["template"]["containers"]} == {"portal", "mcp"},
-                "Unexpected ACA topology")
-        for name in ("nodes.aca.json", "session-share.aca.json", "cloudcli-nodes.aca.json",
+        legacy_mcp = portal_topology(properties["template"])
+        for name in ("nodes.aca.json", "cloudcli-nodes.aca.json",
                      "node-data.aca.json", "codey-node-ca.pem"):
             shutil.copy2(self.root / "config" / name, self.source / "portal/config" / name)
         gateway_routes = freeze_gateway_routes(self.root, self.job, before)
@@ -114,7 +138,7 @@ class Builder:
                           for row in read(self.root / "config/cloudcli-nodes.aca.json")["nodes"]},
                 "reviewedSnapshot": self.request.get("portalSnapshot"),
                 "gatewayRoutes": gateway_routes,
-                "worktreesModified": False, "mcpTests": "skipped-by-user"}
+                "worktreesModified": False, "legacyMcpPresent": legacy_mcp}
 
     def check(self, name, label, args, env, timeout=100):
         _, seconds = command(args, cwd=self.source / name, env=env, timeout=timeout,
@@ -217,7 +241,7 @@ class Builder:
             "release": self.release, "scope": "workspace", "components": ["cloudcli"],
             "commits": commits, "cloudcli": cloudcli, "gateway": gateway,
             "gatewayPreservedFrom": preserved["releaseId"], "images": {},
-            "ui": read(self.job / "ui/latest-build.json"), "mcpTests": "unchanged-not-run",
+            "ui": read(self.job / "ui/latest-build.json"),
         }
         self.report.update({"passed": True, "scope": "workspace", "components": ["cloudcli"],
                             "cloudcli": cloudcli, "gatewayRebuilt": False, "imagesBuilt": False})
@@ -322,14 +346,13 @@ class Builder:
                         "dependencyCache": mode, "archiveSha256": sha(self.job / "gateway.tar.gz"),
                         "entrySha256": sha(package / "dist/main.js")}
 
-            with ThreadPoolExecutor(max_workers=4) as pool:
+            with ThreadPoolExecutor(max_workers=3) as pool:
                 portal_job = pool.submit(portal)
-                mcp_job = pool.submit(image, "mcp", self.source / "portal/codex-session-share-mcp", "codey-mcp")
                 cc_job, cp_job = pool.submit(self.build_cloudcli, commits, env), pool.submit(gateway)
-                images = dict([portal_job.result(), mcp_job.result()])
+                images = dict([portal_job.result()])
                 cc, cp = cc_job.result(), cp_job.result()
         manifest = {"release": self.release, "commits": commits, "cloudcli": cc, "gateway": cp, "images": images,
-                    "ui": read(self.job / "ui/latest-build.json"), "mcpTests": "skipped-by-user"}
+                    "ui": read(self.job / "ui/latest-build.json")}
         self.report.update({"passed": True, "cloudcli": cc, "gateway": cp})
         save(self.job / "validation.json", self.report)
         save(self.job / "manifest.json", manifest)
@@ -345,22 +368,24 @@ class Builder:
             require(canonical(current["properties"][field]) == canonical(before["properties"][field]),
                     "ACA changed concurrently; do not overwrite")
         require(canonical(current.get("identity")) == canonical(before.get("identity")), "ACA identity changed")
-        template = copy.deepcopy(before["properties"]["template"])
+        require(set(manifest["images"]) == {"portal"}, "ACA releases may only deploy the Portal container")
+        template, legacy_mcp_removed = portal_deployment_template(
+            before["properties"]["template"], manifest["images"]["portal"]["image"],
+        )
         suffix = self.release.replace("fast-", "f-", 1)
         template["revisionSuffix"] = suffix
         revision = "codey--" + suffix
-        for row in template["containers"]:
-            row["image"] = manifest["images"][row["name"]]["image"]
-            if row["name"] == "portal" and self.request.get("enableNodeUpdates"):
-                require(any(item.get("mountPath") == "/data" for item in row.get("volumeMounts", [])),
-                        "Node updates require the existing /data share; no volume/resource is created")
-                store = self.publisher().AzureStore({**self.config, "directory": "node-updates"})
-                require(store.read("release-public.pem", 8192) and store.read("catalog.json", 4 * 1024 * 1024),
-                        "Publish the signed node feed before enabling the Portal")
-                values = {"PORTAL_NODE_UPDATE_ROOT": "/data/node-updates",
-                          "PORTAL_NODE_UPDATE_PUBLIC_KEY_FILE": "/data/node-updates/release-public.pem"}
-                row["env"] = [item for item in row.get("env", []) if item["name"] not in values]
-                row["env"].extend({"name": name, "value": value} for name, value in values.items())
+        portal = template["containers"][0]
+        if self.request.get("enableNodeUpdates"):
+            require(any(item.get("mountPath") == "/data" for item in portal.get("volumeMounts", [])),
+                    "Node updates require the existing /data share; no volume/resource is created")
+            store = self.publisher().AzureStore({**self.config, "directory": "node-updates"})
+            require(store.read("release-public.pem", 8192) and store.read("catalog.json", 4 * 1024 * 1024),
+                    "Publish the signed node feed before enabling the Portal")
+            values = {"PORTAL_NODE_UPDATE_ROOT": "/data/node-updates",
+                      "PORTAL_NODE_UPDATE_PUBLIC_KEY_FILE": "/data/node-updates/release-public.pem"}
+            portal["env"] = [item for item in portal.get("env", []) if item["name"] not in values]
+            portal["env"].extend({"name": name, "value": value} for name, value in values.items())
         patch = self.job / "aca-patch.private.json"
         save(patch, {"properties": {"template": canonical(template)}})
         save(self.job / "aca-rollback.json", {"expectedRevision": revision,
@@ -387,6 +412,8 @@ class Builder:
                 if containers and all(row["ready"] for row in containers):
                     result = {"revision": revision, "ready": True, "seconds": round(time.monotonic() - started, 3),
                               "images": manifest["images"], "configurationPreserved": True,
+                              "legacyMcpRemoved": legacy_mcp_removed,
+                              "removedEnvironmentVariables": sorted(REMOVED_MCP_ENV),
                               "containers": [{key: row.get(key) for key in ("name", "ready", "restartCount")}
                                              for row in containers]}
                     save(self.job / "aca-result.json", result)
@@ -395,7 +422,7 @@ class Builder:
         raise TimeoutError("ACA readiness exceeded 270 seconds; retain the rollback record and reconcile, not re-PATCH")
 
     def build_portal(self):
-        """Portal-only release: no MCP, Workspace UI or node package build."""
+        """Portal-only release: no Workspace UI or node package build."""
         with self.test_directory("codey-portal-") as temporary:
             env = {
                 "PATH": os.environ["PATH"], "HOME": temporary, "TMPDIR": temporary,
@@ -419,9 +446,8 @@ class Builder:
                           "--image", "codey:" + self.release, "--query", "digest"])
         require(isinstance(digest, str) and digest.startswith("sha256:"), "Missing Portal digest")
         before = read(self.job / "aca-before.private.json")
-        images = {row["name"]: {"image": row["image"], "preserved": True}
-                  for row in before["properties"]["template"]["containers"]}
-        images["portal"] = {"image": f"{self.registry}.azurecr.io/codey@{digest}", "tag": self.release}
+        legacy_mcp = portal_topology(before["properties"]["template"])
+        images = {"portal": {"image": f"{self.registry}.azurecr.io/codey@{digest}", "tag": self.release}}
         files = {"/": sha(source / "public/index.html"), "/app.js": sha(source / "public/app.js")}
         files["/settings"] = sha(source / "public/settings.html")
         for name in ["settings.css", "machine-updates.js"]:
@@ -440,7 +466,8 @@ class Builder:
             "reviewedSnapshot": self.request.get("portalSnapshot"), "images": images,
             "sharedUi": read(self.job / "ui-before.json"), "publicSha256": files,
             "features": features,
-            "nodePackagesChanged": False, "mcpImageChanged": False,
+            "nodePackagesChanged": False, "deploymentContainers": ["portal"],
+            "legacyMcpPresent": legacy_mcp,
         }
         self.report["passed"] = True
         save(self.job / "validation.json", self.report)
@@ -462,54 +489,6 @@ class Builder:
         (self.lease / "owner.json").unlink()
         self.lease.rmdir()
         return {"released": True}
-
-    def mcp_health(self):
-        # The public /healthz is Portal's auth-layer shortcut, not the sidecar probe.
-        import base64
-        import pty
-        import select
-        revision = read(self.job / "aca-result.json")["revision"]
-        payload = (
-            "import time,urllib.request\n"
-            "time.sleep(1)\n"
-            "with urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=5) as r:\n"
-            " assert r.status==200\n"
-            " print('CODEY_MCP_HEALTH_OK',flush=True)\n"
-            "time.sleep(1)\n"
-        )
-        expression = ("exec(__import__(bytes([98,97,115,101,54,52]).decode()).b64decode("
-                      "__import__(bytes([115,121,115]).decode()).argv[1]))")
-        args = ["az", "containerapp", "exec", "-n", "codey", "-g", self.config["resourceGroup"],
-                "--subscription", self.config["subscription"], "--revision", revision, "--container", "mcp",
-                "--command", "python -c " + expression + " " + base64.b64encode(payload.encode()).decode(),
-                "--only-show-errors"]
-        master, slave = pty.openpty()
-        process = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
-        output = bytearray()
-        try:
-            deadline = time.monotonic() + 40
-            while time.monotonic() < deadline:
-                if select.select([master], [], [], 0.5)[0]:
-                    try:
-                        value = os.read(master, 65536)
-                    except OSError:
-                        break
-                    if not value:
-                        break
-                    output.extend(value)
-                elif process.poll() is not None:
-                    break
-        finally:
-            if process.poll() is None:
-                process.terminate()
-            process.wait(timeout=5)
-            os.close(master)
-        require(b"CODEY_MCP_HEALTH_OK" in output, "Actual MCP sidecar health probe failed")
-        result = {"health": 200, "revision": revision, "container": "mcp", "testsRun": False}
-        save(self.job / "mcp-health.json", result)
-        return result
-
 
 def read_json_bytes(value):
     require(value is not None, "Missing published UI descriptor")

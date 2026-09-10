@@ -14,7 +14,6 @@ node-updater/**/__pycache__/**
 skills/config-new-codey-machine/assets/**
 skills/config-new-codey-machine/**/__pycache__/**
 !config/nodes.aca.json
-!config/session-share.aca.json
 !config/cloudcli-nodes.aca.json
 !config/codey-node-ca.pem
 !config/node-data.aca.json

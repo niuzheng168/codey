@@ -1,5 +1,8 @@
 # Codey 统一密码登录与 Workspace SSO
 
+> 2026-09-10 状态：本文保留当时的设计与验收记录。生产 ACA 已停止部署
+> `codex-session-share-mcp` sidecar，Portal 也不再配置其 proxy/upstream；源码仍保留。
+
 > 日期：2026-09-05  
 > Portal：`codey`，四个 Workspace：`zhn-a100` / `jpe2` / `jpe3` / `westus2`  
 > 当前 revision：`codey--multiuser2-0905`，image：`codey:20260905-multiuser2`  

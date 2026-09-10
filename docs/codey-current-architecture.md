@@ -499,7 +499,7 @@ westus2  → https://10.0.2.4:3001
 | GPT-6 Codex config updater | `scripts/update-codex-gpt6-astra.py` |
 | GPT-6 ephemeral smoke test | `scripts/linux/test-codex-gpt6-astra.sh` |
 | Portal server | `src/server.mjs` |
-| MCP server | `codex-session-share-mcp/` |
+| Retained optional MCP source (not deployed to production ACA) | `codex-session-share-mcp/` |
 
 ## 13. 验证结果
 
