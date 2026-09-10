@@ -1,34 +1,18 @@
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { lstat, open, readFile, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { fileURLToPath } from "node:url";
 import { machineIdentity, MACHINE_ID, preparedGateways } from "./machine-identity.mjs";
 import { verifyMachine } from "./machine-verification.mjs";
 import { requestError } from "./signed-store.mjs";
-import { zipStream } from "./zip-stream.mjs";
 import { MACHINE_PLATFORMS, machinePlatform } from "./machine-platforms.mjs";
 import { MachineTunnelService } from "./machine-tunnel.mjs";
 import { machineRegistration } from "./machine-registration.mjs";
 import { verifyDevTunnelAccess } from "./devtunnel-transport.mjs";
-import { UPDATE_PROTOCOL } from "./node-update-release.mjs";
 
 export const MACHINE_SKILL = "config-new-codey-machine";
-export const MACHINE_SKILL_FILES = Object.freeze([
-  "SKILL.md", "agents/openai.yaml", "dependencies.json",
-  "scripts/codey.py",
-  "scripts/codey_node/__init__.py", "scripts/codey_node/platforms/__init__.py",
-  ...["__init__.py", "errors.py", "files.py", "archives.py", "model_test.py", "registration.py", "verification.py"]
-    .map(file => `scripts/codey_node/common/${file}`),
-  ...["__init__.py", "auth.py", "binding.py", "renewal.py"].map(file => `scripts/codey_node/devtunnel/${file}`),
-  ...["__init__.py", "bundle.py", "launcher.py"].map(file => `scripts/codey_node/service/${file}`),
-]);
-export const machineArtifacts = (platform) => [
-  "cloudcli-source.tar.gz", "copilot-api-source.tar.gz",
-  ...(machinePlatform(platform).dataRelay ? ["portal-node-source.tar.gz"] : []),
-];
-const defaultSkillRoot = fileURLToPath(new URL(`../skills/${MACHINE_SKILL}/`, import.meta.url));
+const MACHINE_STORE = "packages-v2";
 const json = (res, status, value) => {
   const bytes = Buffer.from(JSON.stringify(value));
   res.writeHead(status, {
@@ -53,65 +37,62 @@ async function input(req) {
 }
 
 export function machineReleaseId(manifest) {
-  const identity = [manifest.node, manifest.bunBuildTool, manifest.nodeDistribution.sha256,
-    ...manifest.artifacts.map((file) => file.sha256)].join("\n");
-  return `machine-${createHash("sha256").update(identity).digest("hex").slice(0, 16)}`;
+  return `machine-${manifest.package.sha256.slice(0, 16)}`;
 }
 
 export async function loadMachineBundle(root, platformId = "linux-x64") {
-  const platform = machinePlatform(platformId);
-  const ARTIFACTS = machineArtifacts(platformId);
-  // Keep the existing Linux release layout/backlinks; each additional platform
-  // has its own immutable active pointer and cannot fall back to Linux assets.
-  if (platformId !== "linux-x64") {
-    const expected = path.join(await realpath(root), "platforms", platformId);
-    if (await realpath(expected) !== expected) throw new Error("Unsafe platform release directory");
-    root = expected;
+  machinePlatform(platformId);
+  root = path.join(await realpath(root), MACHINE_STORE);
+  if (await realpath(root) !== root) throw new Error("Unsafe machine package store");
+  const pointerText = await readFile(path.join(root, "active.json"), "utf8");
+  if (pointerText.length > 1024) throw new Error("Oversized active machine release");
+  const pointer = JSON.parse(pointerText);
+  if (pointer.schema !== 1 || !/^machine-[a-f0-9]{16}$/.test(pointer.releaseId ?? "") ||
+      !/^[a-f0-9]{64}$/.test(pointer.manifestSha256 ?? "")) {
+    throw new Error("Invalid active machine release");
   }
-  root = await realpath(root);
-  let pointerText;
-  try {
-    pointerText = await readFile(path.join(root, "active.json"), "utf8");
-  } catch (error) { if (error.code !== "ENOENT") throw error; }
-  if (pointerText !== undefined) {
-    if (pointerText.length > 1024) throw new Error("Oversized active machine release");
-    const pointer = JSON.parse(pointerText);
-    if (!/^machine-[a-f0-9]{16}$/.test(pointer.releaseId ?? "")) throw new Error("Invalid active machine release");
-    const release = path.join(root, "releases", pointer.releaseId);
-    if (await realpath(release) !== release) throw new Error("Unsafe active machine release");
-    root = release;
+  const release = path.join(root, "releases", pointer.releaseId);
+  if (await realpath(release) !== release) throw new Error("Unsafe active machine release");
+  const manifestFile = path.join(release, "manifest.json");
+  if ((await lstat(manifestFile)).isSymbolicLink()) throw new Error("Unsafe machine manifest");
+  const raw = await readFile(manifestFile, "utf8");
+  if (raw.length > 16384 ||
+      createHash("sha256").update(raw).digest("hex") !== pointer.manifestSha256) {
+    throw new Error("Invalid active machine manifest");
   }
-  if ((await lstat(path.join(root, "manifest.json"))).isSymbolicLink()) throw new Error("Unsafe machine manifest");
-  const raw = await readFile(path.join(root, "manifest.json"), "utf8");
-  if (raw.length > 16384) throw new Error("Oversized machine manifest");
   const manifest = JSON.parse(raw);
-  if (manifest.schema !== 1 || manifest.platform !== platformId ||
+  const packageInfo = manifest.package;
+  if (manifest.schema !== 2 || manifest.kind !== "codey-machine-skill" ||
+      manifest.registrationSchema !== 2 || manifest.platform !== platformId ||
       !/^machine-[a-f0-9]{16}$/.test(manifest.releaseId ?? "") ||
-      !/^\d+\.\d+\.\d+$/.test(manifest.node ?? "") || !/^\d+\.\d+\.\d+$/.test(manifest.bunBuildTool ?? "") ||
-      manifest.dependencyMode !== "install-on-target" ||
-      manifest.nodeDistribution?.url !== `https://nodejs.org/dist/v${manifest.node}/node-v${manifest.node}-${platform.nodeSuffix}` ||
-      manifest.nodeDistribution?.file !== `node-v${manifest.node}-${platform.nodeSuffix}` ||
-      !/^[a-f0-9]{64}$/.test(manifest.nodeDistribution?.sha256 ?? "") ||
-      !Array.isArray(manifest.artifacts) || manifest.artifacts.length !== ARTIFACTS.length) {
+      !/^machine-[a-f0-9]{16}$/.test(manifest.installerReleaseId ?? "") ||
+      JSON.stringify(manifest.bundledRuntimes) !== JSON.stringify(["cloudcli", "copilot-api", "updater"]) ||
+      JSON.stringify(manifest.downloadedOfficialRuntimes) !== JSON.stringify(["node", "codex", "devtunnel"]) ||
+      !/^\d+\.\d+\.\d+$/.test(manifest.node ?? "") ||
+      typeof manifest.cloudcli?.version !== "string" || typeof manifest.copilotApi?.version !== "string" ||
+      packageInfo?.file !== `${MACHINE_SKILL}.zip` ||
+      !Number.isInteger(packageInfo?.size) || packageInfo.size <= 0 || packageInfo.size > 1536 * 1024 * 1024 ||
+      !/^[a-f0-9]{64}$/.test(packageInfo?.sha256 ?? "")) {
     throw new Error("Invalid machine bundle manifest");
   }
-  const files = [];
-  for (const [index, expected] of ARTIFACTS.entries()) {
-    const entry = manifest.artifacts[index];
-    if (entry.file !== expected || !/^[a-f0-9]{64}$/.test(entry.sha256 ?? "") ||
-        !Number.isInteger(entry.crc32) || entry.crc32 < 0 || entry.crc32 > 0xffffffff ||
-        !Number.isInteger(entry.size) || entry.size <= 0 || entry.size > 1536 * 1024 * 1024) {
-      throw new Error("Invalid machine artifact metadata");
-    }
-    const file = path.join(root, expected);
-    const info = await lstat(file);
-    if (!info.isFile() || info.isSymbolicLink() || await realpath(file) !== file || info.size !== entry.size) {
-      throw new Error("Unsafe or missing machine artifact");
-    }
-    files.push({ ...entry, path: file });
-  }
   if (manifest.releaseId !== machineReleaseId(manifest)) throw new Error("Release digest mismatch");
-  return { manifest, files };
+  const packageFile = path.join(release, packageInfo.file);
+  const info = await lstat(packageFile);
+  if (!info.isFile() || info.isSymbolicLink() || await realpath(packageFile) !== packageFile ||
+      info.size !== packageInfo.size) {
+    throw new Error("Unsafe or missing machine package");
+  }
+  const descriptor = await open(packageFile, "r");
+  try {
+    const signature = Buffer.alloc(4);
+    const { bytesRead } = await descriptor.read(signature, 0, signature.length, 0);
+    if (bytesRead !== 4 || !signature.equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) {
+      throw new Error("Invalid machine package");
+    }
+  } finally {
+    await descriptor.close();
+  }
+  return { manifest, package: { ...packageInfo, path: packageFile } };
 }
 
 export function machineNetworkConfig(raw) {
@@ -126,8 +107,8 @@ export function machineNetworkConfig(raw) {
 
 export class MachineSetup {
   constructor({ nodePolicy, accounts, authenticator, origin, bundleRoot, network, cloudCliGateway, nodeDataGateway, cloudCliUi,
-    machineUpdates, skillRoot = defaultSkillRoot, verify = verifyMachine, verifyTunnel = verifyDevTunnelAccess }) {
-    Object.assign(this, { nodePolicy, accounts, authenticator, origin, bundleRoot, cloudCliGateway, nodeDataGateway, cloudCliUi, skillRoot, verify });
+    machineUpdates, verify = verifyMachine, verifyTunnel = verifyDevTunnelAccess }) {
+    Object.assign(this, { nodePolicy, accounts, authenticator, origin, bundleRoot, cloudCliGateway, nodeDataGateway, cloudCliUi, verify });
     this.machineUpdates = machineUpdates;
     this.verifyTunnel = verifyTunnel;
     this.tunnels = new MachineTunnelService({ nodePolicy, accounts });
@@ -138,32 +119,8 @@ export class MachineSetup {
     if (cloudCliGateway) cloudCliGateway.refreshMachines = () => this.refreshGateways();
   }
 
-  async selectedBundle(platformId, principalId) {
-    try {
-      return await loadMachineBundle(this.bundleRoot, platformId);
-    } catch (productionError) {
-      // A separately published acceptance package is visible only to the exact
-      // tester(s) named by the operator. It never enables general Windows downloads.
-      if (platformId !== "windows-x64" || !/^[a-z0-9-]{1,80}$/.test(principalId ?? "")) throw productionError;
-      const root = await realpath(this.bundleRoot);
-      const file = path.join(root, "acceptance.json");
-      const stat = await lstat(file);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4096 || await realpath(file) !== file) throw productionError;
-      const policy = JSON.parse(await readFile(file, "utf8"));
-      if (policy.schema !== 1 || policy.platform !== "windows-x64" ||
-          Object.keys(policy).some(key => !["schema", "platform", "owners", "expectedComputerName", "expiresAt"].includes(key)) ||
-          !Array.isArray(policy.owners) || !policy.owners.length || policy.owners.length > 8 ||
-          policy.owners.some(id => typeof id !== "string" || !/^[a-z0-9-]{1,80}$/.test(id)) || !policy.owners.includes(principalId) ||
-          !/^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/.test(policy.expectedComputerName ?? "") ||
-          !Number.isSafeInteger(policy.expiresAt) || policy.expiresAt <= Date.now() ||
-          policy.expiresAt > Date.now() + 7 * 86400000) throw productionError;
-      const previewRoot = path.join(root, "acceptance");
-      if (await realpath(previewRoot) !== previewRoot) throw productionError;
-      return {
-        ...await loadMachineBundle(previewRoot, platformId),
-        acceptance: { expectedComputerName: policy.expectedComputerName, expiresAt: policy.expiresAt },
-      };
-    }
+  async selectedBundle(platformId) {
+    return loadMachineBundle(this.bundleRoot, platformId);
   }
 
   async availability(platformId, principalId) {
@@ -178,21 +135,18 @@ export class MachineSetup {
     const definition = machinePlatform(platformId);
     const identity = { platform: platformId, name: definition.name, entrypoint: definition.entrypoint,
       updaterSupported: definition.updater, description: definition.description };
-    if (!this.bundleRoot || (!definition.tunnel && !this.network) || !this.cloudCliGateway || !this.nodeDataGateway || !this.cloudCliUi) {
-      return { ...identity, enabled: false, reason: "运维尚未发布完整机器配置包或启用共享 Workspace UI / 私网配置" };
+    if (!this.bundleRoot || (!definition.tunnel && !this.network) || !this.cloudCliGateway || !this.nodeDataGateway) {
+      return { ...identity, enabled: false, reason: "运维尚未发布完整机器配置包或启用节点网关" };
     }
     if (definition.updater && (!this.machineUpdates || !this.machineUpdates.catalog.configured)) {
       return { ...identity, enabled: false, reason: "请先配置节点升级器签名公钥，确保新机器可持续更新" };
     }
     try {
-      const { manifest, files, acceptance } = await this.selectedBundle(platformId, principalId);
-      await this.cloudCliUi.active?.();
+      const { manifest, package: packageInfo } = await this.selectedBundle(platformId);
       return {
         ...identity, enabled: true, platform: manifest.platform, releaseId: manifest.releaseId,
-        bytes: files.reduce((sum, file) => sum + file.size, 0),
+        bytes: packageInfo.size,
         node: manifest.node, cloudcli: manifest.cloudcli.version, copilotApi: manifest.copilotApi.version,
-        ...(acceptance ? { preview: true, expectedComputerName: acceptance.expectedComputerName,
-          previewExpiresAt: acceptance.expiresAt } : {}),
       };
     } catch { return { ...identity, enabled: false, reason: `${definition.name} 完整配置包尚未发布或不可用；不会退回其他平台或仅说明的 ZIP` }; }
   }
@@ -218,51 +172,17 @@ export class MachineSetup {
       if (chunk.length) throw requestError("下载配置包不接受 owner、节点 ID 或密钥参数");
     }
     const platformId = requestedPlatform ?? "linux-x64";
-    const definition = machinePlatform(platformId);
+    machinePlatform(platformId);
     const available = await this.availability(platformId, req.codeyPrincipal.id);
     if (!available.enabled) throw requestError(available.reason, 503);
-    const { manifest, files, acceptance } = await this.selectedBundle(platformId, req.codeyPrincipal.id);
-    const skillRoot = await realpath(this.skillRoot);
-    const entries = [];
-    for (const name of [...MACHINE_SKILL_FILES, ...definition.files]) {
-      const file = path.join(skillRoot, name);
-      const info = await lstat(file);
-      const actual = await realpath(file);
-      if (!info.isFile() || info.isSymbolicLink() || actual !== file || info.size > 128 * 1024) {
-        throw new Error("Unsafe machine skill input");
-      }
-      entries.push({ name: `${MACHINE_SKILL}/${name}`, data: await readFile(file) });
-    }
-    const setup = {
-      schema: 1,
-      portalOrigin: this.origin,
-      releaseId: manifest.releaseId,
-      platform: platformId,
-      network: definition.tunnel ? { mode: "devtunnel" } : this.network,
-      ...(definition.tunnel ? { tunnelAuthProvider: "github" } : {}),
-      ...(acceptance ? { acceptance } : {}),
-      ...(definition.updater ? {
-        updater: { protocol: UPDATE_PROTOCOL, releasePublicKey: this.machineUpdates.publicKey },
-      } : {}),
-    };
-    if (definition.updater && this.machineUpdates) {
-      entries.push(...(await this.machineUpdates.sources())
-        .map((entry) => ({ ...entry, name: `${MACHINE_SKILL}/assets/${entry.name}` })));
-    }
-    entries.push(
-      { name: `${MACHINE_SKILL}/assets/setup.json`, data: JSON.stringify(setup, null, 2) + "\n" },
-      { name: `${MACHINE_SKILL}/assets/manifest.json`, data: JSON.stringify(manifest, null, 2) + "\n" },
-      ...files.map((file) => ({ ...file, name: `${MACHINE_SKILL}/assets/${file.file}` })),
-    );
-    const zip = zipStream(entries);
-    const suffix = platformId === "linux-x64" ? "" : platformId === "windows-x64" ? "-windows" : `-${platformId}`;
+    const { package: packageInfo } = await this.selectedBundle(platformId);
     res.writeHead(200, {
-      "content-type": "application/zip", "content-length": zip.length,
-      "content-disposition": `attachment; filename="${MACHINE_SKILL}${suffix}.zip"`,
+      "content-type": "application/zip", "content-length": packageInfo.size,
+      "content-disposition": `attachment; filename="${MACHINE_SKILL}.zip"`,
       "cache-control": "private, no-store", vary: "Cookie", "x-content-type-options": "nosniff",
       "referrer-policy": "no-referrer",
     });
-    await pipeline(Readable.from(zip), res);
+    await pipeline(createReadStream(packageInfo.path), res);
   }
 
   async limitedDownload(req, res, requestedPlatform) {
@@ -277,16 +197,11 @@ export class MachineSetup {
     const definition = machinePlatform(platformId);
     const available = await this.availability(platformId, req.codeyPrincipal.id);
     if (!available.enabled) throw requestError(available.reason, 503);
-    const selected = await this.selectedBundle(platformId, req.codeyPrincipal.id);
     const registration = machineRegistration(raw, {
       portalOrigin: this.origin,
-      releaseId: selected.acceptance ? selected.manifest.releaseId : undefined,
+      releaseId: undefined,
       platform: platformId,
     });
-    if (selected.acceptance &&
-        registration.machine.name.toLowerCase() !== selected.acceptance.expectedComputerName.toLowerCase()) {
-      throw requestError("验收包只能添加指定的目标机器", 409);
-    }
     if (this.verifying >= 4) throw requestError("正在验收其他机器，请稍后重试", 429);
     this.verifying++;
     try {

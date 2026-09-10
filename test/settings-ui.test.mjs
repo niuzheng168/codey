@@ -197,7 +197,7 @@ test("legacy pending identities are ignored because static Skill downloads do no
   assert.equal(p.get("pending-machines"), null);
   assert.equal(p.requests.some((request) => request.url.includes(machineId)), false);
   await p.get("open-add-node").click();
-  assert.match(p.get("add-node").textContent, /固定包不含 token.*多台同平台机器/);
+  assert.match(p.get("add-node").textContent, /Linux 固定包不含 token.*并行分发/);
 });
 
 test("collapsed nodes preserve all editable fields, VNet address restrictions and text-only rendering", async () => {
@@ -307,7 +307,7 @@ test("machine-file validation and activation failures are visible inside the mod
   assert.equal(p.get("add-prepared-machine-form").querySelector("button").disabled, false);
 });
 
-test("private registration upload enforces the exact filename, 32 KB limit and schema 2 structure", async () => {
+test("private registration upload allows transferred filenames but enforces size and schema 2 structure", async () => {
   const p = await page({ hash: "#add-node" });
   const input = p.get("prepared-machine-file");
   const form = p.get("add-prepared-machine-form");
@@ -319,7 +319,6 @@ test("private registration upload enforces the exact filename, 32 KB limit and s
     devTunnelConnectToken: "private-connect-token",
   };
   for (const [file, expected] of [
-    [{ name: "codey-machine.json", size: 300, text: async () => JSON.stringify(valid) }, /codey-machine-registration/],
     [{ name: "codey-machine-registration.json", size: 32 * 1024 + 1, text: async () => JSON.stringify(valid) }, /32 KB/],
     [{ name: "codey-machine-registration.json", size: 300, text: async () => JSON.stringify({ ...valid, schema: 1 }) }, /schema 2/],
     [{ name: "codey-machine-registration.json", size: 300, text: async () => JSON.stringify({ ...valid, credentials: [] }) }, /schema 2/],
@@ -342,7 +341,7 @@ test("successful activation refreshes the list and returns from the modal to the
     devTunnelConnectToken: "private-connect-token",
   };
   p.get("prepared-machine-file").files = [{
-    name: "codey-machine-registration.json", size: 300, text: async () => JSON.stringify(machine),
+    name: "codey-machine-registration (1).json", size: 300, text: async () => JSON.stringify(machine),
   }];
   await p.submit(p.get("add-prepared-machine-form"));
   const activation = p.requests.find((request) => request.url.endsWith("/activate"));

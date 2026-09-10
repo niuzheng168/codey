@@ -108,45 +108,18 @@ test("machine skill submits an authenticated same-origin POST without navigating
   assert.deepEqual(p.revoked, ["blob:test-download"]);
 });
 
-test("Windows has its own download action and filename; unpublished Mac packages stay unavailable", async () => {
+test("only Linux download is enabled while Windows and macOS native launchers are pending", async () => {
   const entry = { enabled: true, bytes: 4194304, node: "24.20.0", cloudcli: "1.37.2", copilotApi: "2.5.1" };
   const machineSetup = { ...entry, platforms: [
-    { ...entry, platform: "windows-x64" }, { ...entry, platform: "linux-x64" },
-    { platform: "macos-arm64", enabled: false }, { platform: "macos-x64", enabled: false },
+    { platform: "windows-x64", enabled: false, planned: true }, { ...entry, platform: "linux-x64" },
+    { platform: "macos-arm64", enabled: false, planned: true },
+    { platform: "macos-x64", enabled: false, planned: true },
   ] };
-  const windowsName = "config-new-codey-machine-windows.zip";
-  const p = await page({ machineSetup, download: async () => archiveResponse({ name: windowsName }) });
-  assert.equal(p.elements.get("#download-machine-windows-skill").disabled, false);
+  const p = await page({ machineSetup });
+  assert.equal(p.elements.get("#download-machine-skill").disabled, false);
+  assert.equal(p.elements.get("#download-machine-windows-skill").disabled, true);
   assert.equal(p.elements.get("#download-machine-macos-skill").disabled, true);
-  await p.submit(p.elements.get("#machine-windows-skill-form")).finished;
-  assert.equal(p.requests[0].url, endpoint + "?platform=windows-x64");
-  assert.equal(p.requests[0].options.body, undefined);
-  assert.equal(p.downloads[0].download, windowsName);
-  const wrong = await page({ machineSetup });
-  await wrong.submit(wrong.elements.get("#machine-windows-skill-form")).finished;
-  assert.equal(wrong.downloads.length, 0);
-  assert.match(wrong.elements.get("#machine-download-message").textContent, /平台.*不一致/);
-});
-
-test("each published Mac architecture has a native download and rejects the other architecture's package", async () => {
-  const entry = { enabled: true, bytes: 4194304, node: "24.20.0", cloudcli: "1.37.2", copilotApi: "2.5.1" };
-  const machineSetup = { ...entry, platforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]
-    .map(platform => ({ ...entry, platform })) };
-  for (const [platform, selector] of [
-    ["macos-arm64", "#machine-macos-skill-form"], ["macos-x64", "#machine-macos-intel-skill-form"],
-  ]) {
-    const name = `config-new-codey-machine-${platform}.zip`;
-    const p = await page({ machineSetup, download: async () => archiveResponse({ name }) });
-    await p.submit(p.elements.get(selector)).finished;
-    assert.equal(p.requests[0].url, `${endpoint}?platform=${platform}`);
-    assert.equal(p.downloads[0].download, name);
-    const wrong = await page({ machineSetup, download: async () => archiveResponse({
-      name: `config-new-codey-machine-${platform === "macos-arm64" ? "macos-x64" : "macos-arm64"}.zip`,
-    }) });
-    await wrong.submit(wrong.elements.get(selector)).finished;
-    assert.equal(wrong.downloads.length, 0);
-    assert.match(wrong.elements.get("#machine-download-message").textContent, /平台.*不一致/);
-  }
+  assert.equal(p.elements.get("#download-machine-macos-intel-skill").disabled, true);
 });
 
 test("static downloads ignore legacy pending identities and disable all download buttons in flight", async () => {
@@ -216,8 +189,8 @@ test("the settings page has a visible, accessible download status next to the en
   assert.match(html, /id="machine-download-message"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.ok(html.indexOf('id="machine-download-message"') > html.indexOf('id="machine-skill-form"'));
   assert.ok(html.indexOf('id="machine-download-message"') < html.indexOf('id="add-prepared-machine-form"'));
-  assert.match(html, /固定包不含 token[^<]*多台同平台机器/);
-  assert.match(html, /codey-machine-registration\.json<\/code>（最多 32 KB）/);
+  assert.match(html, /Linux 固定包不含 token[^<]*并行分发/);
+  assert.match(html, /机器注册 JSON（最多 32 KB；传输后文件名允许改变）/);
   assert.match(html, /含私密凭据[^<]*HTTPS Portal[^<]*立即删除/);
 });
 

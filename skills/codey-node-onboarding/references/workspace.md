@@ -126,14 +126,9 @@ WantedBy=default.target
    CloudCLI，首次安装则仅停止新建 CloudCLI。保留数据与诊断，不循环重装。
    已修改数据库 schema 时先确认旧版本兼容，不能盲目覆盖数据库回退。
 
-新增完整机器配置流程现在有分开的 Windows `scripts/setup-windows.ps1` 和 Linux
-`scripts/setup-linux.sh` 入口，由本人在门户下载对应平台的 `config-new-codey-machine`
-完整包。Windows 使用原 owner 登录任务，不使用 systemd/WSL、不覆盖既有服务；
-首次干净 Windows 安装仍须单独验收 native PTY/SQLite、登录自启和 ACA 访问，
-不能把语法/规划测试当作安装验证。包未发布时不回退到 Linux 或本篇手动说明 ZIP。
-macOS 使用门户分别发布的 Apple Silicon/Intel 完整包与 `scripts/setup-macos.sh`；
-使用私有 DevTunnel，不套用 Linux VNet/systemd 步骤。它保留现有 Codex/模型代理，
-创建本人 launchd 服务和独立的 Codey Codex 后端，并用本节点专用 key 自动续期。
-普通的只读 `8443` 浏览器直连仍无需部署 CloudCLI。
+新增完整机器配置当前只发布 Linux x64：解压 `config-new-codey-machine`
+后运行 `bash scripts/install.sh`。包内只有 CloudCLI、copilot-api、updater；
+Node、Codex 和 DevTunnel 从官方源下载。Windows PowerShell 和 macOS 原生版本
+等待 Linux 六步流程稳定后再迁移，不能回退运行 Linux 脚本。
 
 网络放行与 ACA 上游配置继续 [VNet](vnet.md)，最终按 [验收](verification.md) 检查。

@@ -394,8 +394,8 @@ document.querySelector("#add-prepared-machine-form").addEventListener("submit", 
   const form = event.currentTarget;
   void operation(form.querySelector("button"), async () => {
     const file = document.querySelector("#prepared-machine-file").files?.[0];
-    if (!file || file.name !== "codey-machine-registration.json" || file.size > 32 * 1024) {
-      throw new Error("请选择 Skill 生成的 codey-machine-registration.json（不超过 32 KB）");
+    if (!file || file.size > 32 * 1024) {
+      throw new Error("请选择 Skill 生成的机器注册 JSON（不超过 32 KB）");
     }
     let registration;
     try { registration = JSON.parse(await file.text()); }

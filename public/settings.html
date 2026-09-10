@@ -168,21 +168,21 @@
             <span class="step-number" aria-hidden="true">1</span>
             <div class="step-content">
               <h3>按目标系统下载可复用 Skill 包</h3>
-              <p class="muted">固定包不含 token 或机器身份，可安全复制给多台同平台机器并行执行。Node 和软件依赖会自动下载安装。</p>
+              <p class="muted">Linux 固定包不含 token 或机器身份，可并行分发。Node、Codex 和 DevTunnel 从官方源安装，包内只有 CloudCLI、copilot-api 和 updater。</p>
               <form id="machine-windows-skill-form" action="/api/settings/machines/skill?platform=windows-x64" method="post" data-machine-platform="windows-x64">
-                <button id="download-machine-windows-skill" type="submit" disabled>↓ Windows · setup-windows.ps1</button>
+                <button id="download-machine-windows-skill" type="submit" disabled>Windows · PowerShell 版本待迁移</button>
               </form>
               <p id="machine-windows-package-status" class="muted">正在检查 Windows 配置包…</p>
               <form id="machine-skill-form" action="/api/settings/machines/skill" method="post" data-machine-platform="linux-x64">
-                <button id="download-machine-skill" type="submit" disabled>↓ Linux · setup-linux.sh</button>
+                <button id="download-machine-skill" type="submit" disabled>↓ Linux · install.sh</button>
               </form>
               <p id="machine-package-status" class="muted">正在检查 Linux 配置包…</p>
               <form id="machine-macos-skill-form" action="/api/settings/machines/skill?platform=macos-arm64" method="post" data-machine-platform="macos-arm64">
-                <button id="download-machine-macos-skill" type="submit" disabled>↓ macOS · Apple Silicon · setup-macos.sh</button>
+                <button id="download-machine-macos-skill" type="submit" disabled>macOS · 版本待迁移</button>
               </form>
               <p id="machine-macos-status" class="muted">正在检查 macOS Apple Silicon 配置包…</p>
               <form id="machine-macos-intel-skill-form" action="/api/settings/machines/skill?platform=macos-x64" method="post" data-machine-platform="macos-x64">
-                <button id="download-machine-macos-intel-skill" type="submit" disabled>↓ macOS · Intel · setup-macos.sh</button>
+                <button id="download-machine-macos-intel-skill" type="submit" disabled>macOS Intel · 版本待迁移</button>
               </form>
               <p id="machine-macos-intel-status" class="muted">正在检查 macOS Intel 配置包…</p>
               <p id="machine-download-message" role="status" aria-live="polite"></p>
@@ -192,11 +192,11 @@
             <span class="step-number" aria-hidden="true">2</span>
             <div class="step-content">
               <h3>在 Codex 中配置目标机器</h3>
-              <p class="muted">解压后按 <code>config-new-codey-machine/SKILL.md</code> 的编号步骤先准备或复用 Codex CLI，再查看节点计划。Windows 执行 PowerShell，Linux/macOS 执行各自 Shell 入口。</p>
+              <p class="muted">Linux 解压后执行 <code>bash scripts/install.sh</code>。脚本按六步直接覆盖旧服务并生成注册文件。</p>
               <details class="setup-help">
                 <summary>支持范围与安全说明</summary>
-                <p class="muted">支持原生 Windows x64、macOS 和 Linux x64，需联网准备依赖。网络与模型登录必须本人确认。Windows 服务仅在本人登录后运行，不安装 Linux 升级器；可达性使用真实 Workspace 健康检查。现有节点不需重新安装。</p>
-                <p class="muted">三平台均通过本人 GitHub 登录的私有 DevTunnel 主动连接，不需要节点的云资源管理权限。Windows/macOS 保留已有模型代理；Linux 使用独立安装。客户端会独立随机生成每台机器的私密凭据，模型登录另行完成。</p>
+                <p class="muted">当前发布 Linux x64。Windows PowerShell 与 macOS 原生入口将在同一六步流程稳定后迁移；不得在这些系统回退执行 Bash 安装器。</p>
+                <p class="muted">Linux 通过本人 GitHub 登录的私有 DevTunnel 主动连接，不需要节点的云资源管理权限。客户端会独立随机生成每台机器的私密凭据，模型登录另行完成。</p>
                 <p class="muted">下载不会创建或刷新待配置身份。同一个固定 Skill 包可以复用分发，每台机器最终生成各自的私密注册文件。</p>
               </details>
             </div>
@@ -205,7 +205,7 @@
             <span class="step-number" aria-hidden="true">3</span>
             <div class="step-content">
               <h3>上传私密注册文件并添加机器</h3>
-              <p class="muted">上传 Skill 生成的 <code>codey-machine-registration.json</code>（最多 32 KB）。此文件含私密凭据，只能上传到当前 HTTPS Portal；不要通过聊天、邮件或日志传递，添加成功后立即删除。</p>
+              <p class="muted">上传 Skill 生成的机器注册 JSON（最多 32 KB；传输后文件名允许改变）。此文件含私密凭据，只能上传到当前 HTTPS Portal；不要通过聊天、邮件或日志传递，添加成功后立即删除。</p>
               <form id="add-prepared-machine-form" class="import-form">
                 <label>私密机器注册文件<input id="prepared-machine-file" type="file" accept=".json,application/json" required /></label>
                 <button class="primary" type="submit">验通并添加机器</button>

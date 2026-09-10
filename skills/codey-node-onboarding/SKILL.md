@@ -10,20 +10,21 @@ metadata:
 新增节点使用 `config-new-codey-machine` 静态包，不再为每台机器从 Portal 下载带
 私密 token 的个性化安装包。
 
-## 1. 分发静态包
+## 1. 分发 Linux 静态包
 
-- 包内只有公开的 `assets/setup.json`、签名发布公钥、锁定依赖和安装脚本。
+- 当前只发布 Linux x64 包；Windows PowerShell 和 macOS 版本待 Linux 流程稳定后迁移。
+- 包内只有公开元数据、安装脚本和 CloudCLI、copilot-api、updater 三个 payload。
+- Node、Codex 和 DevTunnel 必须由目标机从官方源下载安装，不进入包。
 - 不得包含 `assets/enrollment.json` 或 `assets/codey-updater/config.json`。
 - 同一个平台/发行版包可以安全复制到多台机器并行执行。
 
-## 2. 在目标机器执行
+## 2. 在目标 Linux 机器执行
 
-- Linux、Windows 和 macOS 使用各自原生入口；不得跨平台回退。
+- 运行 `bash scripts/install.sh`；不得在 Windows 或 macOS 回退执行本脚本。
 - 本机生成 node ID、Workspace subject 和四把用途隔离的随机 key，并在失败重跑时
   安全复用。
 - DevTunnel 只使用当前用户的 GitHub 登录；不配置 VNet、路由或入站防火墙。
-- 三平台都拒绝旧个性化格式；Windows preview 的公开 `acceptance` 只允许指定机器
-  且必须在有效期内。
+- 脚本按 DevTunnel、copilot-api、Codex、CloudCLI、updater、守护进程六步直接覆盖。
 
 ## 3. 上传注册文件
 

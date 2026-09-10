@@ -19,7 +19,7 @@ import { preparedGateways } from "../src/machine-identity.mjs";
 import { NodeDataGateway } from "../src/node-data-gateway.mjs";
 import { CloudCliGateway } from "../src/cloudcli-gateway.mjs";
 
-const coordinates = { tunnelId: "codey-test-mac", clusterId: "jpe1" };
+const coordinates = { tunnelId: "codey-test-machine", clusterId: "jpe1" };
 function token(input = {}, now = Date.now()) {
   return ["e30", Buffer.from(JSON.stringify({
     ...coordinates, scp: "connect", exp: Math.floor(now / 1000) + 72000, ...input,
@@ -38,8 +38,8 @@ async function fixture(t) {
   });
   await policy.initialize();
   const owner = { enabled: true, authVersion: 1 };
-  const node = await policy.reserveMachine("owner-a", Date.now(), "macos-arm64");
-  const other = await policy.reserveMachine("owner-b", Date.now(), "macos-x64");
+  const node = await policy.reserveMachine("owner-a", Date.now(), "linux-x64");
+  const other = await policy.reserveMachine("owner-b", Date.now(), "linux-x64");
   let calls = 0;
   const service = new MachineTunnelService({
     nodePolicy: policy, accounts: { byId: async () => owner },
@@ -69,7 +69,7 @@ async function fixture(t) {
   return { policy, node, other, master, owner, service, signed, send, calls: () => calls };
 }
 
-test("Mac token enrollment is node-authenticated, encrypted, purpose-separated, and absent from public metadata", async t => {
+test("machine token enrollment is node-authenticated, encrypted, purpose-separated, and absent from public metadata", async t => {
   const f = await fixture(t);
   const value = token();
   const response = await f.send(f.signed(f.node.id, { ...coordinates, connectToken: value }));
@@ -83,7 +83,7 @@ test("Mac token enrollment is node-authenticated, encrypted, purpose-separated, 
   assert.notEqual(f.policy.tunnelUpdateKey(f.node.id), f.policy.enrollmentValues({ id: "owner-a", name: "owner" }, f.node.id, "https://codey.test").workspaceSsoKey);
 });
 
-test("Mac token requests reject other-node keys, cookies, tampering, browser origins, old timestamps, and replay", async t => {
+test("machine token requests reject other-node keys, cookies, tampering, browser origins, old timestamps, and replay", async t => {
   const f = await fixture(t);
   const input = { ...coordinates, connectToken: token() };
   for (const options of [
@@ -104,7 +104,7 @@ test("Mac token requests reject other-node keys, cookies, tampering, browser ori
   assert.equal(f.calls(), 1);
 });
 
-test("Mac renewal cannot change tunnel identity, roll credentials back, claim a bound tunnel, or renew cancelled/disabled nodes", async t => {
+test("machine renewal cannot change tunnel identity, roll credentials back, claim a bound tunnel, or renew cancelled/disabled nodes", async t => {
   const f = await fixture(t);
   const input = { ...coordinates, connectToken: token() };
   assert.equal((await f.send(f.signed(f.node.id, input))).status, 200);
@@ -123,7 +123,7 @@ test("Mac renewal cannot change tunnel identity, roll credentials back, claim a 
   await assert.rejects(f.policy.machineTunnelToken(f.node.id));
 });
 
-test("Malformed, expired, wrong-scope, and overbroad Mac token payloads never contact Microsoft", async t => {
+test("malformed, expired, wrong-scope, and overbroad machine tokens never contact Microsoft", async t => {
   const f = await fixture(t);
   for (const input of [
     { ...coordinates, connectToken: "not-a-jwt" },
@@ -150,7 +150,7 @@ test("The same scoped renewal key works after activation but is revoked on remov
   const f = await fixture(t);
   await f.policy.updateMachineTunnel(f.node.id, { ...coordinates, connectToken: token() });
   const machine = {
-    id: f.node.id, name: "Mac", region: "DevTunnel", platform: "macos-arm64",
+    id: f.node.id, name: "Linux", region: "DevTunnel", platform: "linux-x64",
     networkMode: "devtunnel", devTunnel: coordinates,
     tlsServerName: `${f.node.id}.nodes.codey.internal`, fingerprint: "test", ca: "test",
   };
@@ -247,7 +247,7 @@ test("Storage encryption is authenticated and bound to the node ID", () => {
   assert.throws(() => openMachineCredentials(master, a, credentialParts.join(".")));
 });
 
-test("Mac data and Workspace gateways use dedicated tunnel agents, not ACA loopback or shared env tokens", async t => {
+test("machine data and Workspace gateways use dedicated tunnel agents, not ACA loopback or shared env tokens", async t => {
   let tokenValue = "first", creations = 0;
   const factory = node => {
     creations++;
@@ -255,8 +255,8 @@ test("Mac data and Workspace gateways use dedicated tunnel agents, not ACA loopb
     return { agent: { tunnel: node.id, port: node.devTunnel.port }, dispose: async () => {} };
   };
   const gateways = preparedGateways({
-    id: "n-" + "a".repeat(24), name: "Mac", region: "Test",
-    machine: { platform: "macos-arm64", networkMode: "devtunnel", devTunnel: coordinates,
+    id: "n-" + "a".repeat(24), name: "Linux", region: "Test",
+    machine: { platform: "linux-x64", networkMode: "devtunnel", devTunnel: coordinates,
       ca: "fixture", tlsServerName: "mac.test", fingerprint: "fixture" },
   }, { getTunnelToken: async () => tokenValue });
   const data = new NodeDataGateway({ nodes: [], ca: "unused" }, { tunnelTransportFactory: factory });
