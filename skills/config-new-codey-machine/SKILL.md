@@ -26,6 +26,8 @@ bash scripts/install.sh
 
 脚本在需要时使用 `sudo`，直接停止并覆盖旧 Codey 服务；保留整个 Home、
 `~/.codex/auth.json`、`~/.codex/sessions/` 和其他用户文件。
+生成新模型 key 前会先停止旧 CloudCLI 守护，再停止当前用户的全部 Codex 进程，
+防止守护进程用旧环境重新拉起 app-server；不兼容旧 key，不恢复旧进程。
 
 ## 1. 安装并配置 DevTunnel
 
@@ -38,7 +40,8 @@ bash scripts/install.sh
 
 ## 2. 配置并启动 Codey 网关
 
-- **准备检查**：停止用户级和系统级旧服务，释放 `4141/8443`。
+- **准备检查**：先停止旧 CloudCLI/Codey Workspace 守护及全部旧 Codex 进程，
+  再停止用户级和系统级 copilot-api 服务，释放 `4141/8443`。
 - **目标**：启动统一 Codey 包内的 copilot-api，重新生成本机 API key。
   `useResponsesApiWebSocket` 已在 Codey 网关中默认关闭，安装器不再额外写入此项；
   普通启动时已有配置中的显式 `true` / `false` 仍优先。
@@ -48,12 +51,13 @@ bash scripts/install.sh
 
 ## 3. 覆盖安装 Codex
 
-- **准备检查**：停止当前用户的旧 Codex app-server/exec 进程。
+- **准备检查**：再次确认当前用户的旧 Codex、app-server、proxy、exec 进程均已退出。
 - **目标**：已有 Codex 就在原 bin 目录更新，否则安装到 `~/.local/bin`；始终使用
   OpenAI 官方 latest installer，不在包内携带第二份 Codex。
 - **执行脚本**：覆盖写入 `~/.codex/config.toml` 和 `~/.codex/models.json`，
   但不删除 auth、sessions。
-- **验收标准**：`codex --version` 成功；真实模型请求返回 `CODEY_CODEX_OK`。
+- **验收标准**：旧 Codex PID 均已退出；`codex --version` 成功；真实模型请求返回
+  `CODEY_CODEX_OK`。原会话文件保留，但交互进程不自动恢复；安装后从新终端启动 Codex。
 
 ## 4. 启动 Codey Workspace
 
