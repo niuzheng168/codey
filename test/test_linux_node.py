@@ -22,6 +22,7 @@ SCRIPTS = ROOT / "skills/config-new-codey-machine/scripts"
 
 sys.path.insert(0, str(SCRIPTS))
 from codey_node.platforms.linux import install as installer
+from codey_node.platforms.linux import client_repair, codex_process, login
 from codey_node.devtunnel import auth, binding as tunnels, renewal
 from codey_node.common.errors import TunnelError
 from codey_node.common import config_defaults
@@ -188,6 +189,56 @@ class LinuxContractTests(unittest.TestCase):
             auth.cli("fixture", ["user", "show", "--json"], runner=runner)
             self.assertNotIn("GITHUB_TOKEN", calls[0]["env"])
 
+    def test_shell_hook_loads_provider_env_without_copying_its_key(self):
+        provider = Path("/home/alice/.config/codey-machine/provider.env")
+        original = "# preserve existing profile\n"
+        updated = login.patch(original, provider)
+        self.assertIn(original.strip(), updated)
+        self.assertIn(f". '{provider}'", updated)
+        self.assertIn("export CODEY_MODEL_API_KEY", updated)
+        self.assertEqual(updated.count(login.START), 1)
+        self.assertEqual(login.patch(updated, provider), updated)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux /proc path semantics required")
+    def test_codex_process_recognition_is_limited_to_owner_app_servers(self):
+        home = Path("/home/alice")
+        wrapper = home / ".local/lib/node_modules/@openai/codex/bin/codex.js"
+        native = home / (".local/lib/node_modules/@openai/codex/node_modules/@openai/"
+                         "codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex")
+        self.assertTrue(codex_process.recognized(home, Path("/usr/bin/node"),
+                                                ["/usr/bin/node", str(wrapper), "app-server"]))
+        self.assertTrue(codex_process.recognized(home, native, [str(native), "app-server"]))
+        self.assertFalse(codex_process.recognized(home, native, [str(native), "exec"]))
+        self.assertFalse(codex_process.recognized(home, Path("/opt/other/codex"),
+                                                 ["/opt/other/codex", "app-server"]))
+
+    def test_ready_client_apply_stops_only_planned_stale_processes_and_verifies_new_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            owner = SimpleNamespace(home=home)
+            process = {"pid": 44, "start": "8", "executable": str(home / "codex")}
+            plan = client_repair.Plan(
+                owner, ID, home / "codex", home / ".codex",
+                home / ".config/codey-machine/provider.env", "active-key", [], [process], None)
+            calls = []
+            def runner(args, **_kwargs):
+                calls.append(args)
+                value = "active" if args[:3] == ["systemctl", "--user", "is-active"] else "77"
+                return SimpleNamespace(returncode=0, stdout=value)
+            with patch.object(client_repair, "commit", return_value=["backup"]), \
+                    patch.object(client_repair.codex_process, "stop", return_value=[44]) as stop, \
+                    patch.object(client_repair.codex_process, "inspect", return_value=[]), \
+                    patch.object(client_repair, "_process_environment", return_value={
+                        "CODEY_CODEX_EXECUTABLE": str(plan.codex), "CODEY_MODEL_API_KEY": "active-key",
+                    }), \
+                    patch.object(client_repair, "_login_environment",
+                                 return_value={"CODEY_MODEL_API_KEY": "active-key"}), \
+                    patch.object(client_repair, "_http_status", return_value=200):
+                result = plan.apply(runner)
+            self.assertTrue(result["applied"] and result["freshLoginKeyVerified"])
+            stop.assert_called_once_with(home, [process])
+            self.assertIn(["systemctl", "--user", "restart", "codey-cloudcli.service"], calls)
+
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "native Linux transaction tests")
 class LinuxTransactionTests(unittest.TestCase):
@@ -308,7 +359,11 @@ class LinuxTransactionTests(unittest.TestCase):
             self.assertFalse(any("stop" in call or "disable" in call for call in f.calls))
 
     def test_takeover_plan_is_read_only_and_apply_archives_only_legacy_codey_paths(self):
-        with self.setup(existing=True) as f:
+        process = {"pid": 9191, "start": "123", "executable": "/home/test/codex"}
+        with self.setup(existing=True) as f, \
+                patch.object(installer.legacy_takeover.codex_process, "inspect",
+                             side_effect=[[process], [process], [process], []]), \
+                patch.object(installer.legacy_takeover.codex_process, "stop", return_value=[9191]) as stop:
             root = f.home / ".local/share/codey-machine"
             config = f.home / ".config/codey-machine"
             root.mkdir(parents=True)
@@ -333,6 +388,7 @@ class LinuxTransactionTests(unittest.TestCase):
             plan = json.loads(f.output.getvalue())
             self.assertTrue(plan["legacyTakeover"]["detected"])
             self.assertEqual(plan["legacyTakeover"]["occupiedPorts"], [3001, 8443, 4141])
+            self.assertEqual(plan["legacyTakeover"]["codexProcesses"], [process])
             self.assertEqual(plan["modelDefaults"]["mode"],
                              "fresh defaults will be prepared after the approved legacy archive")
             self.assertFalse(any(call[:4] == ["systemctl", "--user", "disable", "--now"] for call in f.calls))
@@ -364,6 +420,7 @@ class LinuxTransactionTests(unittest.TestCase):
             self.assertTrue({"copilot-api.service", "copilot-api-update.service",
                              "copilot-api-update.timer", "codey-cloudcli.service",
                              "codey-node-updater.service"}.issubset(stopped))
+            stop.assert_called_once_with(f.home, [process])
             self.assertEqual((codex_home / "auth.json").read_bytes(), auth_before)
             self.assertEqual(session.read_bytes(), session_before)
             codex_config = tomllib.loads((codex_home / "config.toml").read_text())
@@ -414,6 +471,15 @@ class LinuxTransactionTests(unittest.TestCase):
             f.cli.assert_not_called()
             self.assertFalse((f.home / ".config/codey-machine").exists())
 
+    def test_existing_bash_login_profile_receives_the_model_environment_hook(self):
+        with self.setup() as f:
+            profile = f.home / ".bash_profile"
+            profile.write_text("# existing login profile\n")
+            f.args.apply = True
+            installer.configure(f.args)
+            self.assertIn(login.START, profile.read_text())
+            self.assertFalse((f.home / ".profile").exists())
+
     def test_explicit_linger_is_enabled_only_when_missing_and_before_services(self):
         for already_enabled in (False, True):
             with self.subTest(already_enabled=already_enabled), self.setup(linger=already_enabled) as f:
@@ -452,6 +518,14 @@ class LinuxTransactionTests(unittest.TestCase):
             self.assertEqual(codex_config["model"], "gpt-6-astra")
             self.assertEqual(codex_config["mcp_servers"], {"keep": {"command": "preserve"}})
             self.assertEqual((Path(f.args.codex_home) / "auth.json").read_text(), '{"credential":"preserve-model-login-fixture"}')
+            provider_env = f.home / ".config/codey-machine/provider.env"
+            for profile in (f.home / ".profile", f.home / ".bashrc"):
+                text = profile.read_text()
+                self.assertIn(str(provider_env), text)
+                self.assertNotIn(gateway["auth"]["apiKeys"][0], text)
+            wrapper = (f.home / ".local/share/codey-machine/bin/codex").read_text()
+            self.assertIn(str(provider_env), wrapper)
+            self.assertIn("export CODEY_MODEL_API_KEY", wrapper)
             units = f.home / ".config/systemd/user"
             for name in ("codey-copilot-api.service", "codey-cloudcli.service", "codey-devtunnel.service"):
                 text = (units / name).read_text()
@@ -473,6 +547,30 @@ class LinuxTransactionTests(unittest.TestCase):
             f.args.replace_existing = True
             with self.assertRaisesRegex(installer.SetupError, "only for an identified legacy install"):
                 installer.configure(f.args)
+
+    def test_ready_client_repair_has_an_explicit_plan_and_apply_route(self):
+        with self.setup() as f:
+            f.args.apply = True
+            installer.configure(f.args)
+            f.args.apply = False
+            f.args.repair_client = True
+            f.output.seek(0)
+            f.output.truncate(0)
+            process = {"pid": 8282, "start": "456", "executable": str(f.home / "codex")}
+            with patch.object(installer.client_repair, "_http_status", return_value=200), \
+                    patch.object(installer.client_repair.codex_process, "inspect", return_value=[process]):
+                installer.configure(f.args)
+            plan = json.loads(f.output.getvalue())
+            self.assertEqual(plan["clientRepair"]["codexExecutable"], str(f.home / "codex"))
+            self.assertEqual(plan["clientRepair"]["codexProcessesToStop"], [process])
+            self.assertFalse(any(call[:3] == ["systemctl", "--user", "restart"] for call in f.calls))
+            f.args.apply = True
+            with patch.object(installer.client_repair, "_http_status", return_value=200), \
+                    patch.object(installer.client_repair.codex_process, "inspect", return_value=[process]), \
+                    patch.object(installer.client_repair.Plan, "apply",
+                                 return_value={"applied": True, "stoppedCodexProcesses": [8282]}) as repair:
+                installer.configure(f.args)
+            repair.assert_called_once()
 
     def test_failure_only_disables_new_services_and_never_marks_ready(self):
         with self.setup() as f:

@@ -22,7 +22,8 @@ export const MACHINE_PLATFORMS = Object.freeze([
     nodeSuffix: "linux-x64.tar.xz", updater: true, implemented: true, tunnel: true, privateNetwork: true,
     description: "Linux x64 · GitHub 私有 DevTunnel · systemd 用户服务 · 独立签名升级器",
     files: [...defaultsFiles, "scripts/setup-linux.sh", ...nativeFiles("linux", [
-      "__init__.py", "install.py", "build.py", "cli.py", "legacy_takeover.py", "systemd.py", "supervisor.py",
+      "__init__.py", "install.py", "build.py", "cli.py", "client_repair.py", "codex_process.py",
+      "legacy_takeover.py", "login.py", "systemd.py", "supervisor.py",
     ])],
   }),
   Object.freeze({

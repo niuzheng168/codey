@@ -10,6 +10,7 @@ import time
 from ...common.config_files import Owner
 from ...common.errors import SetupError
 from ...common.files import protected_write
+from . import codex_process
 
 
 UNITS = (
@@ -101,9 +102,11 @@ def inspect(home, root, config, runner, *, port_available=_port_available):
                 or info.st_uid != os.getuid()):
             raise SetupError(f"Existing Codey {label} path is not an ordinary owner directory")
         paths.append({"label": label, "path": str(path)})
+    processes = codex_process.inspect(home)
     return {
-        "detected": bool(units),
+        "detected": bool(units or processes),
         "units": units,
+        "codexProcesses": processes,
         "occupiedPorts": occupied,
         "archivePaths": paths,
         "action": "stop-disable-and-archive-then-install-fresh",
@@ -116,6 +119,7 @@ def public(plan):
         "detected": plan["detected"],
         "units": [{key: item[key] for key in ("name", "fragment", "active", "pid")}
                   for item in plan["units"]],
+        "codexProcesses": list(plan["codexProcesses"]),
         "occupiedPorts": list(plan["occupiedPorts"]),
         "archivePaths": list(plan["archivePaths"]),
         "action": plan["action"],
@@ -152,6 +156,9 @@ def execute(home, root, config, node_id, runner, *, port_available=_port_availab
         record = _show(runner, item["name"])
         if record.get("ActiveState") == "active" or record.get("MainPID", "0") not in ("", "0"):
             raise SetupError(f"Legacy unit did not stop: {item['name']}")
+    stopped_codex = codex_process.stop(home, plan["codexProcesses"]) if plan["codexProcesses"] else []
+    if codex_process.inspect(home):
+        raise SetupError("A new owner Codex app-server appeared during migration; stop its launcher and re-plan")
     remaining = [port for port in PORTS if not port_available(port)]
     if remaining:
         raise SetupError("A listener remains after stopping legacy Codey services: "
@@ -168,4 +175,4 @@ def execute(home, root, config, node_id, runner, *, port_available=_port_availab
         "schema": 1, "nodeId": node_id, "archivedAt": tag.split("-", 1)[0],
         "plan": public(plan),
     }, indent=2) + "\n")
-    return {"archive": str(backup), **public(plan)}
+    return {"archive": str(backup), "stoppedCodexProcesses": stopped_codex, **public(plan)}

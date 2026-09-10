@@ -3,7 +3,7 @@
 ## 验收
 
 1. 使用本人对应平台完整包，确认 owner/node ID、独立凭据、源码与 Node 摘要匹配。
-   独立 Codex CLI 准备步骤验证固定官方包 SHA-512 和 `--version`，不需要预装 Node；
+   优先验证并复用 owner 已有的官方 Codex CLI（包括 npm wrapper）；仅缺失时安装固定官方包并验证 SHA-512。
    保留已有 config/auth，模型登录与本步骤分开。
 2. DevTunnel `user show --json` 显示 GitHub；不接受泛化的“已登录”，不切换现有账号。
 3. 新服务只监听回环地址；私有隧道仅有 HTTPS 3001/8443，没有匿名访问或额外端口。
@@ -24,6 +24,7 @@
    Windows/macOS 仅以实际 Workspace 检查报告在线，不伪造 Linux 更新心跳。
 9. 模型登录与接入分开验收。用户要求聊天能力时，需真实 Codey 和 Codex 回答。
 10. 已 ready 后去掉 `--replace-existing`，重跑普通入口只验收，不改服务、身份或运行版本；
+    仅明确的 `--repair-client` plan/apply 可重绑 owner CLI/新 key、停止旧 app-server 并重启 CloudCLI；
     重启/注销恢复必须另行实测。
 
 ## 独立默认配置
@@ -74,7 +75,8 @@ python -I -B scripts/codey.py defaults --owner-home "<目标 Home>" --codex-home
   bash scripts/setup-linux.sh --replace-existing --apply
   ```
 
-  plan 无停服或归档动作；apply 才 stop/disable 计划明确的旧 unit，并归档计划列出的
+  plan 无停服或归档动作；apply 才 stop/disable 计划明确的旧 unit、停止清单中的 owner
+  Codex app-server，并归档计划列出的
   `codey-machine`、旧 CloudCLI、copilot-api、updater 和 relay 标准 runtime/config。
   以计划及结果给出的精确归档清单为准，归档可能含凭据，不公开上传。
   不删除或搬走整个 Home/`.codex`，不恢复旧 key/服务；仍被未知进程占用的端口会终止安装，不杀进程。
@@ -82,6 +84,25 @@ python -I -B scripts/codey.py defaults --owner-home "<目标 Home>" --codex-home
   新服务运行路径、模型、SSO、守护和 updater 验收通过，session/auth 未丢失。
   新服务可能复用 unit 名，应核对内容/路径/PID，而不是要求该名字永久 disabled。
   失败保留归档与诊断，不自动恢复旧服务；ready 后去掉迁移选项，回到普通验收或签名升级流程。
+
+## Linux ready 客户端修复
+
+- **准备检查**：仅用于同一 `ready` 节点出现重复托管 Codex、登录 shell 仍持有旧 key，
+  或 Codex/Codey 返回 401。先确认 gateway config 与 `provider.env` 的新 key 一致且 `/models` 为 200。
+- **目标**：复用 owner 已有官方 Codex CLI，将 CloudCLI、包装器和新登录 shell 统一到当前 key；
+  不增加旧 key 兼容，不改节点身份，不删除 `.codex`、session/auth。
+- **执行脚本**：
+
+  ```bash
+  bash scripts/setup-linux.sh --repair-client
+  bash scripts/setup-linux.sh --repair-client --apply
+  ```
+
+  plan 列出文件、旧 key app-server PID、CloudCLI 重启及托管 CLI 归档；apply 才执行。
+- **验收标准**：新登录 shell 解析到 owner CLI；gateway、CloudCLI 和 shell key 一致；
+  旧 app-server 已退出，CloudCLI 重启后本机鉴权通过。随后必须分别取得一次真实 Codex 与 Codey 回复；
+  仅 `/models`、health 或 PID 正常不能宣称聊天修复。
+  安装前已存在的 shell 不会自动刷新变量；使用新 SSH/login shell，或以 `bash -lc` 发起 Codex 验收。
 
 ## 排障
 
@@ -91,7 +112,8 @@ python -I -B scripts/codey.py defaults --owner-home "<目标 Home>" --codex-home
 - CLI 是 Microsoft 登录：保留缓存，要求本人审查 GitHub 登录，不能自动 logout。
 - Linux 新代理模型请求 401：区分 GitHub 模型登录与本机 API key。核对新 CloudCLI 环境、
   owner 登录环境及 Codex 后台是否都使用新 key；文件更新不会改变已运行进程的环境。
-  获准后仅停止归属明确的旧进程；若 SSH/Desktop 自动拉起它，先修正启动环境。
+  对 ready 节点使用上述 `--repair-client`，仅停止归属明确且仍持有旧 key 的 app-server；
+  若 SSH/Desktop 自动拉起它，先修正启动环境。
   不向新代理加入旧 key 做兼容，不恢复旧服务或删除会话；验收需证明新 key 成功、旧 key 被拒绝。
 - CLI 输出中 ID 已带区域后缀：仅使用经过严格核对的 ID/cluster，不猜区域。
 - 权限不足、公司代理或 GitHub/DevTunnel 策略拒绝：报告具体阶段，不开放匿名访问。

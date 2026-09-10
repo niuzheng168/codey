@@ -9,6 +9,8 @@ Windows、macOS、Linux 均使用私有 DevTunnel，不要求节点拥有 Azure 
 ## 边界
 
 - 每个包仅用于一个 owner/node，身份预留七天，失败重下同一身份不轮换 key。
+- 三个平台优先复用 owner 已有官方 Codex CLI；官方 npm wrapper 会验证其原生 binary，
+  仅缺失时安装包内固定版本，不重复安装。
 - Windows/macOS 保留本机 Codex 和模型代理；Linux 默认拒绝接管已有服务，
   仅同用户已识别的旧 Codey user services 可经下述显式迁移处理。
 - 程序、构建依赖、TLS 和配置隔离；新服务仅 loopback，不开放入站端口。
@@ -44,6 +46,19 @@ Windows、macOS、Linux 均使用私有 DevTunnel，不要求节点拥有 Azure 
 - **验收标准**：旧实例退出且归档完整；新身份、新 key、新服务路径及真实 Codey/Codex/SSO 验收通过，
   旧 key 被拒绝。若复用 unit 名，按内容、运行路径和 PID 区分新旧实例。
   失败保留归档，不自动恢复旧服务；完成 ready 后去掉 `--replace-existing`，只走普通验收或签名升级。
+
+## Linux ready 节点的 Codex/Codey 401 修复
+
+同一 ready 节点若仍固定托管 CLI、登录 shell 使用旧 key，或 Codex/Codey 返回 401：
+
+```bash
+bash scripts/setup-linux.sh --repair-client
+bash scripts/setup-linux.sh --repair-client --apply
+```
+
+第一条只计划；第二条会复用 owner CLI、让 shell/CloudCLI 使用当前 `provider.env`，
+停止旧 key 的 owner app-server、重启 CloudCLI，并归档不再使用的托管 CLI。
+不删除 `.codex`、session/auth，也不把旧 key 加回 gateway。完成后必须分别验证真实 Codex 与 Codey 回复。
 
 ## 发布与兼容
 

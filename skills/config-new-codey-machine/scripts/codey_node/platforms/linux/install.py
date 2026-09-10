@@ -22,7 +22,7 @@ from ...common.files import digest, protected_write
 from ...common.verification import verify
 from ...devtunnel import auth, binding as tunnels, renewal
 from ...service.bundle import install_bundle
-from . import cli, legacy_takeover, supervisor as worker
+from . import cli, client_repair, legacy_takeover, login, supervisor as worker
 from .build import prepare_runtime, run
 from .systemd import unit
 
@@ -147,6 +147,10 @@ def configure(args):
         raise SetupError("This OS account already has a different Codey machine/release; do not overwrite its identity")
     if state and state.get("releaseId") != manifest["releaseId"] and (state.get("ready") or not args.retry_failed):
         raise SetupError("A different release exists; only an unfinished installation may be retried with --retry-failed")
+    if args.replace_existing and args.repair_client:
+        raise SetupError("--replace-existing and --repair-client are separate operations")
+    if args.repair_client and not (state and state.get("ready")):
+        raise SetupError("--repair-client is only for this same ready Codey installation")
     if state and args.replace_existing:
         raise SetupError("--replace-existing is only for an identified legacy install without current installation state")
     service_dir = home / ".config/systemd/user"
@@ -171,11 +175,13 @@ def configure(args):
             occupied = [port for port in legacy_takeover.PORTS if not port_available(port)]
             if occupied:
                 raise SetupError("Required listeners are occupied by an unknown process; no process was stopped")
-    codex = (Path(state["codexExecutable"]) if state and state.get("ready") else
+    codex = (Path(state["codexExecutable"]) if state and state.get("ready") and not args.repair_client else
              codex_cli.require_cli(SKILL, args.codex_bin))
     if not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(codex)):
         raise SetupError("This systemd installer requires a Codex path without whitespace or shell/systemd specifiers")
     defaults = None
+    shell_owner = None
+    shell_changes = None
     if not (state and state.get("ready")):
         if takeover and takeover["detected"]:
             preflight_root = home / (".codey-takeover-preflight-" + enrollment["nodeId"])
@@ -201,6 +207,11 @@ def configure(args):
             target_codex_home = defaults.codex_home
         if not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(target_codex_home)):
             raise SetupError("This systemd installer requires a Codex home without whitespace or systemd specifiers")
+        shell_owner, shell_changes = login.prepare(home, config / "provider.env")
+    client_plan = None
+    if state and state.get("ready") and args.repair_client:
+        managed = codex_cli.tool_root(codex_cli.pin(SKILL, codex_cli.native_platform()))
+        client_plan = client_repair.prepare(home, root, config, state_file, state, codex, managed)
     summary = {
         "nodeId": enrollment["nodeId"], "releaseId": manifest["releaseId"],
         "services": SERVICES + ["codey-node-updater.service", "codey-devtunnel.service", "codey-devtunnel-renew.timer"],
@@ -221,6 +232,8 @@ def configure(args):
         "supervisor": "systemd; Restart=always; 5-second restart delay",
         "bootAutostart": "requires this owner's linger; enabled services survive SSH logout",
         "legacyTakeover": legacy_takeover.public(takeover) if takeover else {"detected": False},
+        "shellModelEnvironment": login.report(shell_changes) if shell_changes else {"mode": "unchanged"},
+        "clientRepair": client_plan.report() if client_plan else {"requested": False},
     }
     if not args.apply:
         print(json.dumps(summary, indent=2))
@@ -228,11 +241,14 @@ def configure(args):
     if shutil.disk_usage(home).free < 8 * 1024 ** 3:
         raise SetupError("At least 8 GiB free disk space is required for isolated dependency installation/build")
     if state and state.get("ready"):
+        repair = client_plan.apply(run) if client_plan else None
         saved, saved_enrollment = worker.runtime(config / "tunnel-runtime.json")
         if saved_enrollment != enrollment:
             raise SetupError("Existing installation credentials differ; no identity will be replaced")
         network["devTunnel"] = {key: saved[key] for key in ("tunnelId", "clusterId")}
         result = verify(enrollment, network, config / "node-cert.pem")
+        if repair:
+            result["clientRepair"] = repair
         emit_machine(enrollment, network, config / "node-cert.pem", Path(args.out).resolve(), args.name, True, result)
         return
     owner = run(["id", "-un"]).stdout.strip()
@@ -320,6 +336,8 @@ def configure(args):
         # The same explicit new COPILOT_API_HOME supplies the gateway config and
         # CloudCLI model key. Never import keys from an old proxy or invoking shell.
         defaults.apply()
+        shell_result = login.apply(shell_owner, shell_changes)
+        state["shellModelEnvironment"] = shell_result
         provider_env = config / "provider.env"
         protected_write(config / "copilot.env", "\n".join([
             f"COPILOT_API_HOME={data}/copilot-api", "COPILOT_API_CODEY_HTTPS_PORT=8443",
@@ -340,7 +358,7 @@ def configure(args):
         (data / "cloudcli").mkdir(exist_ok=True)
         bins = root / "bin"
         bins.mkdir(exist_ok=True)
-        protected_write(bins / "codex", f"#!/bin/sh\nexport CODEX_HOME=\"{defaults.codex_home}\"\nexec \"{codex}\" \"$@\"\n")
+        protected_write(bins / "codex", client_repair.wrapper(codex, defaults.codex_home, provider_env))
         (bins / "codex").chmod(0o700)
         protected_write(bins / "copilot-api", f"#!/bin/sh\nexport COPILOT_API_HOME=\"{data}/copilot-api\"\nexec \"{node}\" \"{copilot}/dist/main.js\" \"$@\"\n")
         (bins / "copilot-api").chmod(0o700)
@@ -437,6 +455,8 @@ def arguments(argv=None):
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--replace-existing", action="store_true",
                         help="Plan/apply replacement of recognized owner legacy Codey user services")
+    parser.add_argument("--repair-client", action="store_true",
+                        help="Plan/apply rebinding of this same ready node to the owner's existing Codex CLI and current key")
     parser.add_argument("--enable-linger", action="store_true",
                         help="Explicitly keep this owner's user services running after logout")
     return parser.parse_args(argv)

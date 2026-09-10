@@ -28,7 +28,8 @@ description: "用本人 GitHub 私有 DevTunnel 原生接入 Windows、macOS 或
 ## 2. 安装或复用 Codex CLI
 
 - **准备检查**：使用原 owner；不要求预装 Node 或 Codex Desktop。
-  已有原生 CLI 可用 `--codex-bin <绝对路径>` 指定，不把任意 PATH shim 当作原生程序。
+  自动检查 PATH、`~/.local/bin/codex` 和 `~/.npm-global/bin/codex`；
+  官方 npm wrapper 会解析并验证其同一安装内的原生 binary。也可用 `--codex-bin <绝对路径>` 指定。
 - **目标**：获得可运行、路径稳定的 Codex CLI，不执行模型登录、不改全局 PATH。
 - **执行脚本**：
 
@@ -37,7 +38,8 @@ description: "用本人 GitHub 私有 DevTunnel 原生接入 Windows、macOS 或
   python -I -B scripts/codey.py codex --apply
   ```
 
-  先审阅第一条的计划，再执行第二条。已有 CLI 则复用；否则使用 `dependencies.json`
+  先审阅第一条的计划，再执行第二条。已有可运行的官方 CLI（包括版本更新的 npm 安装）优先复用；
+  不会因为包内固定版本不同而重复安装。只有找不到现有 CLI 时才使用 `dependencies.json`
   固定的官方平台包，验证 SHA-512，安装到 `~/.local/share/codey-tools/codex/`。
   不修改系统 Python、全局 npm 或安全策略，也不使用 latest。
 - **验收标准**：输出原生 executable 和成功的 `codex --version`；
@@ -59,7 +61,8 @@ description: "用本人 GitHub 私有 DevTunnel 原生接入 Windows、macOS 或
 
   Linux/macOS 可设置 `CODEY_PYTHON`，Windows 可用 `-PythonExe` 指定解释器。
   需要显式 Codex Home 时用 `--codex-home` / Windows `-CodexHome`。
-  **Agent 必须先跑普通 plan**。只有检测到同用户已识别的 Linux 旧 Codey user services，
+  **Agent 必须先跑普通 plan**。只有检测到同用户已识别的 Linux 旧 Codey user services
+  或 Codex app-server，
   才改跑 `bash scripts/setup-linux.sh --replace-existing`（仍是 plan），
   审阅将 stop/disable 的旧 unit、runtime/config 的归档路径及新节点身份，再请用户批准中断。
   这是 [显式 legacy 迁移](references/verification.md#linux-legacy-显式迁移)，不是升级或强制清理；
@@ -87,7 +90,8 @@ description: "用本人 GitHub 私有 DevTunnel 原生接入 Windows、macOS 或
 
   已批准的 Linux legacy 迁移用 `bash scripts/setup-linux.sh --replace-existing --apply`
   **替代**普通 Linux 安装命令，并保留计划所需的其他参数（如 `--enable-linger`、`--codex-home`）。
-  它会 stop/disable 并归档清单内的旧 unit/runtime/config，再以当前完整包的全新身份安装；
+  它会 stop/disable 并归档清单内的旧 unit/runtime/config，停止清单内旧 Codex app-server，
+  再以当前完整包的全新身份安装；
   不恢复旧 key/服务，不删除 Home/`.codex`/session/auth。旧服务停用后仍有未知端口占用就停止。
   Linux/Windows 可先准备经过校验的 DevTunnel CLI；未登录时停在授权要求，不启动节点服务。
   按脚本给出的 CLI 绝对路径，由本人执行
@@ -97,7 +101,8 @@ description: "用本人 GitHub 私有 DevTunnel 原生接入 Windows、macOS 或
   然后重跑同一安装命令。macOS 需先准备可用的官方 DevTunnel CLI。
   Linux 新安装在服务首次启动前自动写入有效 Codex Home 的 `models.json`、合并 `config.toml`，
   并设置新服务实际 `COPILOT_API_HOME/config.json` 的 `useResponsesApiWebSocket=false`，
-  将该新 gateway 的活动 key 绑定到 `provider.env`。不读旧 gateway 来兼容旧 key。
+  将该新 gateway 的活动 key 绑定到 `provider.env`，同时让 `.profile`/`.bashrc`
+  从该私有文件加载 key；profile 中不复制 key。不读旧 gateway 来兼容旧 key。
   Windows/macOS 只改计划明确的已有 gateway 配置，不重启或接管它。
   **模型 Responses WebSocket 关闭，不影响 DevTunnel/Workspace WebSocket；不得一起禁用。**
 - **验收标准**：GitHub provider 正确；源码/Node 校验、原生构建和 TLS 自检成功；
@@ -111,6 +116,12 @@ description: "用本人 GitHub 私有 DevTunnel 原生接入 Windows、macOS 或
 - **目标**：验证配置落盘、真实 TLS、数据认证、Workspace SSO 和匿名拒绝，而不只看 PID/health。
 - **执行脚本**：已 ready 后重跑普通安装入口做验收；迁移完成必须去掉 `--replace-existing`，
   不再执行替换。保留同一包及其余已审核参数，不重启或升级。
+  若 ready 节点仍固定隔离 CLI、登录 shell 使用旧 key，或 Codex/Codey 返回 401，
+  先运行 `bash scripts/setup-linux.sh --repair-client` 查看计划，再运行
+  `bash scripts/setup-linux.sh --repair-client --apply`。它只重绑本节点客户端环境、
+  停止旧 key 的 owner Codex app-server、重启 CloudCLI，并归档不再使用的托管 CLI。
+  安装前已打开的 shell 环境不会被子进程反向修改；验收使用新 SSH/login shell，
+  或显式通过 `bash -lc 'codex --version'` 检查，不在旧 shell 中误判。
   Linux 另用 `systemctl --user is-enabled` / `is-active` 检查本次 Codey 服务和续期 timer，
   用 `loginctl show-user "$(id -un)" -p Linger` 检查 `Linger=yes`。
   具体服务与其他平台检查见 [验收说明](references/verification.md)。
@@ -119,6 +130,7 @@ description: "用本人 GitHub 私有 DevTunnel 原生接入 Windows、macOS 或
   本机认证/SSO/匿名拒绝通过。Linux 服务 enabled/active、
   linger 已开；systemd 自动重启，timer 定期续期，升级器独立运行。
   迁移后按运行路径、版本及 PID 区分新旧实例，不能因新服务复用旧 unit 名就误判旧服务已恢复。
+  新登录 shell 的 `codex --version` 必须是被复用的 owner CLI；其 key 与 gateway 相同且旧 key 返回 401。
   Windows/macOS 是原 owner **登录后**自启，不冒称无人登录开机启动或多机高可用。
 
 ## 6. 门户、模型与恢复验收
@@ -129,8 +141,10 @@ description: "用本人 GitHub 私有 DevTunnel 原生接入 Windows、macOS 或
   缺少模型身份时由本人完成模型登录，再分别做真实 Codey/Codex 请求。
   legacy 迁移只导入新身份生成的机器文件；旧门户节点移除另行确认，不复用旧导入文件。
   Linux 新代理只接受新 key；同步新服务和 owner 的客户端登录环境。
-  使用旧 key 的 Codex 后台须经同意后停止，让重新启动的客户端读取新 key，
+  迁移或 `--repair-client` 计划内的旧 key Codex app-server 可按用户授权直接停止，
+  让重新启动的客户端读取新 key，
   不通过增加旧 key、恢复旧服务或关闭认证来完成验收；会话文件保留。
+  Codex CLI 的真实请求必须从新 login shell 发起；Codey 的真实请求必须经过该节点 Workspace。
   注销/重启恢复测试须另行批准；恢复后再次执行第 5 步和真实双模型检查。
   Linux 的 [签名自动升级验收](references/verification.md#签名自动升级验收) 需另经 owner 审核发布计划、
   确认任务；不以首次安装器重装节点。记录组件变化、job、receipt 与双模型结果。

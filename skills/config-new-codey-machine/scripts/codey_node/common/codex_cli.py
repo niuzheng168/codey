@@ -1,4 +1,4 @@
-"""Install a pinned native Codex CLI without Node, global PATH changes or model login."""
+"""Reuse an owner Codex CLI, or install a pinned native CLI when none exists."""
 import argparse
 import base64
 import hashlib
@@ -61,7 +61,13 @@ def native_executable(candidate, spec):
     # Resolve only the official npm wrapper layout, never arbitrary shell code.
     if candidate.name == "codex.js" and candidate.parent.name == "bin" and candidate.parent.parent.name == "codex":
         suffix = TARGETS[spec["platform"]][0]
-        candidate = candidate.parent.parent.parent / ("codex-" + suffix) / "vendor" / spec["triple"] / "bin" / TARGETS[spec["platform"]][2]
+        package = candidate.parent.parent
+        choices = (
+            package / "node_modules/@openai" / ("codex-" + suffix),
+            package.parent / ("codex-" + suffix),
+        )
+        target = Path("vendor") / spec["triple"] / "bin" / TARGETS[spec["platform"]][2]
+        candidate = next((root / target for root in choices if (root / target).is_file()), choices[0] / target)
     if not candidate.is_file():
         raise SetupError("The selected native Codex executable is missing")
     with candidate.open("rb") as stream:
@@ -109,11 +115,30 @@ def find_cli(skill, explicit=None):
         if not Path(explicit).is_absolute():
             raise SetupError("--codex-bin must be an absolute native executable path")
         return native_executable(explicit, spec)
+    name = "codex.exe" if os.name == "nt" else "codex"
+    candidates = [shutil.which(name)]
+    owner_entries = set()
+    if spec["platform"] != "windows-x64":
+        home = Path.home().resolve()
+        owner_entries = {home / ".local/bin/codex", home / ".npm-global/bin/codex"}
+        candidates.extend(owner_entries)
+    seen = set()
+    for candidate in candidates:
+        if not candidate or str(candidate) in seen or not Path(candidate).exists():
+            continue
+        seen.add(str(candidate))
+        native = native_executable(candidate, spec)
+        entry = Path(candidate).absolute()
+        if entry in owner_entries:
+            info = entry.lstat()
+            if info.st_uid != getattr(os, "getuid", lambda: info.st_uid)():
+                raise SetupError("The selected owner Codex entrypoint belongs to another user")
+            return entry
+        return native
     root = tool_root(spec)
     if root.exists():
         return verify_installation(root, spec)
-    candidate = shutil.which("codex.exe" if os.name == "nt" else "codex")
-    return native_executable(candidate, spec) if candidate else None
+    return None
 
 
 def require_cli(skill, explicit=None):

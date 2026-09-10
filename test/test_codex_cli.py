@@ -11,7 +11,7 @@ import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills/config-new-codey-machine"
@@ -137,6 +137,37 @@ class CodexCliTests(unittest.TestCase):
             self.assertEqual(result["executable"], str(executable.resolve()))
             download.assert_not_called()
             self.assertEqual(len(list(root.iterdir())), 1)
+
+    def test_official_npm_wrapper_resolves_the_nested_native_optional_package(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            spec = codex_cli.pin(SKILL, "linux-x64")
+            wrapper = root / "node_modules/@openai/codex/bin/codex.js"
+            native = root / ("node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/"
+                             "vendor/x86_64-unknown-linux-musl/bin/codex")
+            wrapper.parent.mkdir(parents=True)
+            native.parent.mkdir(parents=True)
+            wrapper.write_text("#!/usr/bin/env node\n")
+            native.write_bytes(b"\x7fELFexisting")
+            self.assertEqual(codex_cli.native_executable(wrapper, spec), native.resolve())
+
+    def test_linux_owner_entrypoint_is_preferred_before_a_managed_duplicate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entry = root / ".local/bin/codex"
+            entry.parent.mkdir(parents=True)
+            entry.write_bytes(b"owner entry fixture")
+            managed = root / "managed"
+            managed.mkdir()
+            with patch.object(codex_cli, "native_platform", return_value="linux-x64"), \
+                 patch.object(codex_cli.Path, "home", return_value=root), \
+                 patch.object(codex_cli.shutil, "which", return_value=None), \
+                 patch.object(codex_cli, "tool_root", return_value=managed), \
+                 patch.object(codex_cli, "native_executable", return_value=root / "native") as native, \
+                 patch.object(codex_cli, "verify_installation") as verify:
+                self.assertEqual(codex_cli.find_cli(SKILL), entry)
+            native.assert_called_once_with(entry, ANY)
+            verify.assert_not_called()
 
     def test_version_probe_never_passes_model_credentials_or_runs_login(self):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "must-not-leak", "GITHUB_TOKEN": "must-not-leak",

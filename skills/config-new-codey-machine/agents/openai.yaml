@@ -1,4 +1,4 @@
 interface:
   display_name: "Config new Codey machine"
-  short_description: "三平台原生接入、默认配置与 Linux legacy 显式迁移"
-  default_prompt: "使用 $config-new-codey-machine，按 1–6 步报告准备检查、目标、执行脚本与验收标准；先普通 plan，同用户已识别的 Linux 旧 Codey 服务才进入 --replace-existing plan，批准后再 apply，当前 ready 安装或未知进程不适用；保留 Home/.codex/session/auth，不恢复旧 key/服务，依当前 OS 权限完成默认配置、真实模型与获授权的恢复及升级验收。"
+  short_description: "三平台接入、复用 Codex、Linux legacy/401 修复"
+  default_prompt: "使用 $config-new-codey-machine，按 1–6 步报告准备检查、目标、执行脚本与验收标准；优先复用 owner 已有官方 Codex CLI，不重复安装；先普通 plan，Linux 旧服务/app-server 才进入 --replace-existing，ready 节点重复 CLI 或 401 使用 --repair-client；批准后 apply，保留 Home/.codex/session/auth，不兼容旧 key，最后分别取得真实 Codex 和 Codey 回复。"
