@@ -10,13 +10,16 @@ import { requestError } from "./signed-store.mjs";
 import { zipStream } from "./zip-stream.mjs";
 import { MACHINE_PLATFORMS, machinePlatform } from "./machine-platforms.mjs";
 import { MachineTunnelService } from "./machine-tunnel.mjs";
+import { machineRegistration } from "./machine-registration.mjs";
+import { verifyDevTunnelAccess } from "./devtunnel-transport.mjs";
+import { UPDATE_PROTOCOL } from "./node-update-release.mjs";
 
 export const MACHINE_SKILL = "config-new-codey-machine";
 export const MACHINE_SKILL_FILES = Object.freeze([
   "SKILL.md", "agents/openai.yaml", "dependencies.json",
   "scripts/codey.py",
   "scripts/codey_node/__init__.py", "scripts/codey_node/platforms/__init__.py",
-  ...["__init__.py", "errors.py", "files.py", "archives.py", "verification.py"]
+  ...["__init__.py", "errors.py", "files.py", "archives.py", "model_test.py", "registration.py", "verification.py"]
     .map(file => `scripts/codey_node/common/${file}`),
   ...["__init__.py", "auth.py", "binding.py", "renewal.py"].map(file => `scripts/codey_node/devtunnel/${file}`),
   ...["__init__.py", "bundle.py", "launcher.py"].map(file => `scripts/codey_node/service/${file}`),
@@ -42,7 +45,7 @@ async function input(req) {
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 16384) throw requestError("Machine file is too large", 413);
+    if (size > 32768) throw requestError("Machine file is too large", 413);
     chunks.push(chunk);
   }
   try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
@@ -123,9 +126,10 @@ export function machineNetworkConfig(raw) {
 
 export class MachineSetup {
   constructor({ nodePolicy, accounts, authenticator, origin, bundleRoot, network, cloudCliGateway, nodeDataGateway, cloudCliUi,
-    machineUpdates, skillRoot = defaultSkillRoot, verify = verifyMachine }) {
+    machineUpdates, skillRoot = defaultSkillRoot, verify = verifyMachine, verifyTunnel = verifyDevTunnelAccess }) {
     Object.assign(this, { nodePolicy, accounts, authenticator, origin, bundleRoot, cloudCliGateway, nodeDataGateway, cloudCliUi, skillRoot, verify });
     this.machineUpdates = machineUpdates;
+    this.verifyTunnel = verifyTunnel;
     this.tunnels = new MachineTunnelService({ nodePolicy, accounts });
     this.network = network ? machineNetworkConfig(network) : null;
     this.verifying = 0;
@@ -177,7 +181,7 @@ export class MachineSetup {
     if (!this.bundleRoot || (!definition.tunnel && !this.network) || !this.cloudCliGateway || !this.nodeDataGateway || !this.cloudCliUi) {
       return { ...identity, enabled: false, reason: "运维尚未发布完整机器配置包或启用共享 Workspace UI / 私网配置" };
     }
-    if (definition.updater && this.machineUpdates && !this.machineUpdates.catalog.configured) {
+    if (definition.updater && (!this.machineUpdates || !this.machineUpdates.catalog.configured)) {
       return { ...identity, enabled: false, reason: "请先配置节点升级器签名公钥，确保新机器可持续更新" };
     }
     try {
@@ -200,6 +204,7 @@ export class MachineSetup {
       if (this.gatewayRevision === snapshot.revision) return;
       const nodes = snapshot.data.nodes.filter((node) => node.enabled && node.machine).map(node => preparedGateways(node, {
         getTunnelToken: () => this.nodePolicy.machineTunnelToken(node.id),
+        getWorkspaceBinding: (principal) => this.nodePolicy.workspaceBindingFor(principal.id, node.id),
       }));
       this.nodeDataGateway?.setMachineNodes(nodes.map((node) => node.data));
       this.cloudCliGateway?.setMachineNodes(nodes.map((node) => node.workspace));
@@ -208,14 +213,11 @@ export class MachineSetup {
     try { await this.refreshing; } finally { this.refreshing = null; }
   }
 
-  async download(req, res, reserved, requestedPlatform) {
+  async download(req, res, requestedPlatform) {
     for await (const chunk of req) {
       if (chunk.length) throw requestError("下载配置包不接受 owner、节点 ID 或密钥参数");
     }
-    const platformId = reserved?.setup.platform ?? requestedPlatform ?? "linux-x64";
-    if (reserved && requestedPlatform && requestedPlatform !== (reserved.setup.platform ?? "linux-x64")) {
-      throw requestError("待配置身份已绑定原平台，请下载同一平台的包", 409);
-    }
+    const platformId = requestedPlatform ?? "linux-x64";
     const definition = machinePlatform(platformId);
     const available = await this.availability(platformId, req.codeyPrincipal.id);
     if (!available.enabled) throw requestError(available.reason, 503);
@@ -231,41 +233,105 @@ export class MachineSetup {
       }
       entries.push({ name: `${MACHINE_SKILL}/${name}`, data: await readFile(file) });
     }
-    const node = reserved ?? await this.nodePolicy.reserveMachine(req.codeyPrincipal.id, Date.now(), platformId);
-    const enrollment = {
-      schema: 1, ...this.nodePolicy.enrollmentValues(req.codeyPrincipal, node.id, this.origin),
-      expiresAt: Math.min(node.setup.expiresAt, acceptance?.expiresAt ?? Infinity),
-      releaseId: manifest.releaseId, platform: platformId,
+    const setup = {
+      schema: 1,
+      portalOrigin: this.origin,
+      releaseId: manifest.releaseId,
+      platform: platformId,
+      network: definition.tunnel ? { mode: "devtunnel" } : this.network,
+      ...(definition.tunnel ? { tunnelAuthProvider: "github" } : {}),
       ...(acceptance ? { acceptance } : {}),
-      ...(definition.tunnel ? { network: { mode: "devtunnel" }, tunnelAuthProvider: "github",
-        tunnelUpdateKey: this.nodePolicy.tunnelUpdateKey(node.id) }
-        : { network: this.network }),
-      ...(definition.tunnel ? { note: "仅用于此机器的私有 DevTunnel；使用本人 GitHub 登录，不需要节点的 Azure 部署权限。隧道登录不等于模型登录。" } : {}),
+      ...(definition.updater ? {
+        updater: { protocol: UPDATE_PROTOCOL, releasePublicKey: this.machineUpdates.publicKey },
+      } : {}),
     };
     if (definition.updater && this.machineUpdates) {
-      entries.push(...(await this.machineUpdates.newMachineEntries(req.codeyPrincipal.id, node.id))
+      entries.push(...(await this.machineUpdates.sources())
         .map((entry) => ({ ...entry, name: `${MACHINE_SKILL}/assets/${entry.name}` })));
     }
     entries.push(
-      { name: `${MACHINE_SKILL}/assets/enrollment.json`, data: JSON.stringify(enrollment, null, 2) + "\n" },
+      { name: `${MACHINE_SKILL}/assets/setup.json`, data: JSON.stringify(setup, null, 2) + "\n" },
       { name: `${MACHINE_SKILL}/assets/manifest.json`, data: JSON.stringify(manifest, null, 2) + "\n" },
       ...files.map((file) => ({ ...file, name: `${MACHINE_SKILL}/assets/${file.file}` })),
     );
     const zip = zipStream(entries);
+    const suffix = platformId === "linux-x64" ? "" : platformId === "windows-x64" ? "-windows" : `-${platformId}`;
     res.writeHead(200, {
       "content-type": "application/zip", "content-length": zip.length,
-      "content-disposition": `attachment; filename="${MACHINE_SKILL}${platformId === "linux-x64" ? "" :
-        platformId === "windows-x64" ? "-windows" : `-${platformId}`}-${node.id}.zip"`,
+      "content-disposition": `attachment; filename="${MACHINE_SKILL}${suffix}.zip"`,
       "cache-control": "private, no-store", vary: "Cookie", "x-content-type-options": "nosniff",
       "referrer-policy": "no-referrer",
     });
     await pipeline(Readable.from(zip), res);
   }
 
-  async limitedDownload(req, res, reserved, requestedPlatform) {
+  async limitedDownload(req, res, requestedPlatform) {
     if (this.downloading >= 4) throw requestError("配置包下载繁忙，请稍后重试", 429);
     this.downloading++;
-    try { await this.download(req, res, reserved, requestedPlatform); } finally { this.downloading--; }
+    try { await this.download(req, res, requestedPlatform); } finally { this.downloading--; }
+  }
+
+  async activateRegistration(req, res) {
+    const raw = await input(req);
+    const platformId = raw?.package?.platform;
+    const definition = machinePlatform(platformId);
+    const available = await this.availability(platformId, req.codeyPrincipal.id);
+    if (!available.enabled) throw requestError(available.reason, 503);
+    const selected = await this.selectedBundle(platformId, req.codeyPrincipal.id);
+    const registration = machineRegistration(raw, {
+      portalOrigin: this.origin,
+      releaseId: selected.acceptance ? selected.manifest.releaseId : undefined,
+      platform: platformId,
+    });
+    if (selected.acceptance &&
+        registration.machine.name.toLowerCase() !== selected.acceptance.expectedComputerName.toLowerCase()) {
+      throw requestError("验收包只能添加指定的目标机器", 409);
+    }
+    if (this.verifying >= 4) throw requestError("正在验收其他机器，请稍后重试", 429);
+    this.verifying++;
+    try {
+      const account = await this.accounts.byId(req.codeyPrincipal.id);
+      await this.verifyTunnel(registration.machine.devTunnel, registration.connectToken);
+      const verification = await this.verify(registration.machine, {
+        principal: req.codeyPrincipal,
+        clientKey: registration.credentials.clientSigningKey,
+        workspaceBinding: {
+          key: registration.credentials.workspaceSsoKey,
+          subject: registration.credentials.workspaceSubject,
+          username: registration.credentials.workspaceUsername,
+        },
+        getTunnelToken: async () => registration.connectToken,
+      });
+      if (res.destroyed || (this.authenticator && !(await this.authenticator.principal(req, { touch: false })))) {
+        throw requestError("登录已失效或验收已取消，机器尚未添加", 401);
+      }
+      const current = await this.accounts.byId(req.codeyPrincipal.id);
+      if (!account?.enabled || !current?.enabled || account.authVersion !== current.authVersion) {
+        throw requestError("账号状态已变化，请重新登录", 401);
+      }
+      const staged = await this.nodePolicy.stageImportedMachine(
+        req.codeyPrincipal.id,
+        registration.machine,
+        registration.credentials,
+        registration.connectToken,
+      );
+      if (definition.updater && !staged.activated) {
+        await this.machineUpdates.registerClientMachine(
+          req.codeyPrincipal.id,
+          registration.machine.id,
+          registration.credentials.updaterCredential,
+        );
+      }
+      const node = staged.activated
+        ? staged.node
+        : await this.nodePolicy.activateImportedMachine(
+          req.codeyPrincipal.id, registration.machine.id,
+        );
+      await this.refreshGateways();
+      json(res, 201, { node, verification });
+    } finally {
+      this.verifying--;
+    }
   }
 
   async handle(req, res) {
@@ -281,7 +347,13 @@ export class MachineSetup {
         }
         const platform = url.searchParams.get("platform") ?? undefined;
         machinePlatform(platform);
-        await this.limitedDownload(req, res, undefined, platform);
+        await this.limitedDownload(req, res, platform);
+        return true;
+      }
+      if (pathname === "/api/settings/machines/activate") {
+        if (req.method !== "POST") throw requestError("Method not allowed", 405);
+        if (url.search) throw requestError("机器注册接口不接受查询参数");
+        await this.activateRegistration(req, res);
         return true;
       }
       const match = pathname.match(/^\/api\/settings\/machines\/(n-[a-f0-9]{24})(\/activate|\/skill)?$/);
@@ -294,14 +366,7 @@ export class MachineSetup {
       }
       const reserved = await this.nodePolicy.reservedMachine(req.codeyPrincipal.id, nodeId);
       if (activate === "/skill") {
-        if (req.method !== "POST") throw requestError("Method not allowed", 405);
-        const platform = url.searchParams.get("platform") ?? undefined;
-        if ([...url.searchParams.keys()].some((key) => key !== "platform") || url.searchParams.getAll("platform").length > 1) {
-          throw requestError("只接受一个目标平台参数");
-        }
-        if (platform) machinePlatform(platform);
-        await this.limitedDownload(req, res, reserved, platform);
-        return true;
+        throw requestError("旧的个性化配置包不再重新下载；请使用固定无密钥 Skill", 410);
       }
       if (!activate || req.method !== "POST") throw requestError("Method not allowed", 405);
       const available = await this.availability(reserved.setup.platform ?? "linux-x64", req.codeyPrincipal.id);

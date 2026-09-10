@@ -40,7 +40,6 @@
           <button id="open-add-node" class="primary" type="button" aria-haspopup="dialog" aria-controls="add-node">＋ 添加节点</button>
         </div>
         <div id="my-nodes" class="node-list"><p class="muted">正在加载…</p></div>
-        <button id="pending-machines-shortcut" class="pending-shortcut" type="button" aria-haspopup="dialog" aria-controls="add-node" hidden></button>
         <p class="panel-footnote">仅显示你的节点，归属由服务端隔离。移除只撤销门户访问，不会关机或删除机器上的文件。</p>
       </section>
 
@@ -168,8 +167,8 @@
           <li>
             <span class="step-number" aria-hidden="true">1</span>
             <div class="step-content">
-              <h3>按目标系统下载机器配置包</h3>
-              <p class="muted">包含临时机器身份、改版源码与安装脚本。Node 和软件依赖会自动下载安装。</p>
+              <h3>按目标系统下载可复用 Skill 包</h3>
+              <p class="muted">固定包不含 token 或机器身份，可安全复制给多台同平台机器并行执行。Node 和软件依赖会自动下载安装。</p>
               <form id="machine-windows-skill-form" action="/api/settings/machines/skill?platform=windows-x64" method="post" data-machine-platform="windows-x64">
                 <button id="download-machine-windows-skill" type="submit" disabled>↓ Windows · setup-windows.ps1</button>
               </form>
@@ -197,29 +196,25 @@
               <details class="setup-help">
                 <summary>支持范围与安全说明</summary>
                 <p class="muted">支持原生 Windows x64、macOS 和 Linux x64，需联网准备依赖。网络与模型登录必须本人确认。Windows 服务仅在本人登录后运行，不安装 Linux 升级器；可达性使用真实 Workspace 健康检查。现有节点不需重新安装。</p>
-                <p class="muted">三平台均通过本人 GitHub 登录的私有 DevTunnel 主动连接，不需要节点的云资源管理权限。Windows/macOS 保留已有模型代理；Linux 使用独立安装。隧道令牌仅绑定本节点，模型登录另行完成。</p>
-                <p class="muted">每次下载预留一个七天有效的机器身份，尚不加入节点列表。包内含本次专属密钥，请勿分享。</p>
+                <p class="muted">三平台均通过本人 GitHub 登录的私有 DevTunnel 主动连接，不需要节点的云资源管理权限。Windows/macOS 保留已有模型代理；Linux 使用独立安装。客户端会独立随机生成每台机器的私密凭据，模型登录另行完成。</p>
+                <p class="muted">下载不会创建或刷新待配置身份。同一个固定 Skill 包可以复用分发，每台机器最终生成各自的私密注册文件。</p>
               </details>
             </div>
           </li>
           <li>
             <span class="step-number" aria-hidden="true">3</span>
             <div class="step-content">
-              <h3>验通并添加机器</h3>
-              <p class="muted">上传 Skill 生成的 <code>codey-machine.json</code>，不是 ZIP、SHA-256 或 enrollment。门户验证私有 DevTunnel、节点身份与 Workspace 后才加入列表；机器文件不含密钥或连接令牌。</p>
+              <h3>上传私密注册文件并添加机器</h3>
+              <p class="muted">上传 Skill 生成的 <code>codey-machine-registration.json</code>（最多 32 KB）。此文件含私密凭据，只能上传到当前 HTTPS Portal；不要通过聊天、邮件或日志传递，添加成功后立即删除。</p>
               <form id="add-prepared-machine-form" class="import-form">
-                <label>配置完成的机器文件<input id="prepared-machine-file" type="file" accept=".json,application/json" required /></label>
+                <label>私密机器注册文件<input id="prepared-machine-file" type="file" accept=".json,application/json" required /></label>
                 <button class="primary" type="submit">验通并添加机器</button>
               </form>
               <p id="machine-activation-message" role="status" aria-live="polite"></p>
             </div>
           </li>
         </ol>
-        <details id="pending-machine-details" class="secondary-details" hidden>
-          <summary>待配置身份 <span id="pending-machine-count" class="tab-count"></span></summary>
-          <div id="pending-machines"></div>
-        </details>
-        <p class="dialog-footnote">配置包含机器专属密钥，请仅在自己的机器上使用，不要分享。</p>
+        <p class="dialog-footnote">Skill 包可复用分发；每台机器生成的注册文件不可分享，且只应上传到当前 HTTPS Portal。</p>
       </dialog>
 
       <dialog id="enrollment" aria-labelledby="enrollment-title">

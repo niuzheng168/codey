@@ -7,9 +7,14 @@ const adminTabs = [...document.querySelectorAll("[data-admin-panel]")];
 const addNodeDialog = document.querySelector("#add-node");
 const enrollment = document.querySelector("#enrollment");
 const enrollmentValue = document.querySelector("#enrollment-value");
-const pendingMachinesRoot = document.querySelector("#pending-machines");
 const machineDownloadMessage = document.querySelector("#machine-download-message");
 const machineSkillButtons = new Map();
+const machineSkillFilenames = Object.freeze({
+  "linux-x64": "config-new-codey-machine.zip",
+  "windows-x64": "config-new-codey-machine-windows.zip",
+  "macos-arm64": "config-new-codey-machine-macos-arm64.zip",
+  "macos-x64": "config-new-codey-machine-macos-x64.zip",
+});
 let machineSkillDownloading = false;
 let settingsReady = false;
 let activePanel = "nodes";
@@ -98,10 +103,6 @@ for (const tab of adminTabs) {
 
 document.querySelector("#open-add-node").addEventListener("click", openAddNode);
 document.querySelector("#close-add-node").addEventListener("click", () => addNodeDialog.close());
-document.querySelector("#pending-machines-shortcut").addEventListener("click", () => {
-  openAddNode();
-  document.querySelector("#pending-machine-details").open = true;
-});
 addNodeDialog.addEventListener("close", () => {
   if (window.location.hash === "#add-node") window.history.replaceState(null, "", "#nodes");
   if (activePanel === "nodes") document.querySelector("#open-add-node").focus({ preventScroll: true });
@@ -314,43 +315,6 @@ async function load() {
           ? "复用本机模型代理" : `copilot-api ${entry.copilotApi}`}`
       : entry?.reason || `${label} 完整机器配置包尚未发布；不会使用其他平台的包代替。`;
   }
-  const pendingCount = result.pendingMachines?.length || 0;
-  document.querySelector("#pending-machine-details").hidden = !pendingCount;
-  document.querySelector("#pending-machine-count").textContent = String(pendingCount);
-  const pendingShortcut = document.querySelector("#pending-machines-shortcut");
-  pendingShortcut.hidden = !pendingCount;
-  pendingShortcut.textContent = `${pendingCount} 个待配置身份 · 继续添加或管理`;
-  pendingMachinesRoot.textContent = "";
-  for (const pending of result.pendingMachines ?? []) {
-    const row = element("div", null, "user-row pending-machine");
-    const platform = pending.platform ?? "linux-x64";
-    const available = setup?.platforms?.find((item) => item.platform === platform)
-      ?? (platform === "linux-x64" ? linuxSetup : null);
-    row.append(element("span", `${pending.id} · ${platform} · ${pending.expired ? "已过期" : "待配置，尚未添加"}`, "muted"));
-    const retryForm = element("form");
-    retryForm.action = `/api/settings/machines/${pending.id}/skill`;
-    retryForm.method = "post";
-    retryForm.dataset.machinePlatform = platform;
-    const retry = element("button", "重新下载此身份的 Skill");
-    retry.type = "submit";
-    machineSkillButtons.set(retry, !pending.expired && Boolean(available?.enabled));
-    retryForm.append(retry);
-    retryForm.addEventListener("submit", downloadMachineSkill);
-    row.append(retryForm);
-    const cancel = element("button", "取消此配置包", "danger");
-    cancel.type = "button";
-    cancel.addEventListener("click", () => {
-      if (!window.confirm("取消后，此配置包和已生成的机器文件将无法添加。不会停止目标机上的服务。")) return;
-      void operation(cancel, async () => {
-        await api(`/api/settings/machines/${pending.id}`, "DELETE");
-        await load();
-        notice("已取消待配置身份。");
-        machineDownloadNotice("已取消待配置身份。");
-      }, machineDownloadNotice);
-    });
-    row.append(cancel);
-    pendingMachinesRoot.append(row);
-  }
   updateMachineSkillButtons();
   adminTab.hidden = result.user.role !== "admin";
   if (adminTab.hidden && activePanel === "admin-section") activatePanel("nodes", true);
@@ -367,8 +331,7 @@ async function downloadMachineSkill(event) {
   const form = event.currentTarget;
   machineSkillDownloading = true;
   updateMachineSkillButtons();
-  machineDownloadNotice("正在下载完整配置包，请稍候。包内含本次机器的专属密钥，请勿分享。");
-  let refreshPending = true;
+  machineDownloadNotice("正在下载可复用 Skill 包。包内不含 token，可分发到多台同平台机器。");
   try {
     // Native POST navigation under no-referrer can have an opaque Origin.
     // Keep strict server-side CSRF checks and limit this request to our origin.
@@ -377,7 +340,6 @@ async function downloadMachineSkill(event) {
       redirect: "error", referrerPolicy: "same-origin", headers: { accept: "application/zip" },
     });
     if (response.status === 401) {
-      refreshPending = false;
       window.location.replace("/portal-auth/login");
       throw new Error("请重新登录后下载");
     }
@@ -385,22 +347,21 @@ async function downloadMachineSkill(event) {
       const result = await response.json().catch(() => null);
       throw new Error(result?.error || `HTTP ${response.status}`);
     }
-    const filename = response.headers.get("content-disposition")
-      ?.match(/^attachment;\s*filename="(config-new-codey-machine(?:-windows|-macos-arm64|-macos-x64)?-n-[a-f0-9]{24}\.zip)"$/i)?.[1];
     const selectedPlatform = form.dataset.machinePlatform || "linux-x64";
-    const expectedPrefix = selectedPlatform === "linux-x64" ? "config-new-codey-machine-n-"
-      : selectedPlatform === "windows-x64" ? "config-new-codey-machine-windows-n-"
-        : `config-new-codey-machine-${selectedPlatform}-n-`;
-    if (response.headers.get("content-type")?.split(";")[0].trim() !== "application/zip" || !filename) {
+    const filename = machineSkillFilenames[selectedPlatform];
+    const responseFilename = response.headers.get("content-disposition")
+      ?.match(/^attachment;\s*filename="([^"]+)"$/i)?.[1];
+    if (response.headers.get("content-type")?.split(";")[0].trim() !== "application/zip" || !filename ||
+        !responseFilename) {
       throw new Error("服务器未返回有效的 ZIP 配置包，请刷新页面后重试");
     }
-    if (!filename.startsWith(expectedPrefix)) {
-      throw new Error("服务器返回的配置包平台与所选系统不一致；不会安装其他平台的包");
+    if (responseFilename !== filename) {
+      throw new Error("服务器返回的配置包平台或文件名与所选系统不一致");
     }
     const blob = await response.blob();
     const length = response.headers.get("content-length");
     if (!blob.size || (length !== null && Number(length) !== blob.size)) {
-      throw new Error("配置包下载不完整，请重新下载此身份的 Skill");
+      throw new Error("配置包下载不完整，请重新下载 Skill");
     }
     const url = URL.createObjectURL(blob);
     const link = element("a");
@@ -414,19 +375,12 @@ async function downloadMachineSkill(event) {
       // Give the browser time to consume the Blob before releasing its memory.
       window.setTimeout(() => URL.revokeObjectURL(url), 60000);
     }
-    machineDownloadNotice(`已准备好 ${filename}，请在浏览器的下载列表中查看。包内含专属密钥，请勿分享。`);
+    machineDownloadNotice(`已准备好 ${filename}。包内不含 token，可复用并分发到多台同平台机器。`);
   } catch (error) {
-    machineDownloadNotice(`下载失败：${error.message}。若下方已有待配置身份，请使用“重新下载此身份的 Skill”重试。`, true);
+    machineDownloadNotice(`下载失败：${error.message}。请重试。`, true);
   } finally {
     machineSkillDownloading = false;
     updateMachineSkillButtons();
-    // Even an interrupted transfer may have reserved an identity. Show it so
-    // retrying does not silently consume another one of the user's four slots.
-    if (refreshPending) {
-      await load().catch((error) => machineDownloadNotice(
-        `${machineDownloadMessage.textContent} 待配置身份刷新失败：${error.message}，请刷新页面。`, true,
-      ));
-    }
   }
 }
 
@@ -440,18 +394,20 @@ document.querySelector("#add-prepared-machine-form").addEventListener("submit", 
   const form = event.currentTarget;
   void operation(form.querySelector("button"), async () => {
     const file = document.querySelector("#prepared-machine-file").files?.[0];
-    if (!file || file.size > 16384) throw new Error("请选择 Skill 生成的 codey-machine.json（不超过 16 KB）");
-    let machine;
-    try { machine = JSON.parse(await file.text()); }
-    catch { throw new Error("机器文件不是有效 JSON"); }
-    if (machine?.schema !== 1 || !/^n-[a-f0-9]{24}$/.test(machine.nodeId ?? "") ||
-        typeof machine.tlsCertificate !== "string" ||
-        (machine.networkMode === "devtunnel" ? typeof machine.devTunnel?.tunnelId !== "string" : typeof machine.privateIp !== "string") ||
-        ["clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey", "connectToken"].some(key => Object.hasOwn(machine, key))) {
-      throw new Error("请选择配置完成的机器文件，不是 enrollment 或校验值");
+    if (!file || file.name !== "codey-machine-registration.json" || file.size > 32 * 1024) {
+      throw new Error("请选择 Skill 生成的 codey-machine-registration.json（不超过 32 KB）");
     }
-    machineActivationNotice("正在从门户验证 VNet/DevTunnel、HTTPS、Usage/History、Workspace SSO 和 WebSocket…");
-    const { node, verification } = await api(`/api/settings/machines/${machine.nodeId}/activate`, "POST", machine);
+    let registration;
+    try { registration = JSON.parse(await file.text()); }
+    catch { throw new Error("注册文件不是有效 JSON"); }
+    const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+    if (registration?.schema !== 2 || !isRecord(registration.package) || !isRecord(registration.machine) ||
+        !isRecord(registration.credentials) || typeof registration.devTunnelConnectToken !== "string" ||
+        !registration.devTunnelConnectToken.trim()) {
+      throw new Error("请选择结构完整的 schema 2 机器注册文件");
+    }
+    machineActivationNotice("正在通过 HTTPS Portal 验证并添加机器。请勿关闭此页面…");
+    const { node, verification } = await api("/api/settings/machines/activate", "POST", registration);
     form.reset();
     await load();
     addNodeDialog.close();
@@ -459,7 +415,7 @@ document.querySelector("#add-prepared-machine-form").addEventListener("submit", 
     const usageMessage = verification?.usage === false
       ? "Copilot 配额暂不可用；本地 Token 统计、History、Workspace SSO 已验通。"
       : "用量、History、Workspace SSO 已验通。";
-    notice(`机器已验通并添加：${node.name}。${usageMessage}模型推理仍需单独验收；保留本人现有 provider 登录。`);
+    notice(`机器已验通并添加：${node.name}。${usageMessage}模型推理仍需单独验收；保留本人现有 provider 登录。请立即删除 codey-machine-registration.json。`);
   }, machineActivationNotice);
 });
 

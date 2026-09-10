@@ -48,7 +48,7 @@ function requestTransport(url) {
   return url.protocol === "https:" ? https : http;
 }
 
-function forwardedRequestHeaders(req, node, { websocket = false, ssoMaster, target } = {}) {
+function forwardedRequestHeaders(req, node, { websocket = false, workspace, target } = {}) {
   const headers = {};
   for (const [name, value] of Object.entries(req.headers)) {
     const normalized = name.toLowerCase();
@@ -60,7 +60,7 @@ function forwardedRequestHeaders(req, node, { websocket = false, ssoMaster, targ
       normalized.startsWith("x-ms-client-principal") ||
       normalized.startsWith("x-forwarded-") ||
       normalized === "forwarded" ||
-      (ssoMaster && normalized === "authorization") ||
+      (workspace && normalized === "authorization") ||
       (!websocket && HOP_BY_HOP_HEADERS.has(normalized))
     ) {
       continue;
@@ -72,11 +72,14 @@ function forwardedRequestHeaders(req, node, { websocket = false, ssoMaster, targ
   headers["x-forwarded-prefix"] = node.basePath;
   headers["x-forwarded-proto"] =
     "https";
-  if (ssoMaster) {
+  if (workspace) {
     headers["x-codey-workspace-assertion"] = issueWorkspaceAssertion({
-      master: ssoMaster,
+      master: workspace.master,
+      signingKey: workspace.key,
       nodeId: node.id,
       principal: req.codeyPrincipal,
+      subject: workspace.subject,
+      username: workspace.username,
       method: req.method,
       target,
     });
@@ -257,6 +260,13 @@ export class CloudCliGateway {
     return options;
   }
 
+  async workspaceBinding(req, node) {
+    if (typeof node.getWorkspaceBinding === "function") {
+      return node.getWorkspaceBinding(req.codeyPrincipal);
+    }
+    return this.config.ssoMaster ? { master: this.config.ssoMaster } : null;
+  }
+
   async close() {
     await Promise.allSettled([...this.tunnelTransports.values()].map(transport => transport.dispose()));
     this.tunnelTransports.clear();
@@ -361,20 +371,27 @@ export class CloudCliGateway {
     const target = new URL(node.upstream);
     target.pathname = requestUrl.pathname.slice(node.basePath.length) || "/";
     target.search = requestUrl.search;
-    if (this.config.ssoMaster) target.searchParams.delete("token");
+    let workspace;
+    try {
+      workspace = await this.workspaceBinding(req, node);
+    } catch {
+      sendProxyError(res, 403, "This CloudCLI node is not assigned to the current user");
+      return true;
+    }
+    if (workspace) target.searchParams.delete("token");
 
     await new Promise((resolve) => {
       const upstreamRequest = requestTransport(target).request(
         target,
         {
-          headers: forwardedRequestHeaders(req, node, { ssoMaster: this.config.ssoMaster, target }),
+          headers: forwardedRequestHeaders(req, node, { workspace, target }),
           method: req.method,
           ...this.upstreamOptions(node),
         },
         (upstreamResponse) => {
           res.writeHead(
             upstreamResponse.statusCode ?? 502,
-            forwardedResponseHeaders(upstreamResponse.headers, node, Boolean(this.config.ssoMaster)),
+            forwardedResponseHeaders(upstreamResponse.headers, node, Boolean(workspace)),
           );
           upstreamResponse.pipe(res);
           upstreamResponse.once("end", () => { cleanup(); resolve(); });
@@ -439,9 +456,16 @@ export class CloudCliGateway {
       const target = new URL(node.upstream);
       target.pathname = requestUrl.pathname.slice(node.basePath.length) || "/";
       target.search = requestUrl.search;
-      if (this.config.ssoMaster) target.searchParams.delete("token");
+      let workspace;
+      try {
+        workspace = await this.workspaceBinding(req, node);
+      } catch {
+        closeUpgradeSocket(socket, 403, "Forbidden");
+        return;
+      }
+      if (workspace) target.searchParams.delete("token");
       const upstreamRequest = requestTransport(target).request(target, {
-        headers: forwardedRequestHeaders(req, node, { websocket: true, ssoMaster: this.config.ssoMaster, target }),
+        headers: forwardedRequestHeaders(req, node, { websocket: true, workspace, target }),
         method: req.method,
         ...this.upstreamOptions(node),
       });

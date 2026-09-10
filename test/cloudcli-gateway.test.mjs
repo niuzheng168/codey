@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { readFileSync } from "node:fs";
+import { createHmac, randomBytes } from "node:crypto";
 import http from "node:http";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
@@ -151,6 +152,56 @@ test("CloudCLI HTTP proxy strips the node prefix and does not forward portal coo
     forwardedPrefix: "/cloudcli/zhn-a100",
     url: "/api/auth/login?source=codey",
   });
+});
+
+test("client-generated machine Workspace keys sign the local binding without exposing the portal owner id", async (t) => {
+  const key = randomBytes(32).toString("base64url");
+  const binding = {
+    key,
+    subject: `m-${randomBytes(12).toString("hex")}`,
+    username: "localowner",
+  };
+  let assertion;
+  const upstream = http.createServer((req, res) => {
+    assertion = req.headers["x-codey-workspace-assertion"];
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end('{"ok":true}');
+  });
+  const upstreamUrl = await listen(upstream);
+  t.after(() => upstream.close());
+  const gateway = new CloudCliGateway({ nodes: [] });
+  gateway.setMachineNodes([{
+    basePath: "/cloudcli/n-" + "a".repeat(24),
+    id: "n-" + "a".repeat(24),
+    name: "Imported",
+    region: "Test",
+    upstream: new URL(upstreamUrl),
+    getWorkspaceBinding: async (principal) => {
+      assert.equal(principal.id, "portal-owner");
+      return binding;
+    },
+  }]);
+  const principal = {
+    id: "portal-owner",
+    name: "portalname",
+    sessionId: randomBytes(32).toString("hex"),
+    expiresAt: Date.now() + 60000,
+  };
+  const portal = http.createServer((req, res) => {
+    req.codeyPrincipal = principal;
+    void gateway.proxyHttp(req, res, [gateway.machineNodes[0].id]);
+  });
+  const portalUrl = await listen(portal);
+  t.after(() => portal.close());
+  const response = await fetch(`${portalUrl}${gateway.machineNodes[0].basePath}/api/auth/status`);
+  assert.equal(response.status, 200);
+  const [payload, signature] = assertion.split(".");
+  assert.equal(createHmac("sha256", Buffer.from(key, "base64url")).update(payload).digest("base64url"), signature);
+  const claims = JSON.parse(Buffer.from(payload, "base64url"));
+  assert.equal(claims.sub, binding.subject);
+  assert.equal(claims.username, binding.username);
+  assert.notEqual(claims.sub, principal.id);
+  assert.notEqual(claims.username, principal.name);
 });
 
 test("CloudCLI WebSocket proxy authorizes the node and tunnels the upgrade", async (t) => {

@@ -8,15 +8,25 @@ export function workspaceNodeKey(master, nodeId) {
 }
 
 /** Creates a short-lived, request-bound assertion that is NEVER sent to the browser. */
-export function issueWorkspaceAssertion({ master, nodeId, principal, method, target, now = Date.now() }) {
+export function issueWorkspaceAssertion({
+  master, signingKey, nodeId, principal, subject, username, method, target, now = Date.now(),
+}) {
   if (!principal?.id || !principal?.sessionId || principal.expiresAt <= now) {
     throw new Error("An active portal session is required");
+  }
+  const key = signingKey ?? workspaceNodeKey(master, nodeId);
+  const assertionSubject = subject ?? principal.id;
+  const assertionUsername = username ?? principal.name;
+  if (!/^[A-Za-z0-9._:@-]{1,256}$/.test(assertionSubject ?? "") ||
+      !/^[a-z][a-z0-9_-]{0,31}$/.test(assertionUsername ?? "") ||
+      !/^[A-Za-z0-9_-]{43}$/.test(key ?? "")) {
+    throw new Error("Invalid Workspace SSO binding");
   }
   const payload = Buffer.from(JSON.stringify({
     iss: "codey-portal",
     aud: nodeId,
-    sub: principal.id,
-    username: principal.name,
+    sub: assertionSubject,
+    username: assertionUsername,
     sid: principal.sessionId,
     method: method.toUpperCase(),
     path: `${target.pathname}${target.search}`,
@@ -24,7 +34,7 @@ export function issueWorkspaceAssertion({ master, nodeId, principal, method, tar
     exp: Math.min(Math.floor(now / 1000) + 20, Math.floor(principal.expiresAt / 1000)),
     nonce: randomBytes(16).toString("base64url"),
   })).toString("base64url");
-  const signature = createHmac("sha256", Buffer.from(workspaceNodeKey(master, nodeId), "base64url"))
+  const signature = createHmac("sha256", Buffer.from(key, "base64url"))
     .update(payload).digest("base64url");
   return `${payload}.${signature}`;
 }

@@ -1,34 +1,19 @@
-"""Validate the personalized Windows source bundle, not tunnel operations."""
+"""Validate the static Windows source bundle, not tunnel operations."""
 import hashlib
 import re
-import time
 
 from ...common.errors import TunnelError
-from ...devtunnel.binding import NODE_ID
-from ...devtunnel.renewal import exact_origin
+from ...common import registration
 
 
-def validate_bundle(enrollment, manifest, *, ready=False, now=None):
-    now = time.time() * 1000 if now is None else now
-    if (enrollment.get("schema") != 1 or not NODE_ID.fullmatch(enrollment.get("nodeId", ""))
-            or enrollment.get("platform") != "windows-x64"
-            or manifest.get("schema") != 1 or manifest.get("platform") != "windows-x64"
-            or enrollment.get("releaseId") != manifest.get("releaseId")
-            or enrollment.get("network") != {"mode": "devtunnel"}):
-        raise TunnelError("personalized_windows_tunnel_package_required")
-    if not ready and enrollment.get("expiresAt", 0) <= now:
-        raise TunnelError("enrollment_expired")
-    if enrollment.get("tunnelAuthProvider", "github") != "github":
-        raise TunnelError("github_tunnel_authentication_required")
-    if (not re.fullmatch(r"[a-z0-9-]{1,80}", enrollment.get("principalId", ""))
-            or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", enrollment.get("username", ""))):
-        raise TunnelError("invalid_node_owner")
-    for key in ("clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey"):
-        if not re.fullmatch(r"[A-Za-z0-9_-]{43}", enrollment.get(key, "")):
-            raise TunnelError("node_specific_credentials_required")
-    if len({enrollment[key] for key in ("clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey")}) != 3:
-        raise TunnelError("credentials_must_be_purpose_separated")
-    exact_origin(enrollment.get("portalOrigin", ""))
+def validate_bundle(setup, manifest, *, now=None):
+    try:
+        registration.validate_setup(setup, "windows-x64", now=now)
+    except registration.SetupError as error:
+        raise TunnelError(str(error)) from None
+    if (manifest.get("schema") != 1 or manifest.get("platform") != "windows-x64"
+            or setup.get("releaseId") != manifest.get("releaseId")):
+        raise TunnelError("static_windows_package_release_mismatch")
     version, bun = manifest.get("node", ""), manifest.get("bunBuildTool", "")
     if not all(re.fullmatch(r"\d+\.\d+\.\d+", value) for value in (version, bun)):
         raise TunnelError("pinned_runtime_required")

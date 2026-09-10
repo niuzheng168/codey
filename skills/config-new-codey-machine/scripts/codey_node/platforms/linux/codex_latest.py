@@ -13,6 +13,7 @@ import urllib.request
 from ...common.config_files import Owner
 from ...common.errors import SetupError
 from ...common.files import protected_write
+from ...common import model_test
 from . import codex_process
 
 
@@ -34,28 +35,8 @@ def wrapper(codex, codex_home, provider_env):
 
 
 def test_model(executable, codex_home, key, home):
-    environment = {
-        **os.environ,
-        "HOME": str(home),
-        "CODEX_HOME": str(codex_home),
-        "CODEY_MODEL_API_KEY": key,
-        "PATH": str(Path(executable).parent) + os.pathsep + os.environ.get("PATH", ""),
-    }
-    marker = "CODEY_INSTALL_OK"
-    try:
-        result = subprocess.run(
-            [str(executable), "exec", "--skip-git-repo-check", f"Reply with only {marker}"],
-            cwd=home, env=environment, stdin=subprocess.DEVNULL,
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
-        )
-    except (OSError, subprocess.SubprocessError):
-        raise SetupError("Codex real model test could not be completed") from None
-    output = (result.stdout or "") + (result.stderr or "")
-    if result.returncode or marker not in output:
-        log = Path(home) / ".config/codey-machine/codex-model-test.log"
-        protected_write(log, output)
-        raise SetupError(f"Codex real model test failed; protected diagnostic: {log}")
-    return {"marker": marker, "passed": True}
+    log = Path(home) / ".config/codey-machine/codex-model-test.log"
+    return model_test.codex(executable, codex_home, key, home, log)
 
 
 def _version(executable):

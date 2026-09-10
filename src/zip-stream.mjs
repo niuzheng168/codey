@@ -12,7 +12,7 @@ export function updateCrc(crc, bytes) {
 export const crc32 = (bytes) => (updateCrc(0xffffffff, bytes) ^ 0xffffffff) >>> 0;
 
 // STORE entries let an already compressed runtime tarball stream with bounded
-// memory. Personalized enrollment bytes never need a temporary file on Portal.
+// memory. Static package metadata never needs a temporary file on Portal.
 export function zipStream(entries) {
   if (!entries.length || entries.length > 100) throw new Error("Invalid ZIP entry count");
   const seen = new Set();

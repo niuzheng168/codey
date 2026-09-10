@@ -14,9 +14,12 @@ UNITS = (
 )
 
 
-def install(source, runner):
-    source = Path(source)
-    config = source / "config.json"
+def install(source, config, runner):
+    source, config = Path(source), Path(config)
+    if (source / "config.json").exists() or (source / "config.json").is_symlink():
+        raise SetupError("Legacy bundled updater config is forbidden")
+    if not config.is_file() or config.is_symlink() or config.resolve().is_relative_to(source.resolve()):
+        raise SetupError("Updater config must be generated in this owner's private local state")
     config.chmod(0o600)
     runner([sys.executable, source / "install.py", "--config", config, "--apply"])
     result = {}

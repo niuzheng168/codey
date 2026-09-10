@@ -6,8 +6,19 @@ import { settingsDom } from "./helpers/settings-dom.mjs";
 
 const source = await readFile(new URL("../public/settings.js", import.meta.url), "utf8");
 const nodeId = `n-${"a".repeat(24)}`;
-const filename = `config-new-codey-machine-${nodeId}.zip`;
+const filename = "config-new-codey-machine.zip";
 const endpoint = "/api/settings/machines/skill";
+const privateToken = "private-connect-token-must-not-appear-in-notices";
+
+function registration(platform = "linux-x64") {
+  return {
+    schema: 2,
+    package: { platform, releaseId: "release-fixture" },
+    machine: { nodeId, tlsCertificate: "public certificate fixture" },
+    credentials: { clientSigningKey: "private-signing-key", workspaceSsoKey: "private-sso-key" },
+    devTunnelConnectToken: privateToken,
+  };
+}
 
 function archiveResponse({ type = "application/zip", body = "PK\u0003\u0004test archive", length, name = filename } = {}) {
   return new Response(body, {
@@ -88,8 +99,8 @@ test("machine skill submits an authenticated same-origin POST without navigating
   assert.deepEqual(p.downloads, [{ href: "blob:test-download", download: filename }]);
   assert.equal(await p.objectUrls[0].text(), "PK\u0003\u0004test archive");
   assert.equal(p.button.disabled, false);
-  assert.equal(p.settingsRequests, 2, "Refresh pending identities only after the response");
-  assert.match(p.elements.get("#machine-download-message").textContent, /浏览器.*下载/);
+  assert.equal(p.settingsRequests, 1, "A static download must not create or refresh pending identities");
+  assert.match(p.elements.get("#machine-download-message").textContent, /不含 token.*复用/);
   assert.equal(p.revoked.length, 0, "Do not revoke before the browser consumes the download");
   assert.equal(p.timers.length, 1);
   assert.ok(p.timers[0].delay >= 1000);
@@ -103,7 +114,7 @@ test("Windows has its own download action and filename; unpublished Mac packages
     { ...entry, platform: "windows-x64" }, { ...entry, platform: "linux-x64" },
     { platform: "macos-arm64", enabled: false }, { platform: "macos-x64", enabled: false },
   ] };
-  const windowsName = `config-new-codey-machine-windows-${nodeId}.zip`;
+  const windowsName = "config-new-codey-machine-windows.zip";
   const p = await page({ machineSetup, download: async () => archiveResponse({ name: windowsName }) });
   assert.equal(p.elements.get("#download-machine-windows-skill").disabled, false);
   assert.equal(p.elements.get("#download-machine-macos-skill").disabled, true);
@@ -124,13 +135,13 @@ test("each published Mac architecture has a native download and rejects the othe
   for (const [platform, selector] of [
     ["macos-arm64", "#machine-macos-skill-form"], ["macos-x64", "#machine-macos-intel-skill-form"],
   ]) {
-    const name = `config-new-codey-machine-${platform}-${nodeId}.zip`;
+    const name = `config-new-codey-machine-${platform}.zip`;
     const p = await page({ machineSetup, download: async () => archiveResponse({ name }) });
     await p.submit(p.elements.get(selector)).finished;
     assert.equal(p.requests[0].url, `${endpoint}?platform=${platform}`);
     assert.equal(p.downloads[0].download, name);
     const wrong = await page({ machineSetup, download: async () => archiveResponse({
-      name: `config-new-codey-machine-${platform === "macos-arm64" ? "macos-x64" : "macos-arm64"}-${nodeId}.zip`,
+      name: `config-new-codey-machine-${platform === "macos-arm64" ? "macos-x64" : "macos-arm64"}.zip`,
     }) });
     await wrong.submit(wrong.elements.get(selector)).finished;
     assert.equal(wrong.downloads.length, 0);
@@ -138,36 +149,38 @@ test("each published Mac architecture has a native download and rejects the othe
   }
 });
 
-test("re-downloading a pending identity uses the same handler and disables all download buttons in flight", async () => {
+test("static downloads ignore legacy pending identities and disable all download buttons in flight", async () => {
   let finish;
   const gate = new Promise((resolve) => { finish = resolve; });
   const p = await page({ pending: [{ id: nodeId, expired: false }], download: () => gate });
-  const row = p.elements.get("#pending-machines").children[0];
-  const retryForm = row.children.find((child) => child.tag === "form");
-  const retryButton = retryForm.querySelector("button");
-  const retry = p.submit(retryForm);
+  assert.equal(p.elements.has("#pending-machines"), false);
+  const retry = p.submit();
   assert.equal(retry.event.defaultPrevented, true);
   assert.equal(p.button.disabled, true);
-  assert.equal(retryButton.disabled, true);
+  assert.equal(p.elements.get("#download-machine-windows-skill").disabled, true);
+  assert.equal(p.elements.get("#download-machine-macos-skill").disabled, true);
+  assert.equal(p.elements.get("#download-machine-macos-intel-skill").disabled, true);
   const duplicate = p.submit();
   assert.equal(duplicate.event.defaultPrevented, true);
-  assert.equal(p.requests.length, 1, "Double-clicking must not reserve another identity");
-  assert.equal(p.requests[0].url, `/api/settings/machines/${nodeId}/skill`);
+  assert.equal(p.requests.length, 1, "Double-clicking must not start another transfer");
+  assert.equal(p.requests[0].url, endpoint);
   finish(archiveResponse());
   await Promise.all([retry.finished, duplicate.finished]);
   assert.equal(p.downloads.length, 1);
   assert.equal(p.button.disabled, false);
+  assert.equal(p.settingsRequests, 1);
 });
 
-test("expired pending identities stay disabled after a download completes", async () => {
-  const p = await page({ pending: [{ id: nodeId, expired: true }] });
+test("the same static package can be downloaded repeatedly without refreshing machine identity state", async () => {
+  const p = await page();
   await p.submit().finished;
-  const row = p.elements.get("#pending-machines").children.at(-1);
-  const retryForm = row.children.find((child) => child.tag === "form");
-  assert.equal(retryForm.querySelector("button").disabled, true);
+  await p.submit().finished;
+  assert.deepEqual(p.downloads.map((item) => item.download), [filename, filename]);
+  assert.equal(p.requests.length, 2);
+  assert.equal(p.settingsRequests, 1);
 });
 
-test("download failures stay on the settings page, show the error, refresh pending identities and permit retry", async () => {
+test("download failures stay on the settings page, show the error and permit retry without identity refresh", async () => {
   for (const [name, download, expected] of [
     ["origin", async () => new Response(JSON.stringify({ error: "Cross-origin operations are not allowed" }), { status: 403 }), /Cross-origin/],
     ["capacity", async () => new Response(JSON.stringify({ error: "待配置身份已达上限" }), { status: 409 }), /待配置身份已达上限/],
@@ -183,7 +196,7 @@ test("download failures stay on the settings page, show the error, refresh pendi
     await submission.finished;
     assert.deepEqual(p.downloads, [], name);
     assert.equal(p.button.disabled, false, name);
-    assert.equal(p.settingsRequests, 2, name);
+    assert.equal(p.settingsRequests, 1, name);
     assert.deepEqual(p.redirects, [], name);
     assert.match(p.elements.get("#machine-download-message").textContent, expected, name);
   }
@@ -203,6 +216,9 @@ test("the settings page has a visible, accessible download status next to the en
   assert.match(html, /id="machine-download-message"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.ok(html.indexOf('id="machine-download-message"') > html.indexOf('id="machine-skill-form"'));
   assert.ok(html.indexOf('id="machine-download-message"') < html.indexOf('id="add-prepared-machine-form"'));
+  assert.match(html, /固定包不含 token[^<]*多台同平台机器/);
+  assert.match(html, /codey-machine-registration\.json<\/code>（最多 32 KB）/);
+  assert.match(html, /含私密凭据[^<]*HTTPS Portal[^<]*立即删除/);
 });
 
 test("adding a node with unavailable quota shows the warning and never claims model inference was verified", async () => {
@@ -210,20 +226,24 @@ test("adding a node with unavailable quota shows the warning and never claims mo
     const p = await page({ download: async () => new Response(JSON.stringify({
       node: { name: "Windows Dev Box" }, verification: { usage, tokenUsage: true },
     }), { status: 201, headers: { "content-type": "application/json" } }) });
-    p.elements.get("#prepared-machine-file").files = [{ size: 500, text: async () => JSON.stringify({
-      schema: 1, nodeId, tlsCertificate: "public certificate fixture",
-      networkMode: "devtunnel", devTunnel: { tunnelId: "fixture" },
-    }) }];
+    const payload = registration();
+    p.elements.get("#prepared-machine-file").files = [{
+      name: "codey-machine-registration.json", size: 500, text: async () => JSON.stringify(payload),
+    }];
     const form = p.elements.get("#add-prepared-machine-form");
     p.submit(form);
     for (let attempt = 0; attempt < 20 && form.querySelector("button").disabled; attempt++) {
       await new Promise(setImmediate);
     }
     assert.equal(form.querySelector("button").disabled, false);
-    assert.equal(p.requests[0].url, `/api/settings/machines/${nodeId}/activate`);
+    assert.equal(p.requests[0].url, "/api/settings/machines/activate");
+    assert.deepEqual(p.requests[0].options.body, JSON.stringify(payload));
     const notice = p.elements.get("#settings-message").textContent;
     assert.match(notice, /机器已验通并添加/);
     assert.match(notice, /模型推理仍需单独验收/);
+    assert.match(notice, /立即删除 codey-machine-registration\.json/);
+    assert.doesNotMatch(notice, new RegExp(privateToken));
+    assert.doesNotMatch(p.elements.get("#machine-activation-message").textContent, new RegExp(privateToken));
     if (usage) assert.doesNotMatch(notice, /配额暂不可用/);
     else {
       assert.match(notice, /Copilot 配额暂不可用/);

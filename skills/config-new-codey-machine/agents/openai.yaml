@@ -1,4 +1,4 @@
 interface:
   display_name: "Config new Codey machine"
-  short_description: "五步覆盖安装并配置更新守护"
-  default_prompt: "使用 $config-new-codey-machine。在 Linux 目标普通用户下直接运行 bash scripts/setup-linux.sh --apply，严格按五步完成：GitHub DevTunnel；覆盖安装、登录并测试 copilot-api；停止旧 Codex 并用官方 installer 更新到 latest、写配置和真实测试；覆盖安装并测试 CloudCLI；安装独立 updater、启用所有 systemd 守护和 owner linger。保留 Home、.codex、auth 和 sessions。"
+  short_description: "静态无密钥包生成本机注册文件"
+  default_prompt: "使用 $config-new-codey-machine。在 Linux、Windows 或 macOS 的目标普通用户下运行对应原生入口；从 assets/setup.json 校验发布，本机生成并安全复用独立注册凭据，配置 GitHub DevTunnel 和平台原生守护，输出到 owner Home 的私密 codey-machine-registration.json。Skill 目录不得产生私密文件，不使用或兼容 enrollment.json；Copilot 配额不等于聊天健康，真实模型请求必须单独通过。"

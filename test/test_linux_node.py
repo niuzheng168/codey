@@ -1,4 +1,6 @@
 """Native Linux onboarding tests; all cloud, login and service mutations are mocked."""
+import base64
+from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import hashlib
 import io
@@ -9,7 +11,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import tomllib
 from types import SimpleNamespace
 import unittest
@@ -24,10 +25,14 @@ from codey_node.platforms.linux import install as installer  # noqa: E402
 from codey_node.platforms.linux import codex_process, login  # noqa: E402
 from codey_node.devtunnel import auth, binding as tunnels, renewal  # noqa: E402
 from codey_node.common.errors import SetupError, TunnelError  # noqa: E402
-from codey_node.common import config_defaults  # noqa: E402
+from codey_node.common import config_defaults, registration  # noqa: E402
 from codey_node.service.launcher import runtime_files  # noqa: E402
 
 ID = "n-" + "a" * 24
+
+
+def key(value):
+    return base64.urlsafe_b64encode(bytes([value]) * 32).decode().rstrip("=")
 
 
 def fixture(root):
@@ -43,12 +48,12 @@ def fixture(root):
         target = skill / "scripts" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes((SCRIPTS / relative).read_bytes())
-    enrollment = {
-        "schema": 1, "nodeId": ID, "principalId": "owner-test", "username": "alice",
+    identity = {
+        "nodeId": ID, "workspaceSubject": "m-" + "f" * 24, "workspaceUsername": "alice",
         "platform": "linux-x64", "portalOrigin": "https://codey.example.test",
-        "expiresAt": int(time.time() * 1000) + 86400000,
         "network": {"mode": "devtunnel"}, "tunnelAuthProvider": "github",
-        "clientSigningKey": "a" * 43, "workspaceSsoKey": "b" * 43, "tunnelUpdateKey": "c" * 43,
+        "clientSigningKey": key(1), "workspaceSsoKey": key(2),
+        "tunnelUpdateKey": key(3), "updaterCredential": key(4),
     }
     manifest = {
         "schema": 1, "platform": "linux-x64", "node": "24.20.0", "bunBuildTool": "1.4.2",
@@ -63,17 +68,20 @@ def fixture(root):
         data = b"non-deployable unit-test source fixture"
         (assets / name).write_bytes(data)
         manifest["artifacts"].append({"file": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
-    identity = "\n".join([manifest["node"], manifest["bunBuildTool"], "d" * 64] +
-                         [item["sha256"] for item in manifest["artifacts"]])
-    manifest["releaseId"] = enrollment["releaseId"] = "machine-" + hashlib.sha256(identity.encode()).hexdigest()[:16]
-    (assets / "enrollment.json").write_text(json.dumps(enrollment))
+    release_identity = "\n".join([manifest["node"], manifest["bunBuildTool"], "d" * 64] +
+                                 [item["sha256"] for item in manifest["artifacts"]])
+    manifest["releaseId"] = "machine-" + hashlib.sha256(release_identity.encode()).hexdigest()[:16]
+    setup = {
+        "schema": 1, "portalOrigin": "https://codey.example.test",
+        "releaseId": manifest["releaseId"], "platform": "linux-x64",
+        "network": {"mode": "devtunnel"}, "tunnelAuthProvider": "github",
+        "updater": {"protocol": 1, "releasePublicKey": "PUBLIC RELEASE KEY FIXTURE"},
+    }
+    identity["releaseId"] = manifest["releaseId"]
+    (assets / "setup.json").write_text(json.dumps(setup))
     (assets / "manifest.json").write_text(json.dumps(manifest))
     updater = assets / "codey-updater"
     updater.mkdir()
-    (updater / "config.json").write_text(json.dumps({
-        "nodeId": ID, "ownerId": "owner-test", "username": "alice", "portalOrigin": enrollment["portalOrigin"],
-        "protocol": 1, "credential": "e" * 43,
-    }))
     for name in ("install.py", "updater.py", "engine.py", "probe.mjs", "UPGRADE.md"):
         (updater / name).write_text("non-deployable fixture")
     executable = home / "devtunnel"
@@ -86,12 +94,11 @@ def fixture(root):
     codex_home.mkdir()
     (codex_home / "config.toml").write_text('model = "previous"\n[mcp_servers.keep]\ncommand = "preserve"\n')
     (codex_home / "auth.json").write_text('{"credential":"preserve-model-login-fixture"}')
-    args = installer.arguments(["--enrollment", str(assets / "enrollment.json"),
-                                "--out", str(root / "machine.json"), "--devtunnel-bin", str(executable),
+    args = installer.arguments(["--out", str(root / "registration.json"), "--devtunnel-bin", str(executable),
                                 "--codex-bin", str(codex), "--codex-home", str(codex_home)])
     network = {"schema": 1, "nodeId": ID, "networkMode": "devtunnel", "listenIp": "127.0.0.1"}
     return SimpleNamespace(skill=skill, home=home, args=args, manifest=manifest,
-                           enrollment=enrollment, network=network, executable=executable)
+                           setup=setup, identity=identity, network=network, executable=executable)
 
 
 class LinuxContractTests(unittest.TestCase):
@@ -99,43 +106,165 @@ class LinuxContractTests(unittest.TestCase):
         args = installer.arguments([])
         self.assertFalse(args.apply)
         self.assertFalse(hasattr(args, "network_file"))
+        self.assertFalse(hasattr(args, "enrollment"))
+        self.assertEqual(Path(args.out).name, "codey-machine-registration.json")
+        self.assertEqual(Path(args.out).parent, Path.home())
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             installer.arguments(["--network-file", "must-not-be-consumed"])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            installer.arguments(["--enrollment", "legacy-must-not-be-consumed"])
 
-    def test_only_native_loopback_github_identity_and_separate_keys_are_accepted(self):
+    def test_static_setup_is_exact_and_matches_the_runtime_release(self):
         with tempfile.TemporaryDirectory() as directory:
             f = fixture(Path(directory))
-            self.assertEqual(len(installer.validate_inputs(f.enrollment, f.manifest, f.network)), 2)
-            for changes in ({"network": {"portalSubnetId": "not-consumed"}},
-                            {"tunnelAuthProvider": "microsoft"}, {"platform": "windows-x64"},
-                            {"tunnelUpdateKey": f.enrollment["clientSigningKey"]}, {"expiresAt": 0}):
-                with self.subTest(changes=changes), self.assertRaises(installer.SetupError):
-                    installer.validate_inputs({**f.enrollment, **changes}, f.manifest, f.network)
-            for changes in ({"listenIp": "0.0.0.0"}, {"listenIp": "10.0.0.7"}, {"networkMode": "private-link"}):
-                with self.assertRaises(installer.SetupError):
-                    installer.validate_inputs(f.enrollment, f.manifest, {**f.network, **changes})
-            installer.validate_inputs({**f.enrollment, "expiresAt": 0}, f.manifest, f.network, ready=True)
+            self.assertEqual(registration.load_setup(f.skill, "linux-x64"), f.setup)
+            self.assertEqual(len(installer.validate_inputs(f.setup, f.manifest)), 2)
+            setup_file = f.skill / "assets/setup.json"
+            for changes in (
+                {"network": {"mode": "vnet"}},
+                {"tunnelAuthProvider": "microsoft"},
+                {"platform": "windows-x64"},
+                {"nodeId": ID},
+                {"updater": {"protocol": 1}},
+            ):
+                with self.subTest(changes=changes):
+                    setup_file.write_text(json.dumps({**f.setup, **changes}))
+                    with self.assertRaises(SetupError):
+                        registration.load_setup(f.skill, "linux-x64")
+            setup_file.write_text(json.dumps(f.setup))
+            with self.assertRaises(SetupError):
+                installer.validate_inputs(
+                    {**f.setup, "releaseId": "machine-" + "0" * 16}, f.manifest,
+                )
+
+    def test_legacy_personalized_assets_are_rejected_even_when_setup_exists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = fixture(Path(directory))
+            for relative in ("enrollment.json", "codey-updater/config.json"):
+                with self.subTest(relative=relative):
+                    file = f.skill / "assets" / relative
+                    file.parent.mkdir(parents=True, exist_ok=True)
+                    file.write_text('{"legacy":"secret"}')
+                    with self.assertRaisesRegex(SetupError, "Legacy personalized package rejected"):
+                        registration.load_setup(f.skill, "linux-x64")
+                    file.unlink()
+
+    def test_local_credentials_are_random_distinct_private_and_stable_for_rerun(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = fixture(Path(directory))
+            first = registration.load_or_create(f.home, f.setup, username="alice")
+            second = registration.load_or_create(f.home, f.setup, username="alice")
+            self.assertEqual(first, second)
+            self.assertRegex(first["nodeId"], r"^n-[a-f0-9]{24}$")
+            self.assertRegex(first["workspaceSubject"], r"^m-[a-f0-9]{24}$")
+            self.assertEqual(first["workspaceUsername"], "alice")
+            keys = [first[name] for name in registration.KEY_NAMES]
+            self.assertEqual(len(set(keys)), 4)
+            for key in keys:
+                self.assertRegex(key, r"^[A-Za-z0-9_-]{43}$")
+            private = registration.state_path(f.home, f.setup)
+            self.assertTrue(private.is_file())
+            if os.name == "posix":
+                self.assertEqual(private.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(private.parent.stat().st_mode & 0o777, 0o700)
+            other = f.home.parent / "other-home"
+            other.mkdir()
+            third = registration.load_or_create(other, f.setup, username="alice")
+            self.assertNotEqual(first["nodeId"], third["nodeId"])
+            self.assertTrue(set(keys).isdisjoint(third[name] for name in registration.KEY_NAMES))
+
+    def test_concurrent_identity_creation_converges_on_one_complete_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = fixture(Path(directory))
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                identities = list(executor.map(
+                    lambda _: registration.load_or_create(f.home, f.setup, username="alice"),
+                    range(16),
+                ))
+            self.assertTrue(all(identity == identities[0] for identity in identities))
+            self.assertEqual(registration.existing(f.home, f.setup), identities[0])
+            self.assertFalse(list(registration.state_path(f.home, f.setup).parent.glob("*.next")))
+
+    @unittest.skipIf(os.name == "nt", "Windows symlink creation requires optional privileges")
+    def test_local_identity_state_cannot_escape_home_through_an_ancestor_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = fixture(Path(directory))
+            outside = f.home.parent / "outside-state"
+            outside.mkdir()
+            (f.home / ".local").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(SetupError, "inside the owner Home"):
+                registration.load_or_create(f.home, f.setup, username="alice")
+
+    def test_portal_username_rule_is_enforced_for_all_platforms(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for platform_name in ("linux-x64", "windows-x64", "macos-arm64", "macos-x64"):
+                setup = {
+                    "schema": 1,
+                    "portalOrigin": "https://codey.example.test",
+                    "releaseId": "machine-" + "a" * 16,
+                    "platform": platform_name,
+                    "network": {"mode": "devtunnel"},
+                    "tunnelAuthProvider": "github",
+                    **({"updater": {"protocol": 1, "releasePublicKey": "public"}}
+                       if platform_name == "linux-x64" else {}),
+                }
+                home = root / platform_name
+                home.mkdir()
+                with self.subTest(platform=platform_name), self.assertRaisesRegex(
+                        SetupError, "current OS username must match"):
+                    registration.load_or_create(home, setup, username="Uppercase User")
+
+    def test_noncanonical_base64url_registration_keys_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = fixture(Path(directory))
+            registration.load_or_create(f.home, f.setup, username="alice")
+            file = registration.state_path(f.home, f.setup)
+            saved = json.loads(file.read_text())
+            saved["credentials"]["clientSigningKey"] = "A" * 43
+            saved["credentials"]["workspaceSsoKey"] = "A" * 42 + "B"
+            file.write_text(json.dumps(saved))
+            with self.assertRaisesRegex(SetupError, "key is invalid"):
+                registration.existing(f.home, f.setup)
 
     def test_official_standalone_codex_app_server_is_recognized(self):
         home = Path("/home/alice")
         executable = home / ".codex/packages/standalone/releases/0.200.0-linux-x64/bin/codex"
         self.assertTrue(codex_process.recognized(home, executable, [str(executable), "app-server"]))
 
-    def test_machine_export_has_only_public_binding_not_credentials_or_vm_metadata(self):
+    def test_registration_export_has_exact_schema_private_credentials_and_public_machine(self):
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
             root = Path(directory)
             f = fixture(root)
             cert = root / "leaf.pem"
             cert.write_text("PUBLIC_TEST_CERTIFICATE")
             network = {**f.network, "name": "test", "devTunnel": {"tunnelId": "codey-" + ID, "clusterId": "jpe1"}}
-            installer.emit_machine(f.enrollment, network, cert, Path(f.args.out))
+            token = "header.connect-only.signature"
+            installer.emit_registration(
+                f.setup, f.identity, network, cert, Path(f.args.out), token,
+            )
             value = json.loads(Path(f.args.out).read_text())
-            self.assertEqual(value["platform"], "linux-x64")
-            self.assertEqual(value["networkMode"], "devtunnel")
-            for field in ("privateIp", "vmResourceId", "clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey", "connectToken"):
-                self.assertNotIn(field, value)
-            for key in ("clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey"):
-                self.assertNotIn(f.enrollment[key], Path(f.args.out).read_text())
+            self.assertEqual(
+                set(value),
+                {"schema", "package", "machine", "credentials", "devTunnelConnectToken"},
+            )
+            self.assertEqual(value["schema"], 2)
+            self.assertEqual(value["package"], registration.package_fields(f.setup))
+            self.assertEqual(value["credentials"], registration.exported_credentials(f.identity))
+            self.assertEqual(value["devTunnelConnectToken"], token)
+            self.assertEqual(value["machine"]["schema"], 1)
+            self.assertEqual(value["machine"]["platform"], "linux-x64")
+            self.assertEqual(value["machine"]["networkMode"], "devtunnel")
+            self.assertNotIn("credentials", value["machine"])
+            self.assertNotIn("devTunnelConnectToken", value["machine"])
+            if os.name == "posix":
+                self.assertEqual(Path(f.args.out).stat().st_mode & 0o777, 0o600)
+            with patch.object(installer, "SKILL", f.skill), \
+                    self.assertRaisesRegex(SetupError, "outside the reusable Skill"):
+                installer.emit_registration(
+                    f.setup, f.identity, network, cert,
+                    f.skill / "output/codey-machine-registration.json", token,
+                )
 
     def test_github_is_verified_from_json_not_login_text_or_microsoft(self):
         good = {"status": "Logged in", "provider": "github", "username": "alice"}
@@ -219,6 +348,35 @@ class LinuxContractTests(unittest.TestCase):
         ])
         self.assertNotIn("GITHUB_TOKEN", calls[1][1]["env"])
 
+    def test_connect_token_is_issued_locally_without_a_portal_request(self):
+        payload = base64.urlsafe_b64encode(json.dumps({
+            "tunnelId": "codey-" + ID,
+            "clusterId": "jpe1",
+            "scp": "connect",
+            "exp": 2_000_000_000,
+        }).encode()).decode().rstrip("=")
+        token = "e30." + payload + ".fixture"
+        calls = []
+
+        def runner(arguments, **_kwargs):
+            calls.append(arguments)
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"token": token}), stderr="")
+
+        config = {
+            "nodeId": ID,
+            "tunnelId": "codey-" + ID,
+            "clusterId": "jpe1",
+            "tunnelAuthProvider": "github",
+            "devtunnelExe": "/reviewed/devtunnel",
+        }
+        with patch.object(auth, "require_github_login") as logged_in:
+            self.assertEqual(renewal.connect_token(config, runner=runner, now=1_000), token)
+        logged_in.assert_called_once_with("/reviewed/devtunnel", runner=runner)
+        self.assertEqual(calls, [[
+            "/reviewed/devtunnel", "token", "codey-" + ID + ".jpe1",
+            "--scope", "connect", "--json",
+        ]])
+
     def test_shell_hook_loads_provider_env_without_copying_its_key(self):
         provider = Path("/home/alice/.config/codey-machine/provider.env")
         original = "# preserve existing profile\n"
@@ -272,7 +430,7 @@ class LinuxTransactionTests(unittest.TestCase):
                 calls.append(args)
                 text = ""
                 if args[:2] == ["id", "-un"]:
-                    text = "test-owner"
+                    text = "alice"
                 elif args[:2] == ["loginctl", "show-user"]:
                     text = "yes" if linger else "no"
                 elif args[:2] == ["loginctl", "enable-linger"]:
@@ -341,28 +499,49 @@ class LinuxTransactionTests(unittest.TestCase):
                         "applied": True, "version": "0.999.0", "stoppedProcesses": [],
                     }),
                 )
-                with patch.object(installer, "SKILL", f.skill), patch.object(Path, "home", return_value=f.home), \
-                      patch.object(installer.codex_latest, "prepare", return_value=codex_plan) as codex_prepare, \
-                      patch.object(installer.socket, "socket") as socket_factory, \
-                      patch.object(installer.shutil, "disk_usage", return_value=SimpleNamespace(free=free_bytes)), \
-                      patch.object(installer, "run", side_effect=run), \
-                     patch.object(installer, "prepare_runtime", side_effect=build) as builder, \
-                     patch.object(installer, "verify", return_value={"usage": False, "tokenUsage": True, "warnings": ["quota unavailable"]}), \
-                      patch.object(installer.cli, "prepare_cli", return_value=f.executable) as cli, \
-                      patch.object(auth, "require_github_login") as login, \
-                      patch.object(installer.copilot_api, "login",
-                                   return_value={"action": "login", "provider": "github-copilot"}), \
-                      patch.object(installer.copilot_api, "wait_ready", return_value={"modelsStatus": 200}), \
-                      patch.object(installer.codex_latest, "test_model",
-                                   return_value={"marker": "CODEY_INSTALL_OK", "passed": True}), \
-                      patch.object(tunnels, "ensure_tunnel", return_value={"tunnelId": "codey-" + ID, "clusterId": "jpe1"}) as create, \
-                     patch.object(renewal, "renew", return_value={"ok": True}), \
-                     contextlib.redirect_stdout(io.StringIO()) as output:
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(patch.object(installer, "SKILL", f.skill))
+                    stack.enter_context(patch.object(Path, "home", return_value=f.home))
+                    stack.enter_context(patch.object(installer.registration, "existing", return_value=f.identity))
+                    stack.enter_context(patch.object(installer.registration, "load_or_create", return_value=f.identity))
+                    codex_prepare = stack.enter_context(
+                        patch.object(installer.codex_latest, "prepare", return_value=codex_plan))
+                    socket_factory = stack.enter_context(patch.object(installer.socket, "socket"))
+                    stack.enter_context(patch.object(
+                        installer.shutil, "disk_usage", return_value=SimpleNamespace(free=free_bytes)))
+                    stack.enter_context(patch.object(installer, "run", side_effect=run))
+                    builder = stack.enter_context(patch.object(installer, "prepare_runtime", side_effect=build))
+                    stack.enter_context(patch.object(
+                        installer, "verify",
+                        return_value={"usage": False, "tokenUsage": True, "warnings": ["quota unavailable"]},
+                    ))
+                    cli = stack.enter_context(patch.object(
+                        installer.cli, "prepare_cli", return_value=f.executable))
+                    login = stack.enter_context(patch.object(auth, "require_github_login"))
+                    stack.enter_context(patch.object(
+                        installer.copilot_api, "login",
+                        return_value={"action": "login", "provider": "github-copilot"},
+                    ))
+                    stack.enter_context(patch.object(
+                        installer.copilot_api, "wait_ready", return_value={"modelsStatus": 200}))
+                    stack.enter_context(patch.object(
+                        installer.codex_latest, "test_model",
+                        return_value={"marker": "CODEY_INSTALL_OK", "passed": True},
+                    ))
+                    create = stack.enter_context(patch.object(
+                        tunnels, "ensure_tunnel",
+                        return_value={"tunnelId": "codey-" + ID, "clusterId": "jpe1"},
+                    ))
+                    connect_token = stack.enter_context(patch.object(
+                        renewal, "connect_token", return_value="header.connect-only.signature"))
+                    portal_renew = stack.enter_context(patch.object(renewal, "renew"))
+                    output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
                     def bind(_address):
                         if occupied or any(state["active"] and state["pid"] for state in service_states.values()):
                             raise OSError("occupied test listener")
                     socket_factory.return_value.__enter__.return_value.bind.side_effect = bind
                     f.calls, f.builder, f.cli, f.login, f.create = calls, builder, cli, login, create
+                    f.connect_token, f.portal_renew = connect_token, portal_renew
                     f.codex_plan, f.codex_prepare = codex_plan, codex_prepare
                     f.output, f.legacy_units, f.service_states = output, legacy_units, service_states
                     f.legacy_unit = legacy_units.get("copilot-api.service", service_dir / "copilot-api.service")
@@ -488,7 +667,7 @@ class LinuxTransactionTests(unittest.TestCase):
             f.builder.assert_not_called()
             self.assertFalse(any("enable" in call for call in f.calls))
 
-    def test_existing_runtime_is_planned_for_archive_and_reused_updater_key_is_rejected(self):
+    def test_existing_runtime_is_planned_for_archive_and_bundled_updater_config_is_rejected(self):
         with self.setup() as f:
             root = f.home / ".local/share/codey-machine"
             root.mkdir(parents=True)
@@ -500,10 +679,8 @@ class LinuxTransactionTests(unittest.TestCase):
             self.assertEqual((root / "unrelated.txt").read_text(), "preserve")
         with self.setup() as f:
             file = f.skill / "assets/codey-updater/config.json"
-            config = json.loads(file.read_text())
-            config["credential"] = f.enrollment["tunnelUpdateKey"]
-            file.write_text(json.dumps(config))
-            with self.assertRaisesRegex(installer.SetupError, "updater bootstrap"):
+            file.write_text('{"legacy":"private"}')
+            with self.assertRaisesRegex(installer.SetupError, "Legacy personalized package rejected"):
                 installer.configure(f.args)
             f.cli.assert_not_called()
 
@@ -566,6 +743,15 @@ class LinuxTransactionTests(unittest.TestCase):
             self.assertNotIn("do-not-copy-old-shell-key", gateway["auth"]["apiKeys"])
             self.assertIn("CODEY_MODEL_API_KEY=" + json.dumps(gateway["auth"]["apiKeys"][0]), (config / "provider.env").read_text())
             self.assertIn("CODEX_HOME=" + f.args.codex_home, (config / "cloudcli.env").read_text())
+            cloudcli_env = (config / "cloudcli.env").read_text()
+            self.assertIn("CODEY_PORTAL_PRINCIPAL_ID=" + f.identity["workspaceSubject"], cloudcli_env)
+            self.assertIn("CODEY_PORTAL_USERNAME=" + f.identity["workspaceUsername"], cloudcli_env)
+            self.assertEqual(
+                json.loads((config / "updater-bootstrap.json").read_text()),
+                registration.updater_config(f.setup, f.identity),
+            )
+            self.assertFalse((f.skill / "assets/codey-updater/config.json").exists())
+            self.assertEqual(json.loads((config / "registration-secrets.json").read_text()), f.identity)
             codex_config = tomllib.loads((Path(f.args.codex_home) / "config.toml").read_text())
             self.assertEqual(codex_config["model"], "gpt-6-astra")
             self.assertEqual(codex_config["mcp_servers"], {"keep": {"command": "preserve"}})
@@ -587,6 +773,15 @@ class LinuxTransactionTests(unittest.TestCase):
             self.assertIn("Type=oneshot", renew)
             self.assertNotIn("Restart=always", renew)
             self.assertIn("OnUnitInactiveSec=300", (units / "codey-devtunnel-renew.timer").read_text())
+            f.portal_renew.assert_not_called()
+            f.connect_token.assert_called_once()
+            registration_file = json.loads(Path(f.args.out).read_text())
+            self.assertEqual(registration_file["schema"], 2)
+            self.assertEqual(registration_file["credentials"], registration.exported_credentials(f.identity))
+            self.assertEqual(registration_file["devTunnelConnectToken"], "header.connect-only.signature")
+            for secret in registration.exported_credentials(f.identity).values():
+                self.assertNotIn(secret, f.output.getvalue())
+            self.assertFalse((f.skill / "output/codey-machine-registration.json").exists())
             f.output.seek(0)
             f.output.truncate(0)
             f.args.apply = False
@@ -598,7 +793,7 @@ class LinuxTransactionTests(unittest.TestCase):
     def test_failure_only_disables_new_services_and_never_marks_ready(self):
         with self.setup() as f:
             f.args.apply = True
-            with patch.object(installer, "emit_machine", side_effect=OSError("test export failure")), self.assertRaises(OSError):
+            with patch.object(installer, "emit_registration", side_effect=OSError("test export failure")), self.assertRaises(OSError):
                 installer.configure(f.args)
             state = json.loads((f.home / ".config/codey-machine/installation.json").read_text())
             self.assertFalse(state["ready"])

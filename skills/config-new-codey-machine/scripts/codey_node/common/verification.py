@@ -46,25 +46,35 @@ def quota_available(status, body):
     raise SetupError(f"Authenticated quota probe failed: HTTP {status}")
 
 
-def verify(enrollment, network, cert):
-    node_id = enrollment["nodeId"]
+def _workspace(identity):
+    """The static protocol uses workspace* names; old callers remain readable until ported."""
+    subject = identity.get("workspaceSubject", identity.get("principalId"))
+    username = identity.get("workspaceUsername", identity.get("username"))
+    if not isinstance(subject, str) or not isinstance(username, str):
+        raise SetupError("Workspace identity is incomplete")
+    return subject, username
+
+
+def verify(identity, network, cert):
+    node_id = identity["nodeId"]
+    subject, username = _workspace(identity)
     server_name = f"{node_id}.nodes.codey.internal"
     ip = network["listenIp"]
     now = int(time.time())
-    ticket = signed({"v": 1, "aud": node_id, "sub": enrollment["principalId"], "scope": ["history", "usage"],
-                     "iat": now, "exp": now + 60}, enrollment["clientSigningKey"].encode())
+    ticket = signed({"v": 1, "aud": node_id, "sub": subject, "scope": ["history", "usage"],
+                     "iat": now, "exp": now + 60}, identity["clientSigningKey"].encode())
     health_status, health = local_probe(ip, 8443, server_name, cert, "/healthz")
     if health_status != 200:
         raise SetupError("HTTPS health probe failed")
     headers = {"authorization": "Bearer " + ticket}
     usage_status, usage_body = local_probe(ip, 8443, server_name, cert, "/usage", headers)
-    if enrollment.get("network") != {"mode": "devtunnel"}:
+    if identity.get("network") != {"mode": "devtunnel"}:
         raise SetupError("The active installer requires a private DevTunnel package")
     usage = quota_available(usage_status, usage_body)
     if not usage:
         owner_bound = isinstance(health, dict) and (
             health.get("relay") == "codey-node-relay" or (
-                enrollment.get("platform") == "linux-x64"
+                identity.get("platform") == "linux-x64"
                 and health.get("service") == "copilot-api-codey-https"))
         if (not owner_bound
                 or health.get("nodeId") != node_id):
@@ -81,12 +91,12 @@ def verify(enrollment, network, cert):
         raise SetupError("Anonymous Usage must be denied")
     pathname = "/api/auth/status"
     assertion = signed({
-        "iss": "codey-portal", "aud": node_id, "sub": enrollment["principalId"], "username": enrollment["username"],
+        "iss": "codey-portal", "aud": node_id, "sub": subject, "username": username,
         "sid": secrets.token_hex(32), "method": "GET", "path": pathname,
         "iat": now, "exp": now + 20, "nonce": b64(secrets.token_bytes(16)),
-    }, base64.urlsafe_b64decode(enrollment["workspaceSsoKey"] + "="))
+    }, base64.urlsafe_b64decode(identity["workspaceSsoKey"] + "="))
     status, body = local_probe(ip, 3001, server_name, cert, pathname, {"x-codey-workspace-assertion": assertion})
-    if status != 200 or body.get("managedAuthentication") is not True or body.get("user", {}).get("username") != enrollment["username"]:
+    if status != 200 or body.get("managedAuthentication") is not True or body.get("user", {}).get("username") != username:
         raise SetupError("Workspace SSO binding probe failed")
     if local_probe(ip, 3001, server_name, cert, pathname)[0] != 401:
         raise SetupError("Anonymous Workspace must be denied")

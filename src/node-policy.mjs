@@ -3,10 +3,13 @@ import { isIP } from "node:net";
 import { validateConfig } from "./config.mjs";
 import { SignedStore, requestError } from "./signed-store.mjs";
 import { workspaceNodeKey } from "./workspace-sso.mjs";
-import { machineServerName } from "./machine-identity.mjs";
+import { machineServerName, MACHINE_ID } from "./machine-identity.mjs";
 import { machinePlatform } from "./machine-platforms.mjs";
 import { machineTunnelKey, sealMachineTunnelToken, openMachineTunnelToken } from "./machine-tunnel.mjs";
 import { validateDevTunnelConnectToken } from "./devtunnel-transport.mjs";
+import {
+  machineCredentials, openMachineCredentials, sameMachineCredentials, sealMachineCredentials,
+} from "./machine-credentials.mjs";
 
 const NODE_ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const allowedFields = new Set(["name", "region", "endpoint", "accent"]);
@@ -76,10 +79,12 @@ export class NodePolicy {
     for (const node of record.data.nodes) {
       if (!NODE_ID.test(node.id ?? "") || seen.has(node.id) ||
           !/^[a-z0-9-]{1,80}$/.test(node.ownerId ?? "") ||
-          !["legacy", "isolated"].includes(node.keyMode) || typeof node.enabled !== "boolean" ||
+          !["legacy", "isolated", "client"].includes(node.keyMode) || typeof node.enabled !== "boolean" ||
+          (node.keyMode === "client" && typeof node.credentialSeal !== "string") ||
           (node.keyMode === "legacy" && node.ownerId !== this.seedPrincipalId)) {
         throw new Error("Invalid node ownership record");
       }
+      if (node.keyMode === "client") openMachineCredentials(this.master, node.id, node.credentialSeal);
       seen.add(node.id);
     }
     return record;
@@ -100,7 +105,24 @@ export class NodePolicy {
 
   async keyFor(id, nodeId) {
     const node = await this.owned(id, nodeId);
-    return node.keyMode === "legacy" ? this.ticketMaster : this.isolatedKey(node.id);
+    if (node.keyMode === "legacy") return this.ticketMaster;
+    if (node.keyMode === "client") {
+      return openMachineCredentials(this.master, node.id, node.credentialSeal).clientSigningKey;
+    }
+    return this.isolatedKey(node.id);
+  }
+
+  async workspaceBindingFor(id, nodeId) {
+    const node = await this.owned(id, nodeId);
+    if (node.keyMode === "client") {
+      const credentials = openMachineCredentials(this.master, node.id, node.credentialSeal);
+      return {
+        key: credentials.workspaceSsoKey,
+        subject: credentials.workspaceSubject,
+        username: credentials.workspaceUsername,
+      };
+    }
+    return { key: workspaceNodeKey(this.master, node.id) };
   }
 
   isolatedKey(nodeId) {
@@ -239,6 +261,128 @@ export class NodePolicy {
     });
   }
 
+  async stageImportedMachine(principalId, machine, rawCredentials, connectToken, now = Date.now()) {
+    machinePlatform(machine.platform);
+    if (!MACHINE_ID.test(machine.id ?? "") || machine.networkMode !== "devtunnel") {
+      throw requestError("客户端注册只接受私有 DevTunnel 节点");
+    }
+    const credentials = machineCredentials(rawCredentials);
+    validateDevTunnelConnectToken(connectToken, machine.devTunnel, now);
+    const claims = JSON.parse(Buffer.from(connectToken.split(".")[1], "base64url"));
+    const expiresAt = claims.exp * 1000;
+    const credentialSeal = sealMachineCredentials(this.master, machine.id, credentials);
+    const sealedToken = sealMachineTunnelToken(this.master, machine.id, connectToken);
+    return this.store.mutate((data) => {
+      const current = data.nodes.find((node) => node.id === machine.id);
+      if (current) {
+        if (current.ownerId !== principalId || current.keyMode !== "client" ||
+            !["importing", "activated"].includes(current.setup?.status) ||
+            JSON.stringify(current.machine) !== JSON.stringify(machine) ||
+            !sameMachineCredentials(
+              openMachineCredentials(this.master, current.id, current.credentialSeal), credentials,
+            ) ||
+            current.tunnel?.tunnelId !== machine.devTunnel.tunnelId ||
+            current.tunnel?.clusterId !== machine.devTunnel.clusterId) {
+          throw requestError("此客户端生成的机器身份已被使用，不能重新认领", 409);
+        }
+        if (expiresAt > current.tunnel.expiresAt) {
+          current.tunnel = {
+            ...current.tunnel, sealedToken, expiresAt, updatedAt: now,
+          };
+        }
+        if (!current.enabled) {
+          if (data.nodes.some((node) => node.id !== current.id &&
+              (node.enabled || (["reserved", "importing"].includes(node.setup?.status) && node.setup.expiresAt > now)) &&
+              node.tunnel?.tunnelId === current.tunnel.tunnelId &&
+              node.tunnel?.clusterId === current.tunnel.clusterId)) {
+            throw requestError("此 DevTunnel 已绑定到另一台机器", 409);
+          }
+          current.setup.expiresAt = now + 15 * 60000;
+        }
+        return { node: publicNode(current), created: false, activated: current.enabled };
+      }
+      const own = data.nodes.filter((node) => node.ownerId === principalId);
+      const importing = own.filter((node) =>
+        !node.enabled && node.setup?.status === "importing" && node.setup.expiresAt > now).length;
+      if (own.filter((node) => node.enabled).length + importing >= 32 ||
+          own.length >= 256 || data.nodes.length >= 8192) {
+        throw requestError("节点数量已达上限", 409);
+      }
+      if (data.nodes.some((node) =>
+        (node.enabled || (["reserved", "importing"].includes(node.setup?.status) && node.setup.expiresAt > now)) &&
+        node.tunnel?.tunnelId === machine.devTunnel.tunnelId &&
+        node.tunnel?.clusterId === machine.devTunnel.clusterId)) {
+        throw requestError("此 DevTunnel 已绑定到另一台机器", 409);
+      }
+      const node = {
+        id: machine.id,
+        ownerId: principalId,
+        name: machine.name,
+        region: machine.region,
+        endpoint: `https://${machineServerName(machine.id)}:8443/usage`,
+        accent: "#60a5fa",
+        enabled: false,
+        keyMode: "client",
+        credentialSeal,
+        serverNode: null,
+        machine,
+        tunnel: {
+          tunnelId: machine.devTunnel.tunnelId,
+          clusterId: machine.devTunnel.clusterId,
+          sealedToken,
+          expiresAt,
+          updatedAt: now,
+        },
+        createdAt: new Date(now).toISOString(),
+        setup: {
+          status: "importing",
+          source: "client-registration",
+          platform: machine.platform,
+          expiresAt: now + 15 * 60000,
+        },
+      };
+      data.nodes.push(node);
+      return { node: publicNode(node), created: true, activated: false };
+    });
+  }
+
+  async activateImportedMachine(principalId, nodeId, now = Date.now()) {
+    return this.store.mutate((data) => {
+      const node = data.nodes.find((item) =>
+        item.id === nodeId && item.ownerId === principalId && item.keyMode === "client" &&
+        ["importing", "activated"].includes(item.setup?.status));
+      if (!node) throw requestError("客户端机器注册不存在或无权访问", 409);
+      if (node.enabled && node.setup.status === "activated") return publicNode(node);
+      if (node.setup.expiresAt <= now) throw requestError("客户端机器注册已超时，请重新上传", 410);
+      if (data.nodes.filter((item) => item.ownerId === principalId && item.enabled).length >= 32) {
+        throw requestError("节点数量已达上限", 409);
+      }
+      if (data.nodes.some((item) => item.id !== node.id && item.enabled &&
+          item.tunnel?.tunnelId === node.tunnel.tunnelId &&
+          item.tunnel?.clusterId === node.tunnel.clusterId)) {
+        throw requestError("此 DevTunnel 已绑定到另一台机器", 409);
+      }
+      node.enabled = true;
+      node.setup = {
+        ...node.setup,
+        status: "activated",
+        verifiedAt: new Date(now).toISOString(),
+      };
+      delete node.setup.expiresAt;
+      return publicNode(node);
+    });
+  }
+
+  async importMachine(principalId, machine, credentials, connectToken, now = Date.now()) {
+    const staged = await this.stageImportedMachine(principalId, machine, credentials, connectToken, now);
+    return {
+      node: staged.activated
+        ? staged.node
+        : await this.activateImportedMachine(principalId, machine.id, now),
+      created: staged.created,
+    };
+  }
+
   async update(principalId, nodeId, body) {
     return this.store.mutate((data) => {
       const node = data.nodes.find((item) => item.id === nodeId && item.ownerId === principalId && item.enabled);
@@ -282,16 +426,24 @@ export class NodePolicy {
 
   /** Only reserved or enabled owner-bound native tunnel nodes may renew. */
   async tunnelMachine(nodeId, now = Date.now()) {
-    const node = (await this.records()).data.nodes.find(item => item.id === nodeId);
-    if (!node || !["windows-x64", "linux-x64", "macos-arm64", "macos-x64"].includes(node.setup?.platform) ||
-        !((node.enabled && node.machine?.networkMode === "devtunnel") ||
-          (!node.enabled && node.setup.status === "reserved" && node.setup.expiresAt > now))) {
+      const node = (await this.records()).data.nodes.find(item => item.id === nodeId);
+      if (!node || !["windows-x64", "linux-x64", "macos-arm64", "macos-x64"].includes(node.setup?.platform) ||
+      !((node.enabled && node.machine?.networkMode === "devtunnel") ||
+          (!node.enabled && ["reserved", "importing"].includes(node.setup.status) && node.setup.expiresAt > now))) {
       throw requestError("Machine authentication failed", 401);
     }
     return node;
   }
 
   tunnelUpdateKey(nodeId) { return machineTunnelKey(this.master, nodeId); }
+
+  async tunnelKeyFor(nodeId, record) {
+    const node = record ?? await this.tunnelMachine(nodeId);
+    if (node.id !== nodeId) throw new Error("Machine authentication failed");
+    return node.keyMode === "client"
+      ? openMachineCredentials(this.master, node.id, node.credentialSeal).tunnelUpdateKey
+      : this.tunnelUpdateKey(nodeId);
+  }
 
   async updateMachineTunnel(nodeId, input, now = Date.now()) {
     validateDevTunnelConnectToken(input.connectToken, input, now);
@@ -302,7 +454,7 @@ export class NodePolicy {
       const node = data.nodes.find(item => item.id === nodeId);
       if (!node || !["windows-x64", "linux-x64", "macos-arm64", "macos-x64"].includes(node.setup?.platform) ||
           !((node.enabled && node.machine?.networkMode === "devtunnel") ||
-            (!node.enabled && node.setup.status === "reserved" && node.setup.expiresAt > now))) {
+            (!node.enabled && ["reserved", "importing"].includes(node.setup.status) && node.setup.expiresAt > now))) {
         throw requestError("Machine authentication failed", 401);
       }
       if (node.tunnel && (node.tunnel.tunnelId !== input.tunnelId ||

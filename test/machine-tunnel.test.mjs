@@ -11,6 +11,9 @@ import { NodePolicy } from "../src/node-policy.mjs";
 import {
   MachineTunnelService, machineTunnelKey, openMachineTunnelToken, sealMachineTunnelToken, signMachineTunnelRequest,
 } from "../src/machine-tunnel.mjs";
+import {
+  openMachineCredentials, sealMachineCredentials,
+} from "../src/machine-credentials.mjs";
 import { verifyDevTunnelAccess } from "../src/devtunnel-transport.mjs";
 import { preparedGateways } from "../src/machine-identity.mjs";
 import { NodeDataGateway } from "../src/node-data-gateway.mjs";
@@ -159,6 +162,65 @@ test("The same scoped renewal key works after activation but is revoked on remov
   assert.equal((await f.send(f.signed(f.node.id, { ...coordinates, connectToken: token() }))).status, 401);
 });
 
+test("client-generated renewal credentials replace the server-derived key only for the imported node", async t => {
+  const f = await fixture(t);
+  const id = `n-${"c".repeat(24)}`;
+  const client = {
+    clientSigningKey: randomBytes(32).toString("base64url"),
+    workspaceSsoKey: randomBytes(32).toString("base64url"),
+    tunnelUpdateKey: randomBytes(32).toString("base64url"),
+    updaterCredential: randomBytes(32).toString("base64url"),
+    workspaceSubject: `m-${"d".repeat(24)}`,
+    workspaceUsername: "owner",
+  };
+  const machine = {
+    id, name: "Imported", region: "Test", platform: "linux-x64",
+    networkMode: "devtunnel", devTunnel: coordinates,
+    tlsServerName: `${id}.nodes.codey.internal`, fingerprint: "fixture", ca: "fixture",
+  };
+  await f.policy.importMachine("owner-a", machine, client, token());
+  assert.equal(await f.policy.tunnelKeyFor(id), client.tunnelUpdateKey);
+  assert.notEqual(await f.policy.tunnelKeyFor(id), machineTunnelKey(f.master, id));
+  assert.equal((await f.send(f.signed(id, { ...coordinates, connectToken: token() }, {
+    key: machineTunnelKey(f.master, id),
+  }))).status, 401);
+  assert.equal((await f.send(f.signed(id, { ...coordinates, connectToken: token() }, {
+    key: client.tunnelUpdateKey,
+  }))).status, 200);
+});
+
+test("an expired staged identity cannot reclaim a tunnel activated by another node", async t => {
+  const f = await fixture(t);
+  const now = Date.now();
+  const credentials = (suffix) => ({
+    clientSigningKey: randomBytes(32).toString("base64url"),
+    workspaceSsoKey: randomBytes(32).toString("base64url"),
+    tunnelUpdateKey: randomBytes(32).toString("base64url"),
+    updaterCredential: randomBytes(32).toString("base64url"),
+    workspaceSubject: `m-${suffix.repeat(24)}`,
+    workspaceUsername: "owner",
+  });
+  const machine = (suffix) => {
+    const id = `n-${suffix.repeat(24)}`;
+    return {
+      id, name: suffix, region: "Test", platform: "linux-x64",
+      networkMode: "devtunnel", devTunnel: coordinates,
+      tlsServerName: `${id}.nodes.codey.internal`, fingerprint: "fixture", ca: "fixture",
+    };
+  };
+  const first = machine("a");
+  const second = machine("b");
+  const firstCredentials = credentials("c");
+  await f.policy.stageImportedMachine("owner-a", first, firstCredentials, token({}, now), now);
+  const later = now + 16 * 60000;
+  await f.policy.stageImportedMachine("owner-a", second, credentials("d"), token({}, later), later);
+  await f.policy.activateImportedMachine("owner-a", second.id, later);
+  await assert.rejects(
+    f.policy.stageImportedMachine("owner-a", first, firstCredentials, token({}, later), later),
+    { status: 409 },
+  );
+});
+
 test("Storage encryption is authenticated and bound to the node ID", () => {
   const master = randomBytes(32).toString("base64url");
   const a = `n-${"a".repeat(24)}`, b = `n-${"b".repeat(24)}`;
@@ -168,6 +230,21 @@ test("Storage encryption is authenticated and bound to the node ID", () => {
   const parts = encrypted.split(".");
   parts[1] = Buffer.alloc(16).toString("base64url");
   assert.throws(() => openMachineTunnelToken(master, a, parts.join(".")));
+  const credentials = {
+    clientSigningKey: randomBytes(32).toString("base64url"),
+    workspaceSsoKey: randomBytes(32).toString("base64url"),
+    tunnelUpdateKey: randomBytes(32).toString("base64url"),
+    updaterCredential: randomBytes(32).toString("base64url"),
+    workspaceSubject: `m-${"c".repeat(24)}`,
+    workspaceUsername: "owner",
+  };
+  const sealedCredentials = sealMachineCredentials(master, a, credentials);
+  const { updaterCredential, ...nodeCredentials } = credentials;
+  assert.deepEqual(openMachineCredentials(master, a, sealedCredentials), nodeCredentials);
+  assert.throws(() => openMachineCredentials(master, b, sealedCredentials));
+  const credentialParts = sealedCredentials.split(".");
+  credentialParts[2] = Buffer.alloc(16).toString("base64url");
+  assert.throws(() => openMachineCredentials(master, a, credentialParts.join(".")));
 });
 
 test("Mac data and Workspace gateways use dedicated tunnel agents, not ACA loopback or shared env tokens", async t => {

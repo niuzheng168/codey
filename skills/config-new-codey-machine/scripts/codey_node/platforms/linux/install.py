@@ -12,9 +12,8 @@ import socket
 import sys
 import tarfile
 import time
-from urllib.parse import urlsplit
 
-from ...common import config_defaults
+from ...common import config_defaults, registration
 from ...common.errors import SetupError, TunnelError
 from ...common.files import digest, protected_write
 from ...common.verification import verify
@@ -25,36 +24,14 @@ from .build import prepare_runtime, run
 from .systemd import unit
 
 SKILL = Path(__file__).resolve().parents[4]
-NODE_ID = tunnels.NODE_ID
 SERVICES = ["codey-copilot-api.service", "codey-cloudcli.service"]
 
 
-def validate_inputs(enrollment, manifest, network, target_platform="linux-x64", ready=False):
-    node_id = enrollment.get("nodeId", "")
-    if enrollment.get("schema") != 1 or not NODE_ID.fullmatch(node_id):
-        raise SetupError("The ZIP must contain a real, reserved enrollment.json")
-    if not ready and enrollment.get("expiresAt", 0) <= time.time() * 1000:
-        raise SetupError("The enrollment has expired; download a fresh skill")
-    if not re.fullmatch(r"[a-z0-9-]{1,80}", enrollment.get("principalId", "")) or not re.fullmatch(r"[a-z][a-z0-9_-]{2,31}", enrollment.get("username", "")):
-        raise SetupError("Invalid enrollment owner")
-    for name in ["clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey"]:
-        if not re.fullmatch(r"[A-Za-z0-9_-]{43}", enrollment.get(name, "")):
-            raise SetupError(f"Invalid enrollment field: {name}")
-    origin = urlsplit(enrollment.get("portalOrigin", ""))
-    if origin.scheme != "https" or not origin.hostname or origin.username or origin.password or origin.path or origin.query or origin.fragment:
-        raise SetupError("Portal origin must be an exact HTTPS origin")
-    if len({enrollment[name] for name in ("clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey")}) != 3:
-        raise SetupError("Node credentials must be purpose-separated")
+def validate_inputs(setup, manifest, target_platform="linux-x64"):
     suffix = "linux-x64.tar.xz"
     if (target_platform != "linux-x64" or manifest.get("schema") != 1 or manifest.get("platform") != target_platform
-            or enrollment.get("platform", "linux-x64") != target_platform
-            or manifest.get("releaseId") != enrollment.get("releaseId")):
-        raise SetupError("Enrollment and runtime release do not match")
-    if (enrollment.get("network") != {"mode": "devtunnel"}
-            or enrollment.get("tunnelAuthProvider", "github") != "github"
-            or network.get("schema") != 1 or network.get("nodeId") != node_id
-            or network.get("networkMode") != "devtunnel" or network.get("listenIp") != "127.0.0.1"):
-        raise SetupError("Use this owner's Linux private GitHub DevTunnel package; all new listeners are loopback-only")
+            or manifest.get("releaseId") != setup.get("releaseId")):
+        raise SetupError("Static setup and runtime release do not match")
     version = manifest.get("node", "")
     bun = manifest.get("bunBuildTool", "")
     distribution = manifest.get("nodeDistribution", {})
@@ -74,19 +51,32 @@ def validate_inputs(enrollment, manifest, network, target_platform="linux-x64", 
     return artifacts
 
 
-def emit_machine(enrollment, network, cert, output, name=None, already_configured=False, verification=None):
+def emit_registration(setup, identity, network, cert, output, connect_token,
+                      name=None, verification=None):
     machine = {
-        "schema": 1, "nodeId": enrollment["nodeId"], "name": name or network["name"],
+        "schema": 1, "nodeId": identity["nodeId"], "name": name or network["name"],
         "region": "Linux · DevTunnel", "platform": "linux-x64",
         "tlsCertificate": cert.read_text(), "networkMode": "devtunnel",
         "devTunnel": network["devTunnel"],
     }
-    protected_write(output, json.dumps(machine, indent=2) + "\n")
+    output = Path(output)
+    if output.resolve().is_relative_to(SKILL.resolve()):
+        raise SetupError("Private registration output must stay outside the reusable Skill directory")
+    if output.exists() and not output.is_symlink():
+        try:
+            previous = json.loads(output.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as error:
+            raise SetupError("Existing registration output is not valid JSON") from error
+        if previous.get("schema") != 2 or previous.get("machine", {}).get("nodeId") != identity["nodeId"]:
+            raise SetupError("Existing registration output belongs to another machine")
+    value = registration.document(setup, identity, machine, connect_token)
+    protected_write(output, json.dumps(value, indent=2) + "\n")
+    output.chmod(0o600)
     print(json.dumps({
-        "ok": True, "nodeId": enrollment["nodeId"], "machineFile": str(output),
+        "ok": True, "nodeId": identity["nodeId"], "registrationFile": str(output),
+        "registrationFilePrivate": True,
         "localHttps": True, "usageHistory": True, "workspaceSso": True, "anonymousDenied": True,
-        "alreadyConfigured": already_configured,
-        "next": "Import codey-machine.json in Codey; Portal must verify the private tunnel and WebSocket before adding",
+        "next": "Upload the private codey-machine-registration.json to Codey, then delete transferred copies",
         "modelAuthentication": "GitHub Copilot login and a real Codex model request passed",
         "rebootTested": False, "verification": verification,
     }, indent=2))
@@ -101,24 +91,22 @@ def configure(args):
     if not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(home)):
         raise SetupError("This systemd installer requires a home path without whitespace or systemd specifiers")
     os.umask(0o077)
-    enrollment_file = Path(args.enrollment).resolve()
-    enrollment = json.loads(enrollment_file.read_text())
+    setup = registration.load_setup(SKILL, "linux-x64")
     updater = SKILL / "assets/codey-updater"
-    updater_config = json.loads((updater / "config.json").read_text())
-    if (updater_config.get("nodeId") != enrollment.get("nodeId")
-            or updater_config.get("ownerId") != enrollment.get("principalId")
-            or updater_config.get("username") != enrollment.get("username")
-            or updater_config.get("portalOrigin") != enrollment.get("portalOrigin")
-            or updater_config.get("protocol") != 1
-            or not re.fullmatch(r"[A-Za-z0-9_-]{43}", updater_config.get("credential", ""))
-            or updater_config.get("credential") in {enrollment.get(key) for key in
-                                                    ("clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey")}):
-        raise SetupError("The updater bootstrap must belong to this same reserved machine and owner")
     for name in ["install.py", "updater.py", "engine.py", "probe.mjs", "UPGRADE.md"]:
         if not (updater / name).is_file():
-            raise SetupError("Download a complete machine Skill with its independent updater")
+            raise SetupError("The static Linux package is missing its public updater program")
     manifest = json.loads((SKILL / "assets/manifest.json").read_text())
-    network = {"schema": 1, "nodeId": enrollment["nodeId"], "networkMode": "devtunnel",
+    artifacts = validate_inputs(setup, manifest)
+    for artifact in artifacts:
+        archive = SKILL / "assets" / artifact["file"]
+        if archive.is_symlink() or not archive.is_file() or archive.stat().st_size != artifact["size"] or digest(archive) != artifact["sha256"]:
+            raise SetupError("A reviewed source package is missing, truncated or has the wrong checksum")
+    if args.apply and shutil.disk_usage(home).free < 8 * 1024 ** 3:
+        raise SetupError("At least 8 GiB free disk space is required for isolated dependency installation/build")
+    identity = registration.load_or_create(home, setup) if args.apply else registration.existing(home, setup)
+    node_id = identity["nodeId"] if identity else "generated-on-apply"
+    network = {"schema": 1, "nodeId": node_id, "networkMode": "devtunnel",
                "listenIp": "127.0.0.1", "name": platform.node()}
     root = home / ".local/share/codey-machine"
     config = home / ".config/codey-machine"
@@ -131,11 +119,6 @@ def configure(args):
             state = worker.private_json(state_file)
         except (worker.ServiceError, ValueError):
             state = None
-    artifacts = validate_inputs(enrollment, manifest, network)
-    for artifact in artifacts:
-        archive = SKILL / "assets" / artifact["file"]
-        if archive.is_symlink() or not archive.is_file() or archive.stat().st_size != artifact["size"] or digest(archive) != artifact["sha256"]:
-            raise SetupError("A reviewed source package is missing, truncated or has the wrong checksum")
     network_hash = hashlib.sha256(json.dumps(network, sort_keys=True).encode()).hexdigest()
     service_dir = home / ".config/systemd/user"
     def port_available(port):
@@ -154,7 +137,7 @@ def configure(args):
     shell_owner = None
     shell_changes = None
     if replacement_plan["detected"]:
-        preflight_root = home / (".codey-replacement-preflight-" + enrollment["nodeId"])
+        preflight_root = home / (".codey-replacement-preflight-" + node_id)
         try:
             preflight_root.lstat()
         except FileNotFoundError:
@@ -183,7 +166,8 @@ def configure(args):
         raise SetupError("This systemd installer requires a Codex path without whitespace or systemd specifiers")
     shell_owner, shell_changes = login.prepare(home, config / "provider.env")
     summary = {
-        "nodeId": enrollment["nodeId"], "releaseId": manifest["releaseId"],
+        "nodeId": node_id, "releaseId": manifest["releaseId"],
+        "package": "static-no-secrets", "credentials": "generated locally on apply and reused after failure",
         "services": SERVICES + ["codey-node-updater.service", "codey-devtunnel.service", "codey-devtunnel-renew.timer"],
         "listenIp": network["listenIp"], "modelApi": "127.0.0.1:4141",
         "installationRoot": str(root), "configRoot": str(config),
@@ -208,18 +192,18 @@ def configure(args):
     if not args.apply:
         print(json.dumps(summary, indent=2))
         return
-    if shutil.disk_usage(home).free < 8 * 1024 ** 3:
-        raise SetupError("At least 8 GiB free disk space is required for isolated dependency installation/build")
     owner = run(["id", "-un"]).stdout.strip()
+    if owner != identity["workspaceUsername"]:
+        raise SetupError("The generated Workspace username no longer matches the current OS user")
     linger = run(["loginctl", "show-user", owner, "-p", "Linger", "--value"], check=False)
     linger_enabled = linger.stdout.strip().lower() == "yes"
-    executable = cli.prepare_cli(args.devtunnel_bin or shutil.which("devtunnel"), SKILL, enrollment["nodeId"])
+    executable = cli.prepare_cli(args.devtunnel_bin or shutil.which("devtunnel"), SKILL, identity["nodeId"])
     tunnel_login = auth.login_github_device(executable)
     existing_binding = None
     if (replacement_plan["detected"] and state
-            and state.get("nodeId") == enrollment["nodeId"] and (config / "tunnel.json").is_file()):
+            and state.get("nodeId") == identity["nodeId"] and (config / "tunnel.json").is_file()):
         try:
-            existing_binding = tunnels.ensure_tunnel(executable, enrollment, config, inspect_only=True)
+            existing_binding = tunnels.ensure_tunnel(executable, identity, config, inspect_only=True)
         except TunnelError as error:
             raise SetupError("The existing node's DevTunnel could not be verified before replacement") from error
     lock = home / ".codey-machine-install.lock"
@@ -227,10 +211,9 @@ def configure(args):
         handle.write(str(os.getpid()))
     started = []
     try:
-        enrollment_file.chmod(0o600)
         if replacement_plan["detected"]:
             result = replacement.execute(
-                home, root, config, enrollment["nodeId"], run, port_available=port_available)
+                home, root, config, identity["nodeId"], run, port_available=port_available)
             summary["replacement"] = result
             defaults = config_defaults.prepare(
                 SKILL, codex_home=args.codex_home,
@@ -243,20 +226,21 @@ def configure(args):
         config.chmod(0o700)
         root.chmod(0o700)
         if existing_binding:
-            requested = "codey-" + enrollment["nodeId"]
+            requested = "codey-" + identity["nodeId"]
             protected_write(config / "tunnel.json", json.dumps({
                 "requested": requested,
                 "qualifiedId": requested + "." + existing_binding["clusterId"],
                 **existing_binding,
             }, indent=2) + "\n")
         binding = tunnels.ensure_tunnel(
-            executable, enrollment, config,
+            executable, identity, config,
             expected_binding=existing_binding if existing_binding else None,
         )
         network["devTunnel"] = binding
         summary["devTunnel"] = {**binding, "provider": "github", "ports": [3001, 8443]}
         summary["devTunnel"]["login"] = tunnel_login
-        protected_write(config / "enrollment.json", json.dumps(enrollment, indent=2) + "\n")
+        identity_file = config / "registration-secrets.json"
+        protected_write(identity_file, json.dumps(identity, indent=2) + "\n")
         state = {**summary, "ready": False, "networkSha256": network_hash}
         protected_write(state_file, json.dumps(state, indent=2) + "\n")
         release = root / "releases" / manifest["releaseId"]
@@ -270,7 +254,7 @@ def configure(args):
                     raise SetupError("A partial runtime stage is linked")
                 shutil.rmtree(stage)
             stage.mkdir(parents=True)
-            prepare_runtime(manifest, enrollment, root, stage, config / "dependency-build.log", skill=SKILL)
+            prepare_runtime(manifest, identity, root, stage, config / "dependency-build.log", skill=SKILL)
             os.replace(stage, release)
         node = release / "node/bin/node"
         cloudcli = release / "cloudcli"
@@ -285,7 +269,7 @@ def configure(args):
             cwd=cloudcli)
         cert, key = config / "node-cert.pem", config / "node-key.pem"
         if not cert.exists() and not key.exists():
-            server_name = f"{enrollment['nodeId']}.nodes.codey.internal"
+            server_name = f"{identity['nodeId']}.nodes.codey.internal"
             run(["openssl", "req", "-x509", "-newkey", "rsa:3072", "-noenc", "-days", "365",
                  "-keyout", key, "-out", cert, "-subj", f"/CN={server_name}",
                  "-addext", f"subjectAltName=DNS:{server_name}",
@@ -295,7 +279,7 @@ def configure(args):
             raise SetupError("Incomplete node TLS material; do not replace only one half of a keypair")
         cert.chmod(0o600)
         key.chmod(0o600)
-        protected_write(config / "client-signing.key", enrollment["clientSigningKey"] + "\n")
+        protected_write(config / "client-signing.key", identity["clientSigningKey"] + "\n")
         data = root / "data"
         # The new COPILOT_API_HOME supplies the gateway config and CloudCLI model
         # key. Old services/data were archived and are not used by the new process.
@@ -307,15 +291,17 @@ def configure(args):
             f"COPILOT_API_HOME={data}/copilot-api", "COPILOT_API_CODEY_HTTPS_PORT=8443",
             f"COPILOT_API_CODEY_HTTPS_HOST={network['listenIp']}",
             f"COPILOT_API_CODEY_TLS_CERT={cert}", f"COPILOT_API_CODEY_TLS_KEY={key}",
-            f"COPILOT_API_CODEY_NODE_ID={enrollment['nodeId']}",
-            f"COPILOT_API_CODEY_ALLOWED_ORIGIN={enrollment['portalOrigin']}",
+            f"COPILOT_API_CODEY_NODE_ID={identity['nodeId']}",
+            f"COPILOT_API_CODEY_ALLOWED_ORIGIN={setup['portalOrigin']}",
             f"COPILOT_API_CODEY_SIGNING_KEY_FILE={config}/client-signing.key", "",
         ]))
         protected_write(config / "cloudcli.env", "\n".join([
             "CODEY_MANAGED=true", "CODEY_PORTAL_SSO=true", "SERVER_PORT=3001",
             f"HOST={network['listenIp']}", f"DATABASE_PATH={data}/cloudcli/auth.db",
-            f"CODEY_PORTAL_NODE_ID={enrollment['nodeId']}", f"CODEY_PORTAL_USERNAME={enrollment['username']}",
-            f"CODEY_PORTAL_PRINCIPAL_ID={enrollment['principalId']}", f"CODEY_PORTAL_SSO_KEY={enrollment['workspaceSsoKey']}",
+            f"CODEY_PORTAL_NODE_ID={identity['nodeId']}",
+            f"CODEY_PORTAL_USERNAME={identity['workspaceUsername']}",
+            f"CODEY_PORTAL_PRINCIPAL_ID={identity['workspaceSubject']}",
+            f"CODEY_PORTAL_SSO_KEY={identity['workspaceSsoKey']}",
             f"CODEY_PORTAL_TLS_CERT={cert}", f"CODEY_PORTAL_TLS_KEY={key}", "",
             f"CODEY_CODEX_EXECUTABLE={codex}", f"CODEX_HOME={defaults.codex_home}", "",
         ]))
@@ -373,7 +359,7 @@ def configure(args):
         error = None
         for _ in range(20):
             try:
-                verification = verify(enrollment, network, cert)
+                verification = verify(identity, network, cert)
                 error = None
                 break
             except (SetupError, OSError, http.client.HTTPException, ValueError) as failure:
@@ -383,16 +369,15 @@ def configure(args):
             raise SetupError(f"Local TLS/authentication verification failed ({error}); no machine import file was produced")
         python_runtime = install_bundle(SKILL / "scripts", config / "service", "linux")
         runtime = {
-            "schema": 1, "uid": os.geteuid(), "nodeId": enrollment["nodeId"],
-            "ownerId": enrollment["principalId"], "configRoot": str(config), "tunnelAuthProvider": "github",
-            "enrollmentFile": str(config / "enrollment.json"), "devtunnelExe": str(executable),
+            "schema": 1, "uid": os.geteuid(), "nodeId": identity["nodeId"],
+            "ownerId": identity["workspaceSubject"], "configRoot": str(config), "tunnelAuthProvider": "github",
+            "identityFile": str(identity_file), "devtunnelExe": str(executable),
             "devtunnelSha256": digest(executable), "worker": python_runtime["entrypoint"],
             "pythonRuntime": python_runtime,
             **binding,
         }
         runtime_file = config / "tunnel-runtime.json"
         protected_write(runtime_file, json.dumps(runtime, indent=2) + "\n")
-        renewal.renew(runtime, enrollment, force=True)
         protected_write(config / "tunnel.env", "")
         for mode, name in (("host", "codey-devtunnel.service"), ("renew", "codey-devtunnel-renew.service")):
             content = unit("Codey private GitHub tunnel " + mode,
@@ -413,10 +398,19 @@ def configure(args):
         # Register a separate pull agent only after both newly-created services are healthy.
         # Pending nodes cannot claim jobs until the owner completes Portal activation.
         started.append("codey-node-updater.service")
-        state["supervision"] = updater_service.install(updater, run)
+        updater_config = config / "updater-bootstrap.json"
+        protected_write(
+            updater_config,
+            json.dumps(registration.updater_config(setup, identity), indent=2) + "\n",
+        )
+        state["supervision"] = updater_service.install(updater, updater_config, run)
+        connect_token = renewal.connect_token(runtime)
         output = Path(args.out).resolve()
-        emit_machine(enrollment, network, cert, output, args.name, verification=verification)
-        state.update(ready=True, machineFile=str(output))
+        emit_registration(
+            setup, identity, network, cert, output, connect_token,
+            args.name, verification=verification,
+        )
+        state.update(ready=True, registrationFile=str(output))
         protected_write(state_file, json.dumps(state, indent=2) + "\n")
     except Exception:
         for service in reversed(started):
@@ -428,8 +422,7 @@ def configure(args):
 
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--enrollment", default=str(SKILL / "assets/enrollment.json"))
-    parser.add_argument("--out", default=str(SKILL / "output/codey-machine.json"))
+    parser.add_argument("--out", default=str(Path.home() / "codey-machine-registration.json"))
     parser.add_argument("--name")
     parser.add_argument("--devtunnel-bin")
     parser.add_argument("--codex-bin", help="Optional existing owner Codex command whose bin directory should be updated")

@@ -85,7 +85,12 @@ export function settingsDom() {
     focus() { document.activeElement = this; }
     showModal() { this.open = true; this.openCount = (this.openCount || 0) + 1; }
     close() { if (this.open) { this.open = false; this.dispatch("close"); } }
-    reset() { for (const input of this.querySelectorAll("input")) input.value = input.defaultValue; }
+    reset() {
+      for (const input of this.querySelectorAll("input")) {
+        input.value = input.defaultValue;
+        if (input.type === "file") input.files = [];
+      }
+    }
     contains(target) { return this === target || this.children.some((child) => child.contains(target)); }
     matches(selector) {
       const attrs = [...selector.matchAll(/\[([\w-]+)(?:="([^"]*)")?\]/g)];

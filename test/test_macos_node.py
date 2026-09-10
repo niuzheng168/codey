@@ -37,6 +37,10 @@ service = installer.service
 builder = load("mac_bundle_test", "scripts/build-machine-bundle.py")
 
 
+def key(value):
+    return base64.urlsafe_b64encode(bytes([value]) * 32).decode().rstrip("=")
+
+
 def inputs(target="macos-arm64"):
     suffix = "darwin-arm64.tar.gz" if target == "macos-arm64" else "darwin-x64.tar.gz"
     artifacts = [{"file": f, "sha256": "a" * 64, "size": 12}
@@ -47,18 +51,28 @@ def inputs(target="macos-arm64"):
                                      "url": f"https://nodejs.org/dist/v24.20.0/node-v24.20.0-{suffix}", "sha256": "b" * 64}}
     identity = "\n".join([manifest["node"], manifest["bunBuildTool"], "b" * 64] + ["a" * 64] * 3)
     manifest["releaseId"] = "machine-" + hashlib.sha256(identity.encode()).hexdigest()[:16]
-    enrollment = {"schema": 1, "nodeId": "n-" + "a" * 24, "principalId": "test-owner", "username": "owner",
-                  "platform": target, "portalOrigin": "https://portal.example.test", "network": {"mode": "devtunnel"},
-                  "releaseId": manifest["releaseId"], "expiresAt": int(time.time() * 1000) + 86400000,
-                  **{key: "a" * 43 for key in ("clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey")}}
-    return enrollment, manifest
+    setup = {
+        "schema": 1, "platform": target, "portalOrigin": "https://portal.example.test",
+        "network": {"mode": "devtunnel"}, "releaseId": manifest["releaseId"],
+        "tunnelAuthProvider": "github",
+    }
+    identity = {
+        "nodeId": "n-" + "a" * 24, "workspaceSubject": "m-" + "b" * 24,
+        "workspaceUsername": "owner", "platform": target,
+        "portalOrigin": setup["portalOrigin"], "network": setup["network"],
+        "releaseId": manifest["releaseId"], "tunnelAuthProvider": "github",
+        "clientSigningKey": key(1), "workspaceSsoKey": key(2),
+        "tunnelUpdateKey": key(3), "updaterCredential": key(4),
+    }
+    return SimpleNamespace(setup=setup, identity=identity, manifest=manifest)
 
 
 class MacNodeTests(unittest.TestCase):
     def test_cli_qualified_ids_are_normalized_and_the_same_tunnel_is_reused(self):
-        enrollment, _ = inputs()
-        requested = "codey-" + enrollment["nodeId"]
-        description = "Codey macOS " + enrollment["nodeId"]
+        fixture = inputs()
+        identity = fixture.identity
+        requested = "codey-" + identity["nodeId"]
+        description = "Codey macOS " + identity["nodeId"]
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             calls = []
@@ -79,11 +93,11 @@ class MacNodeTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout=json.dumps(value))
 
             with patch.object(installer, "run", side_effect=run):
-                self.assertEqual(installer.token_bound_tunnel("/reviewed/devtunnel", enrollment, root), (requested, "jpe1"))
+                self.assertEqual(installer.token_bound_tunnel("/reviewed/devtunnel", identity, root), (requested, "jpe1"))
                 saved = json.loads((root / "tunnel.json").read_text())
                 self.assertEqual(saved, {"requested": requested, "tunnelId": requested, "clusterId": "jpe1",
                                          "qualifiedId": requested + ".jpe1"})
-                self.assertEqual(installer.token_bound_tunnel("/reviewed/devtunnel", enrollment, root), (requested, "jpe1"))
+                self.assertEqual(installer.token_bound_tunnel("/reviewed/devtunnel", identity, root), (requested, "jpe1"))
             self.assertEqual([args[1] for args in calls], ["create", "port", "port", "show"])
 
     def test_tunnel_normalization_rejects_missing_or_conflicting_regions(self):
@@ -99,26 +113,26 @@ class MacNodeTests(unittest.TestCase):
         self.assertEqual(value["tunnelId"], "codey-test.jpe1", "Do not mutate raw CLI records or token claims")
 
     def test_existing_tunnel_binding_cannot_change_on_retry(self):
-        enrollment, _ = inputs()
-        requested = "codey-" + enrollment["nodeId"]
+        identity = inputs().identity
+        requested = "codey-" + identity["nodeId"]
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             saved = {"requested": requested, "qualifiedId": requested + ".jpe1",
                      "tunnelId": requested, "clusterId": "jpe1"}
             service.write_private(root / "tunnel.json", saved)
-            response = {"tunnelId": requested + ".usw2", "description": "Codey macOS " + enrollment["nodeId"],
+            response = {"tunnelId": requested + ".usw2", "description": "Codey macOS " + identity["nodeId"],
                         "ports": []}
             with patch.object(installer, "run", return_value=SimpleNamespace(
                     returncode=0, stdout=json.dumps(response))) as run:
                 with self.assertRaises(installer.tunnels.TunnelError):
-                    installer.token_bound_tunnel("/reviewed/devtunnel", enrollment, root)
+                    installer.token_bound_tunnel("/reviewed/devtunnel", identity, root)
                 run.assert_called_once()
             self.assertEqual(json.loads((root / "tunnel.json").read_text()), saved)
 
     def test_wrong_tunnel_or_invalid_ports_never_create_ports(self):
-        enrollment, _ = inputs()
-        requested = "codey-" + enrollment["nodeId"]
-        valid = {"tunnelId": requested + ".jpe1", "description": "Codey macOS " + enrollment["nodeId"], "ports": []}
+        identity = inputs().identity
+        requested = "codey-" + identity["nodeId"]
+        valid = {"tunnelId": requested + ".jpe1", "description": "Codey macOS " + identity["nodeId"], "ports": []}
         cases = [
             {**valid, "tunnelId": "another-node.jpe1"},
             {**valid, "description": "another installation"},
@@ -133,30 +147,30 @@ class MacNodeTests(unittest.TestCase):
                 with patch.object(installer, "run", return_value=SimpleNamespace(
                         returncode=0, stdout=json.dumps(response))) as run:
                     with self.assertRaises(installer.tunnels.TunnelError):
-                        installer.token_bound_tunnel("/reviewed/devtunnel", enrollment, root)
+                        installer.token_bound_tunnel("/reviewed/devtunnel", identity, root)
                     run.assert_called_once()
                 self.assertEqual(json.loads((root / "tunnel.json").read_text()), {"requested": requested})
 
-    def test_architecture_release_and_purpose_keys_are_checked(self):
+    def test_architecture_release_and_static_setup_are_checked(self):
         for target in ("macos-arm64", "macos-x64"):
-            enrollment, manifest = inputs(target)
-            self.assertEqual(len(installer.validate(enrollment, manifest, target)), 3)
+            fixture = inputs(target)
+            self.assertEqual(len(installer.validate(fixture.setup, fixture.manifest, target)), 3)
             wrong = "macos-x64" if target == "macos-arm64" else "macos-arm64"
-            with self.assertRaises(service.ServiceError):
-                installer.validate(enrollment, manifest, wrong)
-            for field, replacement in [("tunnelUpdateKey", "model-key"), ("network", {}),
-                                       ("portalOrigin", "https://user:secret@evil.test")]:
-                modified = {**enrollment, field: replacement}
-                with self.assertRaises(service.ServiceError):
-                    installer.validate(modified, manifest, target)
-            expired = {**enrollment, "expiresAt": 0}
-            with self.assertRaises(service.ServiceError):
-                installer.validate(expired, manifest, target)
-            installer.validate(expired, manifest, target, ready=True)
-            changed = copy.deepcopy(manifest)
+            with self.assertRaises((service.ServiceError, installer.registration.SetupError)):
+                installer.validate(fixture.setup, fixture.manifest, wrong)
+            for field, replacement in [
+                ("network", {}),
+                ("portalOrigin", "https://user:secret@evil.test"),
+                ("tunnelAuthProvider", "microsoft"),
+                ("nodeId", "n-" + "0" * 24),
+            ]:
+                modified = {**fixture.setup, field: replacement}
+                with self.assertRaises((service.ServiceError, installer.registration.SetupError)):
+                    installer.validate(modified, fixture.manifest, target)
+            changed = copy.deepcopy(fixture.manifest)
             changed["artifacts"][0]["sha256"] = "c" * 64
             with self.assertRaises(service.ServiceError):
-                installer.validate(enrollment, changed, target)
+                installer.validate(fixture.setup, changed, target)
 
     def test_registry_rebasing_keeps_locked_version_and_integrity(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -208,15 +222,43 @@ class MacNodeTests(unittest.TestCase):
         self.assertEqual(workspace["ProgramArguments"][1], "-I")
         self.assertTrue(workspace["KeepAlive"])
         self.assertEqual(renewal["StartInterval"], 300)
+        self.assertFalse(renewal["RunAtLoad"])
         self.assertNotIn("UserName", workspace)
         self.assertEqual(workspace["Umask"], 63)
         self.assertNotIn("EnvironmentVariables", workspace, "No inline secrets in the LaunchAgent")
 
+    def test_macos_registration_export_uses_schema_2_and_owner_only_file(self):
+        fixture = inputs()
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "codey-machine-registration.json"
+            machine = {
+                "schema": 1,
+                "nodeId": fixture.identity["nodeId"],
+                "platform": fixture.setup["platform"],
+                "name": "Mac",
+                "region": "macOS · DevTunnel",
+                "networkMode": "devtunnel",
+                "tlsCertificate": "PUBLIC CERTIFICATE FIXTURE",
+                "devTunnel": {"tunnelId": "codey-" + fixture.identity["nodeId"], "clusterId": "jpe1"},
+            }
+            installer.export_registration(
+                fixture.setup, fixture.identity, {}, machine, output, "header.connect.signature",
+            )
+            value = json.loads(output.read_text())
+            self.assertEqual(
+                set(value),
+                {"schema", "package", "machine", "credentials", "devTunnelConnectToken"},
+            )
+            self.assertEqual(value["credentials"], installer.registration.exported_credentials(fixture.identity))
+            self.assertEqual(value["machine"], machine)
+            if os.name != "nt":
+                self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+
     def test_renewal_sends_only_a_connect_token_to_the_bound_portal_and_persists_no_token(self):
         with tempfile.TemporaryDirectory() as temp:
             now = int(time.time() * 1000)
-            enrollment, _ = inputs()
-            config = {"nodeId": enrollment["nodeId"], "configRoot": temp, "devtunnelExe": "/reviewed/devtunnel",
+            identity = inputs().identity
+            config = {"nodeId": identity["nodeId"], "configRoot": temp, "devtunnelExe": "/reviewed/devtunnel",
                       "tunnelId": "codey-test", "clusterId": "jpe1"}
             claims = {"tunnelId": config["tunnelId"], "clusterId": config["clusterId"], "scp": "connect",
                       "exp": now // 1000 + 72000}
@@ -228,7 +270,7 @@ class MacNodeTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout=json.dumps({"token": token}))
 
             def opener(request, **kwargs):
-                self.assertEqual(request.full_url, enrollment["portalOrigin"] + "/api/machine-tunnels/" + config["nodeId"] + "/token")
+                self.assertEqual(request.full_url, identity["portalOrigin"] + "/api/machine-tunnels/" + config["nodeId"] + "/token")
                 self.assertNotIn("Origin", request.headers)
                 body = json.loads(request.data)
                 self.assertEqual(set(body), {"tunnelId", "clusterId", "connectToken"})
@@ -236,33 +278,33 @@ class MacNodeTests(unittest.TestCase):
                 timestamp, nonce, signature = header.removeprefix("CodeyTunnel ").split(":")
                 message = f"POST\n{request.selector}\n{timestamp}\n{nonce}\n{hashlib.sha256(request.data).hexdigest()}".encode()
                 expected = base64.urlsafe_b64encode(hmac.new(
-                    base64.urlsafe_b64decode(enrollment["tunnelUpdateKey"] + "="), message, hashlib.sha256,
+                    base64.urlsafe_b64decode(identity["tunnelUpdateKey"] + "="), message, hashlib.sha256,
                 ).digest()).decode().rstrip("=")
                 self.assertEqual(signature, expected)
                 response = io.BytesIO(json.dumps({"ok": True, "nodeId": config["nodeId"], "expiresAt": claims["exp"] * 1000}).encode())
                 response.status = 200
                 return response
 
-            result = service.renew(config, enrollment, runner=runner, opener=opener, now=now)
+            result = service.renew(config, identity, runner=runner, opener=opener, now=now)
             self.assertTrue(result["ok"])
             self.assertEqual(calls[0], ["/reviewed/devtunnel", "token", "codey-test.jpe1", "--scope", "connect", "--json"])
             saved = (Path(temp) / "renewal.json").read_text()
             self.assertNotIn(token, saved)
-            self.assertNotIn(enrollment["tunnelUpdateKey"], saved)
-            service.renew(config, enrollment, runner=lambda *a, **kw: self.fail("Unnecessary token issuance"), now=now)
+            self.assertNotIn(identity["tunnelUpdateKey"], saved)
+            service.renew(config, identity, runner=lambda *a, **kw: self.fail("Unnecessary token issuance"), now=now)
             if os.name != "nt":
                 self.assertEqual((Path(temp) / "renewal.json").stat().st_mode & 0o777, 0o600)
 
     def test_privileged_or_wrong_tunnel_tokens_never_reach_the_portal(self):
         with tempfile.TemporaryDirectory() as temp:
-            enrollment, _ = inputs()
-            config = {"nodeId": enrollment["nodeId"], "configRoot": temp, "devtunnelExe": "/reviewed/devtunnel",
+            identity = inputs().identity
+            config = {"nodeId": identity["nodeId"], "configRoot": temp, "devtunnelExe": "/reviewed/devtunnel",
                       "tunnelId": "codey-test", "clusterId": "jpe1"}
             for scope, tunnel in (("host", "codey-test"), ("connect", "another-tunnel")):
                 payload = {"scp": scope, "tunnelId": tunnel, "clusterId": "jpe1", "exp": int(time.time()) + 72000}
                 token = "e30." + base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=") + ".c2ln"
                 with self.assertRaises(service.ServiceError):
-                    service.renew(config, enrollment,
+                    service.renew(config, identity,
                                   runner=lambda *a, **kw: SimpleNamespace(returncode=0, stdout=json.dumps({"token": token})),
                                   opener=lambda *a, **kw: self.fail("Unsafe credential was transmitted"))
 

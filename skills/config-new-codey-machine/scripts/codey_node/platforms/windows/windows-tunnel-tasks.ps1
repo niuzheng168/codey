@@ -77,6 +77,8 @@ try {
         $created += $folder.RegisterTaskDefinition(
             "Codey Node $($config.nodeId) $component", $definition, 2, $config.ownerSid, $null, 3, $null)
     }
+    # Renewal may receive 401 until the private registration file is imported;
+    # its bounded retry loop becomes healthy automatically after activation.
     foreach ($task in $created) { $null = $task.Run($null) }
     @{ createdTasks = @($created | ForEach-Object { $_.Name }); logonOnly = $true; existingModelServiceChanged = $false } |
         ConvertTo-Json -Compress

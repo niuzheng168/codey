@@ -201,7 +201,10 @@ export class MachineUpdates {
 
   async bootstrap(principalId, nodeId, replace = false) {
     if (!this.catalog.configured) throw requestError("节点更新尚未配置", 409);
-    const { account } = await this.owner(principalId, nodeId);
+    const { account, node } = await this.owner(principalId, nodeId);
+    const workspace = node.keyMode === "client"
+      ? await this.nodePolicy.workspaceBindingFor(principalId, nodeId)
+      : null;
     // Load the executable payload before issuing/replacing a credential.
     const sources = await this.sources();
     const credential = randomBytes(32).toString("base64url");
@@ -214,7 +217,7 @@ export class MachineUpdates {
         createdAt: this.clock(), lastSeen: null,
         report: previous?.ownerId === principalId ? previous.report : null, revoked: false };
     });
-    const config = this.config(account, nodeId, credential);
+    const config = this.config(account, nodeId, credential, workspace);
     const entries = [{ name: "codey-updater/config.json", data: JSON.stringify(config, null, 2) + "\n" }];
     entries.push(...sources);
     return zipStream(entries);
@@ -225,8 +228,9 @@ export class MachineUpdates {
       .map(async (name) => ({ name: "codey-updater/" + name, data: await readFile(path.join(this.sourceRoot, name)) })));
   }
 
-  config(account, nodeId, credential) {
-    return { schema: 1, nodeId, ownerId: account.principalId, username: account.username,
+  config(account, nodeId, credential, workspace) {
+    return { schema: 1, nodeId, ownerId: workspace?.subject ?? account.principalId,
+      username: workspace?.username ?? account.username,
       portalOrigin: this.authenticator.origin, credential, releasePublicKey: this.publicKey, protocol: UPDATE_PROTOCOL };
   }
 
@@ -256,6 +260,36 @@ export class MachineUpdates {
     });
     return [{ name: "codey-updater/config.json", data: JSON.stringify(this.config(account, nodeId, credential), null, 2) + "\n" },
       ...sources];
+  }
+
+  async registerClientMachine(principalId, nodeId, credential) {
+    if (!this.catalog.configured) throw requestError("节点更新尚未配置", 409);
+    if (!NODE_ID.test(nodeId ?? "") || !TOKEN.test(credential ?? "")) {
+      throw requestError("客户端生成的升级器凭据无效");
+    }
+    const account = await this.accounts.byId(principalId);
+    if (!account?.enabled) throw requestError("账号已停用", 403);
+    return this.mutate((data) => {
+      const existing = data.devices[nodeId];
+      if (existing) {
+        if (existing.ownerId !== principalId || existing.revoked ||
+            !sameHash(existing.credentialHash, hash(credential))) {
+          throw requestError("此机器的升级器身份已被使用", 409);
+        }
+        return { created: false };
+      }
+      if (Object.keys(data.devices).length >= 1024) throw requestError("升级器数量已达上限", 409);
+      data.devices[nodeId] = {
+        nodeId,
+        ownerId: principalId,
+        credentialHash: hash(credential),
+        createdAt: this.clock(),
+        lastSeen: null,
+        report: null,
+        revoked: false,
+      };
+      return { created: true };
+    });
   }
 
   async revoke(principalId, nodeId) {

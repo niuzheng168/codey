@@ -58,7 +58,7 @@ function probe(machine, port, pathname, headers, { requestImpl, timeoutMs, webso
   });
 }
 
-export async function verifyMachine(machine, { principal, master, clientKey, requestImpl = https.request, timeoutMs = 15000,
+export async function verifyMachine(machine, { principal, master, workspaceBinding, clientKey, requestImpl = https.request, timeoutMs = 15000,
   getTunnelToken, tunnelTransportFactory = (config, tlsOptions, options) => new DevTunnelTransport(config, tlsOptions, options) }) {
   const agents = new Map();
   if (machine.networkMode === "devtunnel") {
@@ -73,7 +73,8 @@ export async function verifyMachine(machine, { principal, master, clientKey, req
   const workspaceHeaders = (pathname) => ({
     accept: "application/json",
     "x-codey-workspace-assertion": issueWorkspaceAssertion({
-      master, nodeId: machine.id, principal, method: "GET",
+      master, signingKey: workspaceBinding?.key, subject: workspaceBinding?.subject, username: workspaceBinding?.username,
+      nodeId: machine.id, principal, method: "GET",
       target: new URL(`https://${machine.networkMode === "devtunnel" ? "127.0.0.1" : machine.privateIp}:3001${pathname}`),
     }),
   });
@@ -94,7 +95,8 @@ export async function verifyMachine(machine, { principal, master, clientKey, req
     if (health.status !== 200 || (!usageAvailable && !quotaUnavailable) || history.status !== 200 ||
         anonymousData.status !== 401 || anonymousWorkspace.status !== 401 ||
         workspace.status !== 200 || workspace.body.managedAuthentication !== true ||
-        workspace.body.needsSetup !== false || workspace.body.user?.username !== principal.name) {
+        workspace.body.needsSetup !== false ||
+        workspace.body.user?.username !== (workspaceBinding?.username ?? principal.name)) {
       throw new Error("Private service authentication verification failed");
     }
     if (!usageAvailable) {

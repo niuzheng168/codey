@@ -89,11 +89,11 @@ export class MachineTunnelService {
         chunks.push(chunk);
       }
       const bytes = Buffer.concat(chunks);
+      const record = await this.nodePolicy.tunnelMachine(id, now);
       const expected = signMachineTunnelRequest(
-        machineTunnelKey(this.nodePolicy.master, id), url.pathname, bytes, auth[1], auth[2],
+        await this.nodePolicy.tunnelKeyFor(id, record), url.pathname, bytes, auth[1], auth[2],
       );
       if (!timingSafeEqual(Buffer.from(expected), Buffer.from(auth[3]))) throw requestError("Machine authentication failed", 401);
-      const record = await this.nodePolicy.tunnelMachine(id, now);
       const owner = await this.accounts.byId(record.ownerId);
       if (!owner?.enabled) throw requestError("Machine authentication failed", 401);
       for (const [key, expiry] of this.recentRequests) if (expiry < now) this.recentRequests.delete(key);

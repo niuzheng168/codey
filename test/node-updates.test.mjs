@@ -471,6 +471,44 @@ test("pending machine credentials are stable, owner-bound and unusable before ac
   await assert.rejects(f.updates.newMachineEntries("owner-a", node.id), { status: 404 });
 });
 
+test("rotating an imported updater preserves its client-generated local Workspace binding", async (t) => {
+  const f = await fixture(t);
+  const id = `n-${"e".repeat(24)}`;
+  const coordinates = { tunnelId: "codey-imported-updater", clusterId: "jpe1" };
+  const connect = ["e30", Buffer.from(JSON.stringify({
+    ...coordinates, scp: "connect", exp: Math.floor(Date.now() / 1000) + 72000,
+  })).toString("base64url"), "c2ln"].join(".");
+  const credentials = {
+    clientSigningKey: randomBytes(32).toString("base64url"),
+    workspaceSsoKey: randomBytes(32).toString("base64url"),
+    tunnelUpdateKey: randomBytes(32).toString("base64url"),
+    updaterCredential: randomBytes(32).toString("base64url"),
+    workspaceSubject: `m-${"f".repeat(24)}`,
+    workspaceUsername: "localowner",
+  };
+  await f.policy.importMachine("owner-a", {
+    id, name: "Imported", region: "Test", platform: "linux-x64",
+    networkMode: "devtunnel", devTunnel: coordinates,
+    tlsServerName: `${id}.nodes.codey.internal`, fingerprint: "fixture", ca: "fixture",
+  }, credentials, connect);
+  await f.updates.registerClientMachine("owner-a", id, credentials.updaterCredential);
+  const before = (await f.updates.store.read()).data.devices[id].credentialHash;
+  const workspaceBindingFor = f.policy.workspaceBindingFor.bind(f.policy);
+  f.policy.workspaceBindingFor = async () => { throw new Error("fixture binding failure"); };
+  await assert.rejects(f.updates.bootstrap("owner-a", id, true), /fixture binding failure/);
+  assert.equal((await f.updates.store.read()).data.devices[id].credentialHash, before,
+    "A failed local-binding read must not rotate the active updater credential");
+  f.policy.workspaceBindingFor = workspaceBindingFor;
+  const zip = await f.updates.bootstrap("owner-a", id, true);
+  const chunks = [];
+  for await (const chunk of zip) chunks.push(chunk);
+  const config = JSON.parse(zipEntry(Buffer.concat(chunks), "codey-updater/config.json"));
+  assert.equal(config.nodeId, id);
+  assert.equal(config.ownerId, credentials.workspaceSubject);
+  assert.equal(config.username, credentials.workspaceUsername);
+  assert.notEqual(config.credential, credentials.updaterCredential);
+});
+
 test("credential rotation does not reset the device anti-downgrade high-water mark", async (t) => {
   const f = await fixture(t);
   const config = await f.enroll();

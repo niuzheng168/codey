@@ -1,7 +1,6 @@
 """macOS pinned Node/backend build and integrity-preserving registry mapping."""
 import json
 import os
-from pathlib import Path
 import re
 import urllib.parse
 

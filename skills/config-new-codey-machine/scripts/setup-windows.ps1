@@ -1,20 +1,17 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-Plan or install a fresh owner-bound Windows Codey node, never a Linux/WSL node.
+Plan or install a native Windows Codey node from the reusable static package.
 .DESCRIPTION
-Uses the personalized Windows DevTunnel package while preserving an existing
-model proxy and Codex installation. DevTunnel uses the owner's GitHub login.
-Default is a read-only plan. -Apply -NetworkApproved approves the private
-outbound tunnel and loopback listeners; firewall/network rules are not changed.
-Services start only while the original Windows owner is logged on.
-A successful installation remains verification-only. Existing-node recovery
-tools are archived and are not part of this first-install entrypoint.
+Uses public assets/setup.json and generates this machine's registration
+credentials locally. DevTunnel uses the owner's GitHub login. Default is a
+read-only plan. -Apply -NetworkApproved approves only the private outbound
+tunnel and loopback listeners; firewall/network rules are not changed.
+The final output is a private schema 2 registration file.
 #>
 [CmdletBinding()]
 param(
-    [string]$Out = (Join-Path $PSScriptRoot '..\output\codey-machine.json'),
-    [string]$Enrollment = (Join-Path $PSScriptRoot '..\assets\enrollment.json'),
+    [string]$Out = (Join-Path $HOME 'codey-machine-registration.json'),
     [string]$Name = '',
     [string]$PythonExe = '',
     [string]$OpenSslExe = '',
@@ -39,11 +36,6 @@ if ($Apply -and -not $NetworkApproved) {
 if ($ExpectedComputerName -and $env:COMPUTERNAME -ine $ExpectedComputerName) {
     throw 'Wrong computer. No installation or environment change was attempted.'
 }
-$invitation = Get-Content -LiteralPath $Enrollment -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($invitation.acceptance.expectedComputerName -and
-    $env:COMPUTERNAME -ine $invitation.acceptance.expectedComputerName) {
-    throw 'This acceptance package is bound to a different computer. Do not use it on the existing working node.'
-}
 if (-not $PythonExe) {
     $command = Get-Command python.exe -ErrorAction SilentlyContinue
     if (-not $command -or $command.Source -like '*\WindowsApps\*') {
@@ -54,11 +46,8 @@ if (-not $PythonExe) {
 if (-not [IO.Path]::IsPathRooted($PythonExe) -or -not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) {
     throw 'PythonExe must name an existing absolute executable path.'
 }
-if ($invitation.network.mode -ne 'devtunnel') {
-    throw 'Download this account''s current private DevTunnel package. Existing nodes are not migrated by this installer.'
-}
 $arguments = @('-X', 'utf8', '-I', '-B', (Join-Path $PSScriptRoot 'codey.py'), 'windows',
-    '--enrollment', $Enrollment, '--out', $Out)
+    '--out', $Out)
 if ($DevTunnelExe) { $arguments += @('--devtunnel-executable', $DevTunnelExe) }
 if ($UsageKeyFile) { $arguments += @('--usage-key-file', $UsageKeyFile) }
 if ($WorkspaceRoot) { $arguments += @('--workspace-root', $WorkspaceRoot) }

@@ -48,17 +48,17 @@ def validate(config, component, context):
     for field in ("devtunnelExe", "codexExe"):
         if config[field] not in config["fileHashes"]:
             raise RuntimeError("unpinned_owner_executable")
-    for field in ("enrollmentFile", "certificate", "privateKey", "ticketKeyFile"):
+    for field in ("identityFile", "certificate", "privateKey", "ticketKeyFile"):
         file = Path(config[field])
         if not file.is_file() or file.is_symlink() or not file.resolve().is_relative_to(config_root):
             raise RuntimeError("invalid_private_runtime_input")
-    enrollment = json.loads(Path(config["enrollmentFile"]).read_text(encoding="utf-8-sig"))
-    if enrollment.get("nodeId") != config["nodeId"] or enrollment.get("platform") != "windows-x64":
-        raise RuntimeError("runtime_enrollment_mismatch")
-    return enrollment
+    identity = json.loads(Path(config["identityFile"]).read_text(encoding="utf-8-sig"))
+    if identity.get("nodeId") != config["nodeId"] or identity.get("platform") != "windows-x64":
+        raise RuntimeError("runtime_registration_identity_mismatch")
+    return identity
 
 
-def environment(config, enrollment):
+def environment(config, identity):
     allowed = {
         "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
         "LOCALAPPDATA", "APPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "COMMONPROGRAMFILES",
@@ -80,16 +80,16 @@ def environment(config, enrollment):
         "PATH": config["servicePath"], "NODE_ENV": "production",
         "HOST": "127.0.0.1", "SERVER_PORT": "3001", "CODEY_MANAGED": "true",
         "CODEY_PORTAL_SSO": "true", "CODEY_PORTAL_NODE_ID": config["nodeId"],
-        "CODEY_PORTAL_USERNAME": enrollment["username"],
-        "CODEY_PORTAL_PRINCIPAL_ID": enrollment["principalId"],
-        "CODEY_PORTAL_SSO_KEY": enrollment["workspaceSsoKey"],
+        "CODEY_PORTAL_USERNAME": identity["workspaceUsername"],
+        "CODEY_PORTAL_PRINCIPAL_ID": identity["workspaceSubject"],
+        "CODEY_PORTAL_SSO_KEY": identity["workspaceSsoKey"],
         "CODEY_PORTAL_TLS_CERT": config["certificate"], "CODEY_PORTAL_TLS_KEY": config["privateKey"],
         "DATABASE_PATH": config["databasePath"], "CODEX_HOME": config["codexHome"],
         "CODEY_CODEX_EXECUTABLE": config["codexExe"], "CODEY_CODEX_RUNTIME_TRANSPORT": "stdio",
         "WORKSPACES_ROOT": config["workspaceRoot"],
         "CODEY_RELAY_HOST": "127.0.0.1", "CODEY_RELAY_PORT": "8443",
         "CODEY_RELAY_NODE_ID": config["nodeId"], "CODEY_RELAY_NODE_NAME": config["name"],
-        "CODEY_RELAY_ALLOWED_ORIGIN": enrollment["portalOrigin"],
+        "CODEY_RELAY_ALLOWED_ORIGIN": identity["portalOrigin"],
         "CODEY_RELAY_UPSTREAM": "http://127.0.0.1:4141/",
         "CODEY_RELAY_UPSTREAM_KEY_FILE": config.get("usageKeyFile", ""),
         "CODEY_RELAY_SIGNING_KEY_FILE": config["ticketKeyFile"],
@@ -143,7 +143,7 @@ def serve(config_file, component):
     if os.name != "nt":
         raise RuntimeError("native_windows_required")
     config = json.loads(Path(config_file).read_text(encoding="utf-8-sig"))
-    enrollment = validate(config, component, owner.owner_context())
+    identity = validate(config, component, owner.owner_context())
     import msvcrt
     lock = Path(config["configRoot"]) / (component + ".lock")
     with lock.open("a+b") as stream:
@@ -168,7 +168,7 @@ def serve(config_file, component):
             while True:
                 validate(config, component, owner.owner_context())
                 try:
-                    result = renewal.renew(config, enrollment)
+                    result = renewal.renew(config, identity)
                     status("healthy", expiresAt=result["expiresAt"])
                     delay = 900
                 except Exception:
@@ -184,7 +184,7 @@ def serve(config_file, component):
         delay = 5
         while True:
             validate(config, component, owner.owner_context())
-            child_env = environment(config, enrollment)
+            child_env = environment(config, identity)
             if component == "tunnel":
                 child_env = auth.cli_environment(child_env)
                 if config.get("tunnelAuthProvider") == "github":

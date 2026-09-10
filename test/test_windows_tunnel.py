@@ -23,7 +23,7 @@ SCRIPT = ROOT / "skills/config-new-codey-machine/scripts"
 
 
 sys.path.insert(0, str(SCRIPT))
-from codey_node.common import files as file_ops, verification, config_defaults, config_files
+from codey_node.common import files as file_ops, verification, config_defaults, config_files, registration
 from codey_node.common.errors import TunnelError
 from codey_node.devtunnel import auth, binding as tunnels, renewal
 from codey_node.platforms.windows import install as installer, preflight, cli as bootstrap
@@ -35,11 +35,18 @@ ID = "n-0123456789abcdef01234567"
 NOW = 1788939000000
 
 
+def key(value):
+    return base64.urlsafe_b64encode(bytes([value]) * 32).decode().rstrip("=")
+
+
 def invitation():
     return {
-        "schema": 1, "platform": "windows-x64", "nodeId": ID, "principalId": "owner-a", "username": "zhn",
-        "clientSigningKey": "A" * 43, "workspaceSsoKey": "B" * 43, "tunnelUpdateKey": "C" * 43,
-        "portalOrigin": "https://codey.test", "network": {"mode": "devtunnel"}, "expiresAt": NOW + 86400000,
+        "platform": "windows-x64", "nodeId": ID,
+        "workspaceSubject": "m-" + "a" * 24, "workspaceUsername": "zhn",
+        "clientSigningKey": key(1), "workspaceSsoKey": key(2),
+        "tunnelUpdateKey": key(3), "updaterCredential": key(4),
+        "portalOrigin": "https://codey.test", "network": {"mode": "devtunnel"},
+        "tunnelAuthProvider": "github",
     }
 
 
@@ -58,12 +65,36 @@ def fixture_manifest():
     }
 
 
+def static_setup(manifest=None, **extra):
+    manifest = manifest or fixture_manifest()
+    return {
+        "schema": 1,
+        "platform": "windows-x64",
+        "portalOrigin": "https://codey.test",
+        "network": {"mode": "devtunnel"},
+        "tunnelAuthProvider": "github",
+        "releaseId": manifest["releaseId"],
+        **extra,
+    }
+
+
 def token(**changes):
     claims = {"tunnelId": "codey-test-windows", "clusterId": "jpe1", "scp": "connect", "exp": NOW // 1000 + 72000, **changes}
     return ".".join(["e30", base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("="), "c2ln"])
 
 
 class WindowsTunnelTests(unittest.TestCase):
+    def test_private_registration_writer_applies_acl_before_credential_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "codey-machine-registration.json"
+            observed = []
+            with patch.object(installer.windows, "private_file",
+                              side_effect=lambda file, _sid: observed.append(Path(file).stat().st_size)):
+                installer.windows.write_private_json(output, {"secret": "fixture"}, "owner-sid")
+            self.assertEqual(observed[0], 0)
+            self.assertGreater(observed[-1], 0)
+            self.assertEqual(json.loads(output.read_text()), {"secret": "fixture"})
+
     def proxy_probe(self, responses, key_file=None):
         calls = []
 
@@ -195,10 +226,10 @@ class WindowsTunnelTests(unittest.TestCase):
         identity = "\n".join([manifest["node"], manifest["bunBuildTool"], manifest["nodeDistribution"]["sha256"]]
                              + [row["sha256"] for row in manifest["artifacts"]])
         manifest["releaseId"] = "machine-" + hashlib.sha256(identity.encode()).hexdigest()[:16]
-        enrollment = invitation()
-        enrollment.update(releaseId=manifest["releaseId"], expiresAt=int(time.time() * 1000) + 86400000)
+        setup = static_setup(manifest)
+        local_identity = {**invitation(), "releaseId": manifest["releaseId"]}
         (skill / "assets/manifest.json").write_text(json.dumps(manifest))
-        (skill / "assets/enrollment.json").write_text(json.dumps(enrollment))
+        (skill / "assets/setup.json").write_text(json.dumps(setup))
         tools = root / "tools"
         tools.mkdir()
         for name in ("codex.exe", "openssl.exe", "devtunnel.exe"):
@@ -213,37 +244,51 @@ class WindowsTunnelTests(unittest.TestCase):
                                       "providers": {"custom": {"apiKey": "keep-provider-fixture"}}}))
         args = SimpleNamespace(
             expected_computer_name=os.environ.get("COMPUTERNAME", ""), apply=True, network_approved=True,
-            enrollment=str(skill / "assets/enrollment.json"), out=str(root / "output/codey-machine.json"),
+            out=str(root / "output/codey-machine-registration.json"),
             codex_executable=str(tools / "codex.exe"), openssl=str(tools / "openssl.exe"),
             devtunnel_executable=str(tools / "devtunnel.exe"), usage_key_file=None, workspace_root=str(home), name="Test Windows",
             codex_home=str(codex_home), copilot_api_config=str(gateway), model_key_file=None,
+            identity=local_identity, setup=setup,
         )
         return home, skill, codex_home, args
 
     def test_windows_bundle_requires_native_pinned_sources_and_separate_credentials(self):
-        manifest, enrollment = fixture_manifest(), invitation()
-        enrollment["releaseId"] = manifest["releaseId"]
-        self.assertEqual(len(package.validate_bundle(enrollment, manifest, now=NOW)), 3)
+        manifest = fixture_manifest()
+        setup = static_setup(manifest)
+        self.assertEqual(len(package.validate_bundle(setup, manifest, now=NOW)), 3)
         for key, value in [("platform", "linux-x64"), ("network", {"mode": "same-vnet"}),
-                           ("workspaceSsoKey", enrollment["clientSigningKey"]), ("expiresAt", NOW - 1)]:
+                           ("tunnelAuthProvider", "microsoft"), ("nodeId", ID)]:
             with self.subTest(key=key), self.assertRaises(TunnelError):
-                package.validate_bundle({**enrollment, key: value}, manifest, now=NOW)
+                package.validate_bundle({**setup, key: value}, manifest, now=NOW)
         for value in ["http://codey.test", "https://user:key@codey.test", "https://codey.test/path"]:
             with self.subTest(origin=value), self.assertRaises(TunnelError):
-                package.validate_bundle({**enrollment, "portalOrigin": value}, manifest, now=NOW)
+                package.validate_bundle({**setup, "portalOrigin": value}, manifest, now=NOW)
         wrong = copy.deepcopy(manifest)
         wrong["nodeDistribution"]["file"] = "node-v24.20.0-linux-x64.tar.xz"
         with self.assertRaises(TunnelError):
-            package.validate_bundle(enrollment, wrong, now=NOW)
+            package.validate_bundle(setup, wrong, now=NOW)
         wrong = copy.deepcopy(manifest)
         wrong["artifacts"].pop()
         with self.assertRaises(TunnelError):
-            package.validate_bundle(enrollment, wrong, now=NOW)
+            package.validate_bundle(setup, wrong, now=NOW)
 
-    def test_ready_install_can_be_verified_after_invitation_expiry(self):
-        manifest, enrollment = fixture_manifest(), invitation()
-        enrollment.update(releaseId=manifest["releaseId"], expiresAt=NOW - 1)
-        self.assertEqual(len(package.validate_bundle(enrollment, manifest, ready=True, now=NOW)), 3)
+    def test_windows_preview_acceptance_is_public_target_bound_and_expiring(self):
+        manifest = fixture_manifest()
+        setup = static_setup(manifest, acceptance={
+            "expectedComputerName": "CPC-test-WINBOX",
+            "expiresAt": NOW + 86400000,
+        })
+        self.assertEqual(len(package.validate_bundle(setup, manifest, now=NOW)), 3)
+        for acceptance in (
+            {"expectedComputerName": "../other", "expiresAt": NOW + 86400000},
+            {"expectedComputerName": "WINBOX", "expiresAt": NOW - 1},
+            {"expectedComputerName": "WINBOX", "expiresAt": NOW + 8 * 86400000},
+            {"expectedComputerName": "WINBOX"},
+        ):
+            with self.subTest(acceptance=acceptance), self.assertRaises(TunnelError):
+                package.validate_bundle(
+                    {**setup, "acceptance": acceptance}, manifest, now=NOW,
+                )
 
     def test_renewal_is_request_bound_connect_only_and_keeps_tokens_out_of_state(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -272,7 +317,7 @@ class WindowsTunnelTests(unittest.TestCase):
                 timestamp, nonce, signature = auth.split(":")
                 self.assertEqual(scheme, "CodeyTunnel")
                 message = f"POST\n/api/machine-tunnels/{ID}/token\n{timestamp}\n{nonce}\n{hashlib.sha256(request.data).hexdigest()}".encode()
-                expected = base64.urlsafe_b64encode(hmac.new(base64.urlsafe_b64decode("C" * 43 + "="),
+                expected = base64.urlsafe_b64encode(hmac.new(base64.urlsafe_b64decode(key(3) + "="),
                                                             message, hashlib.sha256).digest()).decode().rstrip("=")
                 self.assertEqual(signature, expected)
                 self.assertIsNone(request.get_header("Cookie"))
@@ -575,7 +620,7 @@ class WindowsTunnelTests(unittest.TestCase):
                         Path(values[values.index("-keyout") + 1]).write_text("private key fixture")
                     return SimpleNamespace(returncode=0, stdout="{}")
 
-                original_export = installer.export_machine
+                original_export = installer.export_registration
                 from contextlib import ExitStack, redirect_stdout
                 import io
                 output = io.StringIO()
@@ -586,6 +631,11 @@ class WindowsTunnelTests(unittest.TestCase):
                     stack.enter_context(patch.object(installer.windows.service, "owner_context", return_value=context))
                     stack.enter_context(patch.object(installer.windows, "private_directory",
                                                     side_effect=lambda target, _sid: Path(target).mkdir(parents=True)))
+                    stack.enter_context(patch.object(installer.windows, "private_file"))
+                    stack.enter_context(patch.object(installer.registration, "load_or_create",
+                                                     return_value=args.identity))
+                    stack.enter_context(patch.object(installer.registration, "existing",
+                                                     return_value=args.identity))
                     stack.enter_context(patch.object(preflight, "gateway_proof", return_value=proof))
                     stack.enter_context(patch.object(preflight, "free_ports", return_value=[]))
                     stack.enter_context(patch.object(preflight, "verify_usage", return_value={
@@ -598,14 +648,19 @@ class WindowsTunnelTests(unittest.TestCase):
                     stack.enter_context(patch.object(installer, "run", side_effect=command))
                     stack.enter_context(patch.object(tunnels, "ensure_tunnel",
                                                     return_value={"tunnelId": "codey-test-windows", "clusterId": "jpe1"}))
-                    stack.enter_context(patch.object(renewal, "renew", return_value={"ok": True}))
+                    stack.enter_context(patch.object(renewal, "connect_token", return_value=token()))
+                    portal_renew = stack.enter_context(patch.object(renewal, "renew"))
                     stack.enter_context(patch.object(preflight.codex_cli, "require_cli",
                                                     return_value=Path(args.codex_executable)))
                     verify = stack.enter_context(patch.object(verification, "verify", return_value={
                         "usage": False, "usageHttpStatus": 500, "tokenUsage": True,
                         "warnings": ["copilot_quota_unavailable_model_inference_not_tested"],
                     }))
-                    stack.enter_context(patch.object(installer, "export_machine",
+                    model = stack.enter_context(patch.object(
+                        installer.model_test, "codex",
+                        return_value={"marker": "CODEY_INSTALL_OK", "passed": True},
+                    ))
+                    stack.enter_context(patch.object(installer, "export_registration",
                                                     side_effect=OSError("fixture export failure") if export_fails else original_export))
                     stack.enter_context(redirect_stdout(output))
                     if export_fails:
@@ -630,20 +685,36 @@ class WindowsTunnelTests(unittest.TestCase):
                 self.assertEqual(gateway["auth"]["adminApiKey"], "keep-admin-fixture")
                 self.assertEqual(runtime["codexHome"], str(codex_home))
                 self.assertEqual(runtime["kind"], "windows-devtunnel")
+                self.assertEqual(json.loads(Path(runtime["identityFile"]).read_text()), args.identity)
+                portal_renew.assert_not_called()
                 task_actions = [row[-1] for row in commands if "-Operation" in row]
                 self.assertEqual(task_actions, ["Install", "RemoveCreated"] if export_fails else ["Install"])
                 self.assertTrue(all(row[0] != proof["executable"] for row in commands))
                 verify.assert_called_once()
+                model.assert_called_once()
                 if not export_fails:
-                    machine = json.loads(Path(args.out).read_text())
+                    exported = json.loads(Path(args.out).read_text())
+                    self.assertEqual(
+                        set(exported),
+                        {"schema", "package", "machine", "credentials", "devTunnelConnectToken"},
+                    )
+                    self.assertEqual(exported["schema"], 2)
+                    self.assertEqual(exported["package"], registration.package_fields(args.setup))
+                    self.assertEqual(exported["credentials"], registration.exported_credentials(args.identity))
+                    self.assertEqual(exported["devTunnelConnectToken"], token())
+                    machine = exported["machine"]
                     self.assertEqual(machine["nodeId"], ID)
                     self.assertEqual(machine["networkMode"], "devtunnel")
                     self.assertNotIn("privateIp", machine)
                     self.assertNotIn("vmResourceId", machine)
                     self.assertTrue(json.loads(output.getvalue())["existingModelServiceUnchanged"])
                     self.assertFalse(json.loads(output.getvalue())["verification"]["usage"])
-                    self.assertFalse(json.loads(output.getvalue())["realModelCallsTested"])
-                    for secret in ("A" * 43, "B" * 43, "C" * 43, "private key fixture", "fixture-active-model-key"):
+                    self.assertTrue(json.loads(output.getvalue())["realModelCallsTested"])
+                    self.assertEqual(json.loads(output.getvalue())["modelTest"]["marker"], "CODEY_INSTALL_OK")
+                    for secret in (key(1), key(2), key(3), key(4)):
+                        self.assertIn(secret, Path(args.out).read_text())
+                        self.assertNotIn(secret, output.getvalue())
+                    for secret in ("private key fixture", "fixture-active-model-key"):
                         self.assertNotIn(secret, Path(args.out).read_text())
                         self.assertNotIn(secret, output.getvalue())
 
@@ -652,7 +723,6 @@ class WindowsTunnelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home, skill, codex_home, args = self.install_fixture(Path(directory))
             manifest = json.loads((skill / "assets/manifest.json").read_text())
-            enrollment = json.loads((skill / "assets/enrollment.json").read_text())
             config_root = home / ".config/codey-machine-windows" / ID
             config_root.mkdir(parents=True)
             cert = config_root / "fixture.pem"
@@ -662,14 +732,23 @@ class WindowsTunnelTests(unittest.TestCase):
             (config_root / "installation.json").write_text(json.dumps(state))
             (config_root / "runtime.json").write_text(json.dumps({
                 "name": "fixture", "certificate": str(cert), "tunnelId": "codey-" + ID, "clusterId": "jpe1",
+                "codexExe": str(home / "codex.exe"), "codexHome": str(codex_home),
+                "providerEnv": {"CODEY_MODEL_API_KEY": "fixture-active-model-key"},
             }))
             before = {str(path): path.read_bytes() for path in home.rglob("*") if path.is_file()}
             from contextlib import redirect_stdout
             with patch.object(installer, "SKILL", skill), patch.object(Path, "home", return_value=home), \
                     patch.object(installer.windows.service, "owner_context",
                                  return_value={"sid": "test-owner", "sessionId": 1, "elevated": False}), \
-                    patch.object(worker, "validate", return_value=enrollment), \
+                    patch.object(installer.windows, "private_directory",
+                                 side_effect=lambda target, _sid: Path(target).mkdir(parents=True)), \
+                    patch.object(installer.windows, "private_file"), \
+                    patch.object(installer.registration, "load_or_create", return_value=args.identity), \
+                    patch.object(worker, "validate", return_value=args.identity), \
                     patch.object(verification, "verify", return_value={"fixture": True}), \
+                    patch.object(installer.model_test, "codex",
+                                 return_value={"marker": "CODEY_INSTALL_OK", "passed": True}), \
+                    patch.object(renewal, "connect_token", return_value=token()), \
                     patch.object(config_defaults, "prepare") as prepare, \
                     patch.object(preflight, "gateway_proof") as proof, \
                     patch.object(installer, "run") as commands, redirect_stdout(io.StringIO()):
@@ -682,12 +761,16 @@ class WindowsTunnelTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Native Windows candidate target guard")
     def test_python_entry_cannot_bypass_candidate_target_binding(self):
         with tempfile.TemporaryDirectory() as directory:
-            _, _, _, args = self.install_fixture(Path(directory))
-            file = Path(args.enrollment)
-            enrollment = json.loads(file.read_text())
-            enrollment["acceptance"] = {"expectedComputerName": "OTHER-BOX", "expiresAt": NOW + 86400000}
-            file.write_text(json.dumps(enrollment))
-            with patch.object(installer.windows.service, "owner_context",
+            _, skill, _, args = self.install_fixture(Path(directory))
+            file = skill / "assets/setup.json"
+            setup = json.loads(file.read_text())
+            setup["acceptance"] = {
+                "expectedComputerName": "OTHER-BOX",
+                "expiresAt": int(time.time() * 1000) + 86400000,
+            }
+            file.write_text(json.dumps(setup))
+            with patch.object(installer, "SKILL", skill), \
+                    patch.object(installer.windows.service, "owner_context",
                               return_value={"sid": "test-owner", "sessionId": 1, "elevated": False}), \
                     patch.object(preflight, "gateway_proof") as proof, \
                     patch.object(installer.windows, "private_directory") as private:

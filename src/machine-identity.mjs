@@ -87,7 +87,7 @@ export function machineIdentity(input, expectedId, now = Date.now()) {
   };
 }
 
-export function preparedGateways(node, { getTunnelToken } = {}) {
+export function preparedGateways(node, { getTunnelToken, getWorkspaceBinding } = {}) {
   const machine = node.machine;
   const host = machine.networkMode === "devtunnel" ? "127.0.0.1" : machine.privateIp;
   const tunnel = (port) => machine.networkMode === "devtunnel" ? {
@@ -105,6 +105,7 @@ export function preparedGateways(node, { getTunnelToken } = {}) {
       upstream: new URL(`https://${host}:3001`),
       tlsServerName: machine.tlsServerName, ca: machine.ca, fingerprint: machine.fingerprint,
       healthMonitoring: !machinePlatform(machine.platform ?? "linux-x64").updater,
+      ...(getWorkspaceBinding ? { getWorkspaceBinding } : {}),
       ...tunnel(3001),
     },
   };

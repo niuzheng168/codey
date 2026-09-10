@@ -21,7 +21,6 @@ import { crc32, zipStream } from "../src/zip-stream.mjs";
 import { fetchNodeJson } from "../public/node-transport.js";
 import { MachineUpdates } from "../src/machine-updates.mjs";
 import { MACHINE_PLATFORMS } from "../src/machine-platforms.mjs";
-import { signMachineTunnelRequest } from "../src/machine-tunnel.mjs";
 
 const run = promisify(execFile);
 const origin = "https://codey.example.test";
@@ -91,6 +90,33 @@ function unzip(archive) {
   return entries;
 }
 
+function clientCredentials() {
+  return {
+    clientSigningKey: randomBytes(32).toString("base64url"),
+    workspaceSsoKey: randomBytes(32).toString("base64url"),
+    tunnelUpdateKey: randomBytes(32).toString("base64url"),
+    updaterCredential: randomBytes(32).toString("base64url"),
+    workspaceSubject: `m-${randomBytes(12).toString("hex")}`,
+    workspaceUsername: "member",
+  };
+}
+
+function connectToken(coordinates, now = Date.now()) {
+  return ["e30", Buffer.from(JSON.stringify({
+    ...coordinates, scp: "connect", exp: Math.floor(now / 1000) + 72000,
+  })).toString("base64url"), "c2ln"].join(".");
+}
+
+function registration(manifest, machine, credentials = clientCredentials(), token = connectToken(machine.devTunnel)) {
+  return {
+    schema: 2,
+    package: { portalOrigin: origin, releaseId: manifest.releaseId, platform: manifest.platform },
+    machine,
+    credentials,
+    devTunnelConnectToken: token,
+  };
+}
+
 async function machineFile(root, nodeId, options = {}) {
   const cert = path.join(root, `${nodeId}.pem`);
   const key = path.join(root, `${nodeId}.key`);
@@ -132,6 +158,7 @@ async function fixture(t) {
   const data = new NodeDataGateway({ nodes: [], signingKey: ticketMaster, ca: "legacy-test-ca" }, { nodePolicy: policy });
   const workspace = new CloudCliGateway({ nodes: [], ssoMaster: master, ca: "legacy-test-ca" }, { sessionAuthenticator: auth, nodePolicy: policy });
   const probes = [];
+  const tunnelProbes = [];
   const updates = new MachineUpdates({ root, master, nodePolicy: policy, accounts, authenticator: auth,
     sourceRoot: path.resolve("node-updater"), catalogRoot: path.join(root, "node-updates"),
     publicKey: generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }) });
@@ -142,6 +169,7 @@ async function fixture(t) {
       probes.push({ machine, options });
       return { https: true, usage: true, history: true, workspaceSso: true, websocket: true, anonymousDenied: true };
     },
+    verifyTunnel: async (coordinates, token) => { tunnelProbes.push({ coordinates, token }); },
   });
   const settings = new SettingsApi({ accounts, nodePolicy: policy, authenticator: auth, cloudCliGateway: workspace, nodeDataGateway: data, machineSetup });
   const server = createMultiUserPortalServer({
@@ -158,20 +186,26 @@ async function fixture(t) {
       cookie: user, origin, ...(value !== undefined ? { "content-type": "application/json" } : {}), ...headers,
     }, ...(value !== undefined ? { body: JSON.stringify(value) } : {}),
   });
-  return { root, base, accounts, policy, auth, credential, member, cookie, admin, manifest, bundleRoot, machineSetup, data, workspace, probes, request, master, ticketMaster };
+  return {
+    root, base, accounts, policy, auth, credential, member, cookie, admin, manifest, bundleRoot,
+    machineSetup, data, workspace, probes, tunnelProbes, request, master, ticketMaster,
+  };
 }
 
-test("all native packages use GitHub DevTunnel without VNet and activate only after scoped tunnel proof", async t => {
+test("all native packages are reusable and activate client-generated identities only after scoped tunnel proof", async t => {
   const f = await fixture(t);
   f.machineSetup.network = null;
-  f.machineSetup.tunnels.verifyAccess = async () => {};
   for (const [index, platform] of ["macos-arm64", "macos-x64", "windows-x64", "linux-x64"].entries()) {
-    await bundle(platform === "linux-x64" ? f.bundleRoot : path.join(f.bundleRoot, "platforms", platform), platform);
+    const manifest = platform === "linux-x64" ? f.manifest
+      : await bundle(path.join(f.bundleRoot, "platforms", platform), platform);
     const response = await f.request(`/api/settings/machines/skill?platform=${platform}`, { method: "POST" });
     assert.equal(response.status, 200);
-    assert.ok(response.headers.get("content-disposition").includes(platform === "linux-x64"
-      ? "config-new-codey-machine-n-" : `-${platform === "windows-x64" ? "windows" : platform}-n-`));
-    const files = unzip(Buffer.from(await response.arrayBuffer()));
+    const expectedName = platform === "linux-x64" ? "config-new-codey-machine.zip"
+      : platform === "windows-x64" ? "config-new-codey-machine-windows.zip"
+        : `config-new-codey-machine-${platform}.zip`;
+    assert.equal(response.headers.get("content-disposition"), `attachment; filename="${expectedName}"`);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const files = unzip(bytes);
     for (const file of [...MACHINE_SKILL_FILES, ...MACHINE_PLATFORMS.find(item => item.id === platform).files]) {
       assert.ok(files.has(`config-new-codey-machine/${file}`), file);
     }
@@ -200,38 +234,31 @@ test("all native packages use GitHub DevTunnel without VNet and activate only af
     assert.ok(!files.has(`config-new-codey-machine/scripts/${platform === "windows-x64" ? "setup-macos.sh" : "setup-windows.ps1"}`));
     assert.equal(files.has("config-new-codey-machine/scripts/setup-linux.sh"), platform === "linux-x64");
     assert.equal([...files.keys()].some(name => name.includes("assets/codey-updater/")), platform === "linux-x64");
-    const enrollment = JSON.parse(files.get("config-new-codey-machine/assets/enrollment.json"));
-    assert.deepEqual(enrollment.network, { mode: "devtunnel" });
-    assert.equal(enrollment.tunnelAuthProvider, "github");
-    assert.equal(enrollment.platform, platform);
-    assert.match(enrollment.tunnelUpdateKey, /^[A-Za-z0-9_-]{43}$/);
-    assert.notEqual(enrollment.tunnelUpdateKey, enrollment.workspaceSsoKey);
-    const repeated = await f.request(`/api/settings/machines/${enrollment.nodeId}/skill`, { method: "POST" });
-    const again = JSON.parse(unzip(Buffer.from(await repeated.arrayBuffer())).get("config-new-codey-machine/assets/enrollment.json"));
-    assert.equal(again.nodeId, enrollment.nodeId);
-    assert.equal(again.tunnelUpdateKey, enrollment.tunnelUpdateKey);
-    assert.equal((await f.request(`/api/settings/machines/${enrollment.nodeId}/skill`, { method: "POST", user: f.admin })).status, 404);
-
-    const vm = await machineFile(f.root, enrollment.nodeId);
-    const { privateIp, vmResourceId, ...fields } = vm;
-    const coordinates = { tunnelId: `mac-fixture-${index}`, clusterId: "jpe1" };
-    const machine = { ...fields, platform, networkMode: "devtunnel", devTunnel: coordinates };
-    assert.equal((await f.request(`/api/settings/machines/${enrollment.nodeId}/activate`, { method: "POST", value: machine })).status, 409);
-    for (const illegal of [{ privateIp }, { vmResourceId }, { connectToken: "must-not-upload" }]) {
-      assert.throws(() => machineIdentity({ ...machine, ...illegal }, enrollment.nodeId));
+    assert.equal(files.has("config-new-codey-machine/assets/enrollment.json"), false);
+    assert.equal(files.has("config-new-codey-machine/assets/codey-updater/config.json"), false);
+    const setup = JSON.parse(files.get("config-new-codey-machine/assets/setup.json"));
+    assert.deepEqual(setup.network, { mode: "devtunnel" });
+    assert.equal(setup.tunnelAuthProvider, "github");
+    assert.equal(setup.platform, platform);
+    assert.equal(setup.releaseId, manifest.releaseId);
+    if (platform === "linux-x64") {
+      assert.equal(setup.updater.protocol, 1);
+      assert.match(setup.updater.releasePublicKey, /BEGIN PUBLIC KEY/);
+    } else {
+      assert.equal(setup.updater, undefined);
     }
-    const now = Date.now(), nonce = randomBytes(16).toString("base64url");
-    const connectToken = ["e30", Buffer.from(JSON.stringify({
-      ...coordinates, scp: "connect", exp: Math.floor(now / 1000) + 72000,
-    })).toString("base64url"), "c2ln"].join(".");
-    const body = JSON.stringify({ ...coordinates, connectToken });
-    const pathname = `/api/machine-tunnels/${enrollment.nodeId}/token`;
-    const signature = signMachineTunnelRequest(enrollment.tunnelUpdateKey, pathname, body, now, nonce);
-    const agent = await fetch(f.base + pathname, { method: "POST", body, headers: {
-      "content-type": "application/json", authorization: `CodeyTunnel ${now}:${nonce}:${signature}`,
-    } });
-    assert.equal(agent.status, 200, "The agent endpoint authenticates without Portal cookies or Azure permissions");
-    const activation = await f.request(`/api/settings/machines/${enrollment.nodeId}/activate`, { method: "POST", value: machine });
+    const repeated = await f.request(`/api/settings/machines/skill?platform=${platform}`, { method: "POST" });
+    assert.deepEqual(Buffer.from(await repeated.arrayBuffer()), bytes, "The same release must produce the same reusable package");
+
+    const nodeId = `n-${randomBytes(12).toString("hex")}`;
+    const vm = await machineFile(f.root, nodeId);
+    const { privateIp, vmResourceId, ...fields } = vm;
+    const coordinates = { tunnelId: `codey-fixture-${index}`, clusterId: "jpe1" };
+    const machine = { ...fields, platform, networkMode: "devtunnel", devTunnel: coordinates };
+    const credentials = clientCredentials();
+    const token = connectToken(coordinates);
+    const payload = registration(manifest, machine, credentials, token);
+    const activation = await f.request("/api/settings/machines/activate", { method: "POST", value: payload });
     assert.equal(activation.status, 201);
     const node = (await activation.json()).node;
     assert.equal(node.platform, platform);
@@ -239,13 +266,37 @@ test("all native packages use GitHub DevTunnel without VNet and activate only af
     assert.equal(node.vnetOnly, true, "Never try browser loopback for a remotely consumed Mac node");
     assert.equal(f.workspace.match(`/cloudcli/${node.id}/`).devTunnel.port, 3001);
     assert.equal(f.data.nodes.get(node.id).devTunnel.port, 8443);
-    assert.ok(!JSON.stringify(node).includes(connectToken));
-    assert.ok(!JSON.stringify(await f.policy.records()).includes(connectToken));
+    assert.equal(await f.policy.keyFor(f.member.id, node.id), credentials.clientSigningKey);
+    assert.deepEqual(await f.policy.workspaceBindingFor(f.member.id, node.id), {
+      key: credentials.workspaceSsoKey,
+      subject: credentials.workspaceSubject,
+      username: credentials.workspaceUsername,
+    });
+    assert.equal(await f.policy.tunnelKeyFor(node.id), credentials.tunnelUpdateKey);
+    assert.ok(!JSON.stringify(node).includes(token));
+    const stored = JSON.stringify(await f.policy.records());
+    for (const secret of [...Object.values(credentials).filter(value => value.length === 43), token]) {
+      assert.ok(!stored.includes(secret));
+    }
+    const device = (await f.machineSetup.machineUpdates.store.read()).data.devices[node.id];
+    assert.equal(Boolean(device), platform === "linux-x64");
+    if (device) {
+      assert.ok(!JSON.stringify(device).includes(credentials.updaterCredential));
+      assert.equal((await f.machineSetup.machineUpdates.authenticateAgent({ headers: {
+        "x-codey-node-id": node.id,
+        authorization: `Bearer ${credentials.updaterCredential}`,
+      } })).ownerId, f.member.id);
+      await assert.rejects(f.machineSetup.machineUpdates.authenticateAgent({ headers: {
+        "x-codey-node-id": node.id,
+        authorization: `Bearer ${randomBytes(32).toString("base64url")}`,
+      } }), { status: 401 });
+    }
   }
   assert.equal(f.probes.length, 4);
+  assert.equal(f.tunnelProbes.length, 4);
 });
 
-test("complete skill download reserves only this user's identity, includes dependencies and no global or provider credentials", async (t) => {
+test("complete Skill download is deterministic, owner-independent and contains no private credentials", async (t) => {
   const f = await fixture(t);
   const response = await f.request("/api/settings/machines/skill", { method: "POST" });
   assert.equal(response.status, 200);
@@ -260,46 +311,57 @@ test("complete skill download reserves only this user's identity, includes depen
     const artifact = entries.get(`config-new-codey-machine/assets/${item.file}`);
     assert.equal(createHash("sha256").update(artifact).digest("hex"), item.sha256);
   }
-  const enrollment = JSON.parse(entries.get("config-new-codey-machine/assets/enrollment.json"));
-  const updater = JSON.parse(entries.get("config-new-codey-machine/assets/codey-updater/config.json"));
-  assert.equal(updater.nodeId, enrollment.nodeId);
-  assert.equal(updater.ownerId, enrollment.principalId);
-  assert.equal(updater.protocol, 1);
-  assert.notEqual(updater.credential, enrollment.clientSigningKey);
-  assert.notEqual(updater.credential, enrollment.workspaceSsoKey);
+  const setup = JSON.parse(entries.get("config-new-codey-machine/assets/setup.json"));
+  assert.deepEqual(setup, {
+    schema: 1,
+    portalOrigin: origin,
+    releaseId: f.manifest.releaseId,
+    platform: "linux-x64",
+    network: { mode: "devtunnel" },
+    tunnelAuthProvider: "github",
+    updater: { protocol: 1, releasePublicKey: f.machineSetup.machineUpdates.publicKey },
+  });
+  assert.equal(entries.has("config-new-codey-machine/assets/enrollment.json"), false);
+  assert.equal(entries.has("config-new-codey-machine/assets/codey-updater/config.json"), false);
   for (const name of ["install.py", "updater.py", "engine.py", "probe.mjs", "UPGRADE.md"]) {
     assert.ok(entries.has("config-new-codey-machine/assets/codey-updater/" + name));
   }
-  assert.equal(enrollment.principalId, f.member.id);
-  assert.equal(enrollment.username, "member");
-  assert.equal(enrollment.portalOrigin, origin);
-  assert.match(enrollment.nodeId, /^n-[a-f0-9]{24}$/);
-  assert.equal(enrollment.releaseId, f.manifest.releaseId);
-  assert.notEqual(enrollment.clientSigningKey, f.ticketMaster);
-  assert.notEqual(enrollment.workspaceSsoKey, f.master);
   for (const data of entries.values()) {
     assert.ok(!data.includes(f.master));
     assert.ok(!data.includes(f.ticketMaster));
     assert.ok(!data.includes("BEGIN PRIVATE KEY"));
   }
   assert.deepEqual(await f.policy.list(f.member.id), [], "Downloading must NOT add an unconfigured node");
-  assert.equal((await f.policy.pendingMachines(f.member.id)).length, 1);
+  assert.equal((await f.policy.pendingMachines(f.member.id)).length, 0);
   assert.deepEqual(await f.policy.pendingMachines(f.credential.principalId), []);
-  assert.equal((await f.request(`/api/settings/nodes/${enrollment.nodeId}/enrollment`, { method: "POST" })).status, 404);
   const status = await (await f.request("/api/settings")).json();
   assert.equal(status.machineSetup.enabled, true);
-  assert.equal(status.pendingMachines.length, 1);
-  assert.ok(!JSON.stringify(status).includes(enrollment.clientSigningKey));
-  const repeat = await f.request(`/api/settings/machines/${enrollment.nodeId}/skill`, { method: "POST" });
+  assert.equal(status.pendingMachines.length, 0);
+  const repeat = await f.request("/api/settings/machines/skill", { method: "POST", user: f.admin });
   assert.equal(repeat.status, 200);
-  const repeatedEntries = unzip(Buffer.from(await repeat.arrayBuffer()));
-  const again = JSON.parse(repeatedEntries.get("config-new-codey-machine/assets/enrollment.json"));
-  assert.equal(JSON.parse(repeatedEntries.get("config-new-codey-machine/assets/codey-updater/config.json")).credential, updater.credential);
-  assert.equal(again.nodeId, enrollment.nodeId);
-  assert.equal(again.clientSigningKey, enrollment.clientSigningKey);
-  assert.equal(again.expiresAt, enrollment.expiresAt);
-  assert.equal((await f.policy.pendingMachines(f.member.id)).length, 1);
-  assert.equal((await f.request(`/api/settings/machines/${enrollment.nodeId}/skill`, { method: "POST", user: f.admin })).status, 404);
+  assert.deepEqual(Buffer.from(await repeat.arrayBuffer()), bytes,
+    "The package must be identical for another authenticated owner");
+});
+
+test("a previously distributed static release remains importable after the active bundle changes", async (t) => {
+  const f = await fixture(t);
+  const id = `n-${randomBytes(12).toString("hex")}`;
+  const vm = await machineFile(f.root, id);
+  const { privateIp, vmResourceId, ...publicFields } = vm;
+  const coordinates = { tunnelId: "codey-previous-release", clusterId: "jpe1" };
+  const machine = {
+    ...publicFields, platform: "linux-x64", networkMode: "devtunnel", devTunnel: coordinates,
+  };
+  const older = {
+    ...f.manifest,
+    releaseId: "machine-" + "0".repeat(16),
+  };
+  const response = await f.request("/api/settings/machines/activate", {
+    method: "POST",
+    value: registration(older, machine),
+  });
+  assert.equal(response.status, 201);
+  assert.equal((await response.json()).node.id, id);
 });
 
 test("platform downloads are distinct and missing Mac/Windows releases never fall back to Linux", async (t) => {
@@ -318,35 +380,30 @@ test("platform downloads are distinct and missing Mac/Windows releases never fal
   await bundle(path.join(f.bundleRoot, "platforms/windows-x64"), "windows-x64");
   const response = await f.request("/api/settings/machines/skill?platform=windows-x64", { method: "POST" });
   assert.equal(response.status, 200);
-  assert.match(response.headers.get("content-disposition"), /config-new-codey-machine-windows-n-/);
+  assert.equal(response.headers.get("content-disposition"), 'attachment; filename="config-new-codey-machine-windows.zip"');
   const files = unzip(Buffer.from(await response.arrayBuffer()));
   for (const file of MACHINE_PLATFORMS.find(item => item.id === "windows-x64").files) {
     assert.ok(files.has("config-new-codey-machine/" + file));
   }
   assert.ok(!files.has("config-new-codey-machine/scripts/setup-linux.sh"));
   assert.ok(![...files.keys()].some((name) => name.includes("assets/codey-updater/")));
-  const enrollment = JSON.parse(files.get("config-new-codey-machine/assets/enrollment.json"));
-  assert.equal(enrollment.platform, "windows-x64");
-  assert.equal((await f.policy.pendingMachines(f.member.id))[0].platform, "windows-x64");
-  const again = await f.request(`/api/settings/machines/${enrollment.nodeId}/skill`, { method: "POST" });
-  assert.equal(again.status, 200);
-  assert.match(again.headers.get("content-disposition"), /-windows-n-/);
-  const repeated = JSON.parse(unzip(Buffer.from(await again.arrayBuffer())).get("config-new-codey-machine/assets/enrollment.json"));
-  assert.equal(repeated.clientSigningKey, enrollment.clientSigningKey);
-  assert.equal(repeated.nodeId, enrollment.nodeId);
-  assert.equal((await f.request(`/api/settings/machines/${enrollment.nodeId}/skill?platform=linux-x64`,
-    { method: "POST" })).status, 409);
-  const machine = await machineFile(f.root, enrollment.nodeId);
-  assert.equal((await f.request(`/api/settings/machines/${enrollment.nodeId}/activate`,
-    { method: "POST", value: machine })).status, 400);
-  assert.equal(f.probes.length, 0);
-  const activation = await f.request(`/api/settings/machines/${enrollment.nodeId}/activate`,
-    { method: "POST", value: { ...machine, platform: "windows-x64" } });
+  const setup = JSON.parse(files.get("config-new-codey-machine/assets/setup.json"));
+  assert.equal(setup.platform, "windows-x64");
+  assert.equal((await f.policy.pendingMachines(f.member.id)).length, 0);
+  const vm = await machineFile(f.root, `n-${randomBytes(12).toString("hex")}`);
+  const { privateIp, vmResourceId, ...publicFields } = vm;
+  const coordinates = { tunnelId: "codey-windows-fixture", clusterId: "jpe1" };
+  const machine = { ...publicFields, platform: "windows-x64", networkMode: "devtunnel", devTunnel: coordinates };
+  const windowsManifest = JSON.parse(files.get("config-new-codey-machine/assets/manifest.json"));
+  const activation = await f.request("/api/settings/machines/activate", {
+    method: "POST", value: registration(windowsManifest, machine),
+  });
   assert.equal(activation.status, 201);
-  assert.equal((await activation.json()).node.platform, "windows-x64");
-  assert.equal(f.workspace.match(`/cloudcli/${enrollment.nodeId}/`).healthMonitoring, true);
-  await assert.rejects(f.machineSetup.machineUpdates.bootstrap(f.member.id, enrollment.nodeId), { status: 409 });
-  assert.equal((await f.machineSetup.machineUpdates.store.read()).data.devices[enrollment.nodeId], undefined);
+  const node = (await activation.json()).node;
+  assert.equal(node.platform, "windows-x64");
+  assert.equal(f.workspace.match(`/cloudcli/${node.id}/`).healthMonitoring, true);
+  await assert.rejects(f.machineSetup.machineUpdates.bootstrap(f.member.id, node.id), { status: 409 });
+  assert.equal((await f.machineSetup.machineUpdates.store.read()).data.devices[node.id], undefined);
 });
 
 test("Windows acceptance packages are tester-only, target-bound, expiring and never a general release", async t => {
@@ -372,19 +429,24 @@ test("Windows acceptance packages are tester-only, target-bound, expiring and ne
   const response = await f.request("/api/settings/machines/skill?platform=windows-x64", { method: "POST" });
   assert.equal(response.status, 200);
   const files = unzip(Buffer.from(await response.arrayBuffer()));
-  const enrollment = JSON.parse(files.get("config-new-codey-machine/assets/enrollment.json"));
-  assert.deepEqual(enrollment.acceptance, { expectedComputerName: policy.expectedComputerName, expiresAt: policy.expiresAt });
-  assert.ok(enrollment.expiresAt <= policy.expiresAt);
-  assert.deepEqual(enrollment.network, { mode: "devtunnel" });
-  assert.match(enrollment.tunnelUpdateKey, /^[A-Za-z0-9_-]{43}$/);
-  const repeated = await f.request(`/api/settings/machines/${enrollment.nodeId}/skill`, { method: "POST" });
-  assert.equal(repeated.status, 200);
-  const again = JSON.parse(unzip(Buffer.from(await repeated.arrayBuffer())).get("config-new-codey-machine/assets/enrollment.json"));
-  assert.equal(again.nodeId, enrollment.nodeId);
-  assert.equal(again.tunnelUpdateKey, enrollment.tunnelUpdateKey);
-  const legacy = { ...await machineFile(f.root, enrollment.nodeId), platform: "windows-x64" };
-  assert.equal((await f.request(`/api/settings/machines/${enrollment.nodeId}/activate`, { method: "POST", value: legacy })).status, 400);
-  assert.equal(f.probes.length, 0, "A candidate cannot bypass the DevTunnel acceptance via legacy VNet");
+  const setup = JSON.parse(files.get("config-new-codey-machine/assets/setup.json"));
+  assert.deepEqual(setup.acceptance, { expectedComputerName: policy.expectedComputerName, expiresAt: policy.expiresAt });
+  assert.deepEqual(setup.network, { mode: "devtunnel" });
+  const vm = await machineFile(f.root, `n-${randomBytes(12).toString("hex")}`);
+  const { privateIp, vmResourceId, ...publicFields } = vm;
+  const coordinates = { tunnelId: "codey-acceptance-fixture", clusterId: "jpe1" };
+  const candidateMachine = {
+    ...publicFields, platform: "windows-x64", networkMode: "devtunnel", devTunnel: coordinates,
+  };
+  const wrong = await f.request("/api/settings/machines/activate", {
+    method: "POST", value: registration(candidate, candidateMachine),
+  });
+  assert.equal(wrong.status, 409);
+  assert.equal(f.probes.length, 0);
+  const accepted = await f.request("/api/settings/machines/activate", {
+    method: "POST", value: registration(candidate, { ...candidateMachine, name: policy.expectedComputerName }),
+  });
+  assert.equal(accepted.status, 201);
   for (const changed of [
     { expiresAt: Date.now() - 1 }, { owners: ["*"] }, { owners: [f.admin.id] },
     { expectedComputerName: "../other" }, { expiresAt: Date.now() + 30 * 86400000 },
@@ -417,6 +479,102 @@ test("machine downloads reject anonymous/forged/cross-origin requests, caller id
   assert.deepEqual(await f.policy.pendingMachines(f.member.id), []);
   await f.auth.revoke({ headers: { cookie: f.cookie } });
   assert.equal((await f.request("/api/settings/machines/skill", { method: "POST" })).status, 401);
+});
+
+test("client registration rejects malformed, reused or mismatched secrets before persistence", async (t) => {
+  const f = await fixture(t);
+  const id = `n-${randomBytes(12).toString("hex")}`;
+  const vm = await machineFile(f.root, id);
+  const { privateIp, vmResourceId, ...publicFields } = vm;
+  const coordinates = { tunnelId: "codey-registration-fixture", clusterId: "jpe1" };
+  const machine = { ...publicFields, platform: "linux-x64", networkMode: "devtunnel", devTunnel: coordinates };
+  const valid = registration(f.manifest, machine);
+  assert.equal((await f.request("/api/settings/machines/activate", {
+    method: "POST", value: valid, user: "",
+  })).status, 401);
+  assert.equal((await f.request("/api/settings/machines/activate", {
+    method: "POST", value: valid, headers: { origin: "https://evil.example" },
+  })).status, 403);
+  assert.equal((await f.request("/api/settings/machines/activate")).status, 405);
+  const duplicate = { ...valid.credentials, workspaceSsoKey: valid.credentials.clientSigningKey };
+  const nonCanonical = {
+    ...valid.credentials,
+    clientSigningKey: "A".repeat(43),
+    workspaceSsoKey: "A".repeat(42) + "B",
+  };
+  const cases = [
+    { ...valid, schema: 1 },
+    { ...valid, unexpected: true },
+    { ...valid, package: { ...valid.package, portalOrigin: "https://other.example.test" } },
+    { ...valid, package: { ...valid.package, platform: "windows-x64" } },
+    { ...valid, credentials: duplicate },
+    { ...valid, credentials: nonCanonical },
+    { ...valid, credentials: { ...valid.credentials, workspaceSubject: "member" } },
+    { ...valid, credentials: { ...valid.credentials, workspaceUsername: "../root" } },
+    { ...valid, devTunnelConnectToken: connectToken({ ...coordinates, tunnelId: "other-tunnel" }) },
+    { ...valid, machine: { ...valid.machine, clientSigningKey: valid.credentials.clientSigningKey } },
+  ];
+  for (const value of cases) {
+    const response = await f.request("/api/settings/machines/activate", { method: "POST", value });
+    assert.ok([400, 409, 503].includes(response.status), await response.text());
+  }
+  assert.equal(f.probes.length, 0);
+  assert.equal(f.tunnelProbes.length, 0);
+  assert.deepEqual(await f.policy.list(f.member.id), []);
+  assert.equal((await f.machineSetup.machineUpdates.store.read()).data.devices[id], undefined);
+
+  f.machineSetup.verify = async () => { throw Object.assign(new Error("fixture verification failure"), { status: 502 }); };
+  assert.equal((await f.request("/api/settings/machines/activate", { method: "POST", value: valid })).status, 502);
+  assert.deepEqual(await f.policy.list(f.member.id), []);
+  assert.equal((await f.machineSetup.machineUpdates.store.read()).data.devices[id], undefined);
+});
+
+test("client activation is recoverable and idempotent across partial or concurrent retries", async (t) => {
+  const f = await fixture(t);
+  const id = `n-${randomBytes(12).toString("hex")}`;
+  const vm = await machineFile(f.root, id);
+  const { privateIp, vmResourceId, ...publicFields } = vm;
+  const coordinates = { tunnelId: "codey-retry-fixture", clusterId: "jpe1" };
+  const value = registration(f.manifest, {
+    ...publicFields, platform: "linux-x64", networkMode: "devtunnel", devTunnel: coordinates,
+  });
+  const register = f.machineSetup.machineUpdates.registerClientMachine.bind(f.machineSetup.machineUpdates);
+  let failed = false;
+  f.machineSetup.machineUpdates.registerClientMachine = async (...args) => {
+    if (!failed) {
+      failed = true;
+      throw new Error("fixture updater persistence interruption");
+    }
+    return register(...args);
+  };
+  assert.equal((await f.request("/api/settings/machines/activate", {
+    method: "POST", value,
+  })).status, 503);
+  assert.deepEqual(await f.policy.list(f.member.id), [], "An incomplete activation must stay hidden");
+  const staged = (await f.policy.records()).data.nodes.find((node) => node.id === id);
+  assert.equal(staged.setup.status, "importing");
+  assert.equal(staged.enabled, false);
+
+  const retries = await Promise.all([
+    f.request("/api/settings/machines/activate", { method: "POST", value }),
+    f.request("/api/settings/machines/activate", { method: "POST", value }),
+  ]);
+  assert.deepEqual(retries.map((response) => response.status), [201, 201]);
+  assert.equal((await f.policy.list(f.member.id)).filter((node) => node.id === id).length, 1);
+  const device = (await f.machineSetup.machineUpdates.store.read()).data.devices[id];
+  assert.equal(device.ownerId, f.member.id);
+  const replayAfterUpdaterRotation = {
+    ...value,
+    credentials: {
+      ...value.credentials,
+      updaterCredential: randomBytes(32).toString("base64url"),
+    },
+  };
+  assert.equal((await f.request("/api/settings/machines/activate", {
+    method: "POST", value: replayAfterUpdaterRotation,
+  })).status, 201);
+  assert.equal((await f.machineSetup.machineUpdates.store.read()).data.devices[id].credentialHash,
+    device.credentialHash, "An active updater credential is not replaced by a registration replay");
 });
 
 test("only the invitation owner can activate, and activation verifies before exposing a private gateway", async (t) => {

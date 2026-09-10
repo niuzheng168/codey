@@ -190,20 +190,14 @@ test("onboarding deep links wait for settings, do not reopen an existing dialog,
   assert.equal(p.get("account").hidden, false);
 });
 
-test("pending identities have a compact shortcut and all retry/cancel controls remain reachable", async () => {
+test("legacy pending identities are ignored because static Skill downloads do not reserve identities", async () => {
   const p = await page({ pending: [{ id: machineId, expired: false }] });
-  assert.equal(p.get("pending-machines-shortcut").hidden, false);
-  assert.match(p.get("pending-machines-shortcut").textContent, /1 个/);
-  await p.get("pending-machines-shortcut").click();
-  assert.equal(p.get("add-node").open, true);
-  assert.equal(p.get("pending-machine-details").open, true);
-  const row = p.get("pending-machines").children[0];
-  assert.equal(row.querySelector("form").action, `/api/settings/machines/${machineId}/skill`);
-  await row.querySelectorAll("button").find((button) => button.textContent === "取消此配置包").click();
-  await tick();
-  assert.equal(p.get("pending-machines-shortcut").hidden, true);
-  assert.equal(p.get("pending-machine-details").hidden, true);
-  assert.match(p.get("machine-download-message").textContent, /已取消/);
+  assert.equal(p.get("pending-machines-shortcut"), null);
+  assert.equal(p.get("pending-machine-details"), null);
+  assert.equal(p.get("pending-machines"), null);
+  assert.equal(p.requests.some((request) => request.url.includes(machineId)), false);
+  await p.get("open-add-node").click();
+  assert.match(p.get("add-node").textContent, /固定包不含 token.*多台同平台机器/);
 });
 
 test("collapsed nodes preserve all editable fields, VNet address restrictions and text-only rendering", async () => {
@@ -297,24 +291,70 @@ test("machine-file validation and activation failures are visible inside the mod
   assert.match(p.get("machine-activation-message").textContent, /请选择/);
   assert.equal(p.get("machine-activation-message").classList.contains("error"), true);
   assert.equal(p.get("add-node").open, true);
-  const machine = { schema: 1, nodeId: machineId, tlsCertificate: "test-certificate", privateIp: "10.1.0.2" };
-  p.get("prepared-machine-file").files = [{ size: 300, text: async () => JSON.stringify(machine) }];
+  const machine = {
+    schema: 2,
+    package: { platform: "linux-x64" },
+    machine: { nodeId: machineId },
+    credentials: { clientSigningKey: "private-signing-key" },
+    devTunnelConnectToken: "private-connect-token",
+  };
+  p.get("prepared-machine-file").files = [{
+    name: "codey-machine-registration.json", size: 300, text: async () => JSON.stringify(machine),
+  }];
   await p.submit(p.get("add-prepared-machine-form"));
   assert.equal(p.get("machine-activation-message").textContent, "Workspace 验证失败");
   assert.equal(p.get("add-node").open, true);
   assert.equal(p.get("add-prepared-machine-form").querySelector("button").disabled, false);
 });
 
+test("private registration upload enforces the exact filename, 32 KB limit and schema 2 structure", async () => {
+  const p = await page({ hash: "#add-node" });
+  const input = p.get("prepared-machine-file");
+  const form = p.get("add-prepared-machine-form");
+  const valid = {
+    schema: 2,
+    package: { platform: "linux-x64" },
+    machine: { nodeId: machineId },
+    credentials: { clientSigningKey: "private-signing-key" },
+    devTunnelConnectToken: "private-connect-token",
+  };
+  for (const [file, expected] of [
+    [{ name: "codey-machine.json", size: 300, text: async () => JSON.stringify(valid) }, /codey-machine-registration/],
+    [{ name: "codey-machine-registration.json", size: 32 * 1024 + 1, text: async () => JSON.stringify(valid) }, /32 KB/],
+    [{ name: "codey-machine-registration.json", size: 300, text: async () => JSON.stringify({ ...valid, schema: 1 }) }, /schema 2/],
+    [{ name: "codey-machine-registration.json", size: 300, text: async () => JSON.stringify({ ...valid, credentials: [] }) }, /schema 2/],
+    [{ name: "codey-machine-registration.json", size: 300, text: async () => JSON.stringify({ ...valid, devTunnelConnectToken: "" }) }, /schema 2/],
+  ]) {
+    input.files = [file];
+    await p.submit(form);
+    assert.match(p.get("machine-activation-message").textContent, expected);
+  }
+  assert.equal(p.requests.some((request) => request.url === "/api/settings/machines/activate"), false);
+});
+
 test("successful activation refreshes the list and returns from the modal to the compact node view", async () => {
   const p = await page({ hash: "#add-node" });
-  const machine = { schema: 1, nodeId: machineId, tlsCertificate: "test-certificate", privateIp: "10.1.0.2" };
-  p.get("prepared-machine-file").files = [{ size: 300, text: async () => JSON.stringify(machine) }];
+  const machine = {
+    schema: 2,
+    package: { platform: "linux-x64" },
+    machine: { nodeId: machineId },
+    credentials: { clientSigningKey: "private-signing-key" },
+    devTunnelConnectToken: "private-connect-token",
+  };
+  p.get("prepared-machine-file").files = [{
+    name: "codey-machine-registration.json", size: 300, text: async () => JSON.stringify(machine),
+  }];
   await p.submit(p.get("add-prepared-machine-form"));
-  assert.deepEqual(p.requests.find((request) => request.url.endsWith("/activate")).data, machine);
+  const activation = p.requests.find((request) => request.url.endsWith("/activate"));
+  assert.equal(activation.url, "/api/settings/machines/activate");
+  assert.deepEqual(activation.data, machine);
   assert.equal(p.get("add-node").open, false);
   assert.equal(p.window.location.hash, "#nodes");
   assert.equal(p.get("nodes-count").textContent, "2");
   assert.match(p.get("settings-message").textContent, /已验通并添加/);
+  assert.match(p.get("settings-message").textContent, /立即删除 codey-machine-registration\.json/);
+  assert.doesNotMatch(p.get("settings-message").textContent, /private-connect-token/);
+  assert.deepEqual(p.get("prepared-machine-file").files, []);
 });
 
 test("administrator creation and enable/disable controls retain their APIs and confirmations", async () => {

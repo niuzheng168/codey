@@ -1,12 +1,10 @@
 """Prepare an owner-bound macOS node without replacing existing services."""
 import argparse
-import base64
 import hashlib
 import json
 import os
 from pathlib import Path
 import platform
-import plistlib
 import pwd
 import re
 import shutil
@@ -16,12 +14,11 @@ import sys
 import time
 import tomllib
 import urllib.parse
-import urllib.request
 
 from ...common import verification as common
-from ...common import codex_cli, config_defaults
+from ...common import codex_cli, config_defaults, model_test, registration
 from ...common.files import digest, write_private
-from ...devtunnel import auth, binding as tunnels
+from ...devtunnel import auth, binding as tunnels, renewal
 from ...service.bundle import install_bundle
 from . import supervisor as service
 from .build import build_runtime
@@ -29,32 +26,16 @@ from .process import run
 from .launchd import launch_agent
 
 SKILL = Path(__file__).resolve().parents[4]
-NODE_ID = tunnels.NODE_ID
 Error = service.ServiceError
 
 
-def validate(enrollment, manifest, target, *, ready=False):
+def validate(setup, manifest, target):
     if target not in ("macos-arm64", "macos-x64"):
         raise Error("Unsupported Mac architecture")
-    if enrollment.get("schema") != 1 or not NODE_ID.fullmatch(enrollment.get("nodeId", "")):
-        raise Error("Download your personalized macOS package from Codey first")
-    if not ready and enrollment.get("expiresAt", 0) <= time.time() * 1000:
-        raise Error("The reserved identity has expired")
-    if (enrollment.get("platform") != target or manifest.get("platform") != target
-            or manifest.get("schema") != 1 or enrollment.get("releaseId") != manifest.get("releaseId")):
-        raise Error("This package does not match this Mac's architecture or reserved identity")
-    if not re.fullmatch(r"[a-z0-9-]{1,80}", enrollment.get("principalId", "")) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", enrollment.get("username", "")):
-        raise Error("Invalid node owner")
-    for key in ("clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey"):
-        if not re.fullmatch(r"[A-Za-z0-9_-]{43}", enrollment.get(key, "")):
-            raise Error("Missing node-specific enrollment credential")
-    origin = urllib.parse.urlsplit(enrollment.get("portalOrigin", ""))
-    if origin.scheme != "https" or not origin.hostname or origin.username or origin.password or origin.path or origin.query or origin.fragment:
-        raise Error("Portal origin must be an exact HTTPS origin")
-    if enrollment.get("network") != {"mode": "devtunnel"}:
-        raise Error("Mac nodes require the private DevTunnel enrollment")
-    if enrollment.get("tunnelAuthProvider", "github") != "github":
-        raise Error("New nodes require GitHub tunnel authentication")
+    registration.validate_setup(setup, target)
+    if (manifest.get("platform") != target or manifest.get("schema") != 1
+            or setup.get("releaseId") != manifest.get("releaseId")):
+        raise Error("This static package does not match this Mac architecture or runtime release")
     version = manifest.get("node", "")
     if not re.fullmatch(r"\d+\.\d+\.\d+", version) or not re.fullmatch(r"\d+\.\d+\.\d+", manifest.get("bunBuildTool", "")):
         raise Error("Runtime versions must be pinned")
@@ -81,12 +62,33 @@ def port_busy(port):
         return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
-def token_bound_tunnel(executable, enrollment, config_root):
+def token_bound_tunnel(executable, identity, config_root):
     def runner(args, **kwargs):
         return run(args, check=False, timeout=kwargs.get("timeout", 45))
 
-    binding = tunnels.ensure_tunnel(executable, enrollment, config_root, runner=runner)
+    binding = tunnels.ensure_tunnel(executable, identity, config_root, runner=runner)
     return binding["tunnelId"], binding["clusterId"]
+
+
+def connect_token(config):
+    def runner(args, **kwargs):
+        return run(args, check=False, timeout=kwargs.get("timeout", 45))
+
+    return renewal.connect_token(config, runner=runner)
+
+
+def export_registration(setup, identity, config, machine, output, token):
+    output = Path(output)
+    if output.resolve().is_relative_to(SKILL.resolve()):
+        raise Error("Private registration output must stay outside the reusable Skill directory")
+    if output.is_symlink():
+        raise Error("Registration output must not be a symbolic link")
+    if output.exists():
+        previous = service.private_json(output)
+        if previous.get("schema") != 2 or previous.get("machine", {}).get("nodeId") != identity["nodeId"]:
+            raise Error("Registration output belongs to another machine")
+    write_private(output, registration.document(setup, identity, machine, token))
+    output.chmod(0o600)
 
 
 def verify_backend(config):
@@ -110,30 +112,44 @@ def configure(args):
     if sys.platform != "darwin" or os.getuid() == 0:
         raise Error("Run this macOS installer as the signed-in owner, never root")
     target = "macos-arm64" if platform.machine() == "arm64" else "macos-x64" if platform.machine() == "x86_64" else ""
-    enrollment = json.loads((SKILL / "assets/enrollment.json").read_text())
+    if not target:
+        raise Error("Unsupported Mac architecture")
+    setup = registration.load_setup(SKILL, target)
     manifest = json.loads((SKILL / "assets/manifest.json").read_text())
-    node_id = enrollment.get("nodeId", "")
-    if not NODE_ID.fullmatch(node_id):
-        raise Error("Invalid reserved node ID")
     home = Path.home()
+    identity = (registration.load_or_create(
+        home, setup, username=pwd.getpwuid(os.getuid()).pw_name,
+    ) if args.apply else registration.existing(home, setup))
+    node_id = identity["nodeId"] if identity else "n-" + "0" * 24
     root = home / ".local/share/codey-machine-macos" / node_id
     config_root = home / ".config/codey-machine-macos" / node_id
     runtime_path = config_root / "runtime.json"
     state_file = config_root / "installation.json"
     ready = state_file.is_file() and service.private_json(state_file).get("status") == "local-ready"
-    artifacts = validate(enrollment, manifest, target, ready=ready)
+    artifacts = validate(setup, manifest, target)
     for artifact in artifacts:
         file = SKILL / "assets" / artifact["file"]
         if file.is_symlink() or file.stat().st_size != artifact["size"] or digest(file) != artifact["sha256"]:
             raise Error("Bundled source checksum mismatch")
     if ready:
-        config, saved_enrollment = service.runtime(runtime_path)
+        config, saved_identity = service.runtime(runtime_path)
         if config["releaseId"] != manifest["releaseId"]:
             raise Error("The first-install script cannot upgrade an existing node")
-        common.verify(saved_enrollment, {"listenIp": "127.0.0.1"}, Path(config["certificate"]))
+        common.verify(saved_identity, {"listenIp": "127.0.0.1"}, Path(config["certificate"]))
         verify_backend(config)
-        write_private(args.out, service.private_json(config_root / "machine.json"))
-        print(json.dumps({"ok": True, "reusedExistingServices": True, "output": str(args.out)}))
+        model = model_test.codex(
+            config["codexExe"], config["codexHome"],
+            config["providerEnv"]["CODEY_MODEL_API_KEY"], home,
+            config_root / "codex-model-test.log",
+        )
+        machine = service.private_json(config_root / "machine.json")
+        export_registration(
+            setup, saved_identity, config, machine, args.out, connect_token(config),
+        )
+        print(json.dumps({
+            "ok": True, "reusedExistingServices": True, "realModelCallsTested": True,
+            "modelTest": model, "output": str(args.out),
+        }))
         return
     for port in (3001, 8443):
         if port_busy(port):
@@ -174,7 +190,8 @@ def configure(args):
     workspace = Path(args.workspace_root or (home / "code" if (home / "code").is_dir() else home / "Documents")).resolve()
     if not workspace.is_dir():
         raise Error("Workspace root must already exist")
-    plan = {"platform": target, "nodeId": node_id, "mode": "private-devtunnel", "root": str(root),
+    plan = {"platform": target, "nodeId": node_id if identity else "generated-on-apply",
+            "package": "static-no-secrets", "mode": "private-devtunnel", "root": str(root),
             "loopbackPorts": [3001, 8443], "existingModelProxy": "127.0.0.1:4141 (not restarted or replaced)",
             "services": ["CloudCLI", "Codey-owned Codex backend", "read-only HTTPS data relay", "DevTunnel", "node-scoped token renewal"],
             "azurePermissionsRequiredByNode": False, "workspaceRoot": str(workspace), "npmRegistry": args.npm_registry,
@@ -228,17 +245,18 @@ def configure(args):
             os.chmod(private_key, 0o600)
         if not certificate.is_file() or not private_key.is_file():
             raise Error("Incomplete TLS identity; existing certificate/key was not replaced")
-        write_private(config_root / "enrollment.json", enrollment)
-        write_private(config_root / "ticket.key", enrollment["clientSigningKey"])
+        identity_file = config_root / "registration-secrets.json"
+        write_private(identity_file, identity)
+        write_private(config_root / "ticket.key", identity["clientSigningKey"])
         python_runtime = install_bundle(SKILL / "scripts", config_root / "service", "macos")
-        tunnel_id, cluster_id = token_bound_tunnel(devtunnel, enrollment, config_root)
+        tunnel_id, cluster_id = token_bound_tunnel(devtunnel, identity, config_root)
         node = release / "node/bin/node"
         defaults_result = defaults.apply()
         provider_env = defaults.provider_env
         config = {
             "schema": 1, "uid": os.getuid(), "nodeId": node_id, "name": args.name, "releaseId": manifest["releaseId"],
             "home": str(home), "osUser": pwd.getpwuid(os.getuid()).pw_name, "releaseRoot": str(release), "configRoot": str(config_root),
-            "enrollmentFile": str(config_root / "enrollment.json"), "worker": python_runtime["entrypoint"],
+            "identityFile": str(identity_file), "worker": python_runtime["entrypoint"],
             "pythonRuntime": python_runtime,
             "nodeExe": str(node), "nodeSha256": digest(node), "devtunnelExe": str(devtunnel), "devtunnelSha256": digest(devtunnel),
             "codexExe": str(codex), "codexHome": str(codex_home), "workspaceRoot": str(workspace),
@@ -253,7 +271,6 @@ def configure(args):
             "tunnelId": tunnel_id, "clusterId": cluster_id, "tunnelAuthProvider": "github",
         }
         write_private(runtime_path, config)
-        service.renew(config, enrollment, force=True)
         agents = home / "Library/LaunchAgents"
         agents.mkdir(parents=True, exist_ok=True)
         for mode in ("codex", "workspace", "data", "tunnel", "renew"):
@@ -268,22 +285,27 @@ def configure(args):
         deadline = time.monotonic() + 45
         while True:
             try:
-                common.verify(enrollment, {"listenIp": "127.0.0.1"}, certificate)
+                common.verify(identity, {"listenIp": "127.0.0.1"}, certificate)
                 verify_backend(config)
                 break
             except (OSError, ValueError, common.SetupError, Error):
                 if time.monotonic() >= deadline:
                     raise Error("Local authenticated HTTPS checks failed; inspect owner-only service logs")
                 time.sleep(1)
+        model = model_test.codex(
+            codex, codex_home, provider_env["CODEY_MODEL_API_KEY"], home,
+            config_root / "codex-model-test.log",
+        )
         machine = {"schema": 1, "nodeId": node_id, "platform": target, "name": args.name, "region": "macOS · DevTunnel",
                    "networkMode": "devtunnel", "tlsCertificate": certificate.read_text(),
                    "devTunnel": {"tunnelId": tunnel_id, "clusterId": cluster_id}}
         write_private(config_root / "machine.json", machine)
-        write_private(args.out, machine)
+        export_registration(setup, identity, config, machine, args.out, connect_token(config))
         write_private(state_file, {"status": "local-ready", "nodeId": node_id, "uid": os.getuid(), "releaseId": manifest["releaseId"],
                                    "launchAgents": [label for label, _ in created]})
         print(json.dumps({"ok": True, "localReady": True, "portalActivationRequired": True,
-                          "modelDefaults": defaults_result, "output": str(args.out)}, indent=2))
+                          "modelDefaults": defaults_result, "realModelCallsTested": True, "modelTest": model,
+                          "output": str(args.out)}, indent=2))
     except Exception:
         for label, plist in reversed(created):
             run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"], check=False)
@@ -306,7 +328,7 @@ def main():
     parser.add_argument("--usage-key-file")
     parser.add_argument("--workspace-root")
     parser.add_argument("--npm-registry", default="https://registry.npmjs.org/")
-    parser.add_argument("--out", type=Path, default=SKILL / "output/codey-machine.json")
+    parser.add_argument("--out", type=Path, default=Path.home() / "codey-machine-registration.json")
     try:
         configure(parser.parse_args())
     except (Error, common.SetupError, OSError, ValueError, subprocess.SubprocessError) as error:

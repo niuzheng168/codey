@@ -26,6 +26,35 @@ def exact_origin(origin):
     return origin
 
 
+def _issue_connect_token(config, *, runner=subprocess.run, now=None):
+    now = int(time.time() * 1000) if now is None else now
+    if not NODE_ID.fullmatch(config.get("nodeId", "")) or not coordinates(config):
+        raise TunnelError("invalid_connect_token_identity")
+    if config.get("tunnelAuthProvider") == "github":
+        auth.require_github_login(config["devtunnelExe"], runner=runner)
+    result = auth.cli(config["devtunnelExe"], [
+        "token", config["tunnelId"] + "." + config["clusterId"], "--scope", "connect", "--json",
+    ], runner=runner)
+    try:
+        value = json.loads(result.stdout)
+        token = value.get("token") or value.get("accessToken")
+        if not isinstance(token, str) or len(token) > 8192:
+            raise ValueError()
+        claims = json.loads(base64.urlsafe_b64decode(token.split(".")[1] + "=="))
+        if (claims["tunnelId"] != config["tunnelId"] or claims["clusterId"] != config["clusterId"]
+                or claims["scp"] != "connect" or type(claims["exp"]) not in (int, float)
+                or claims["exp"] * 1000 <= now + 600000):
+            raise ValueError()
+    except (ValueError, KeyError, TypeError, AttributeError, IndexError):
+        raise TunnelError("invalid_node_bound_connect_only_token") from None
+    return token, claims["exp"] * 1000
+
+
+def connect_token(config, *, runner=subprocess.run, now=None):
+    """Issue locally through the authenticated DevTunnel CLI; never contact Codey Portal."""
+    return _issue_connect_token(config, runner=runner, now=now)[0]
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -45,23 +74,7 @@ def renew(config, enrollment, *, force=False, runner=subprocess.run, opener=None
         if (previous.get("nodeId") == config["nodeId"]
                 and previous.get("expiresAt", 0) > now + 8 * 3600_000):
             return previous
-    if config.get("tunnelAuthProvider") == "github":
-        auth.require_github_login(config["devtunnelExe"], runner=runner)
-    result = auth.cli(config["devtunnelExe"], [
-        "token", config["tunnelId"] + "." + config["clusterId"], "--scope", "connect", "--json",
-    ], runner=runner)
-    try:
-        value = json.loads(result.stdout)
-        token = value.get("token") or value.get("accessToken")
-        if not isinstance(token, str) or len(token) > 8192:
-            raise ValueError()
-        claims = json.loads(base64.urlsafe_b64decode(token.split(".")[1] + "=="))
-        if (claims["tunnelId"] != config["tunnelId"] or claims["clusterId"] != config["clusterId"]
-                or claims["scp"] != "connect" or type(claims["exp"]) not in (int, float)
-                or claims["exp"] * 1000 <= now + 600000):
-            raise ValueError()
-    except (ValueError, KeyError, TypeError, AttributeError, IndexError):
-        raise TunnelError("invalid_node_bound_connect_only_token") from None
+    token, expires_at = _issue_connect_token(config, runner=runner, now=now)
     body = json.dumps({"tunnelId": config["tunnelId"], "clusterId": config["clusterId"],
                        "connectToken": token}, separators=(",", ":")).encode()
     pathname = f"/api/machine-tunnels/{config['nodeId']}/token"
@@ -77,10 +90,10 @@ def renew(config, enrollment, *, force=False, runner=subprocess.run, opener=None
         with (opener or urllib.request.build_opener(NoRedirect).open)(request, timeout=30) as response:
             payload = json.loads(response.read(16384))
             if (response.status != 200 or payload.get("nodeId") != config["nodeId"]
-                    or payload.get("ok") is not True or payload.get("expiresAt") != claims["exp"] * 1000):
+                    or payload.get("ok") is not True or payload.get("expiresAt") != expires_at):
                 raise ValueError()
     except (urllib.error.URLError, ValueError, OSError):
         raise TunnelError("portal_renewal_failed_no_credential_forwarding_or_fallback") from None
-    status = {"ok": True, "nodeId": config["nodeId"], "renewedAt": now, "expiresAt": claims["exp"] * 1000}
+    status = {"ok": True, "nodeId": config["nodeId"], "renewedAt": now, "expiresAt": expires_at}
     write_state(state_file, status)
     return status

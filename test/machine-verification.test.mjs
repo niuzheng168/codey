@@ -29,6 +29,9 @@ test("actual TLS probes require the pinned node, correct owner/tickets, anonymou
   const clientKey = randomBytes(32).toString("base64url");
   const principal = { id: "test-machine-owner", name: "alice", sessionId: randomBytes(32).toString("hex"), expiresAt: Date.now() + 600000 };
   const nodeKey = Buffer.from(workspaceNodeKey(master, id), "base64url");
+  let activeSsoKey = nodeKey;
+  let activeSubject = principal.id;
+  let activeUsername = principal.name;
   const machine = { id, tlsServerName: dns, ca: cert, fingerprint: new X509Certificate(cert).fingerprint256, privateIp: "10.42.0.4" };
   let anonymousAllowed = false;
   let badWebsocket = false;
@@ -40,10 +43,10 @@ test("actual TLS probes require the pinned node, correct owner/tickets, anonymou
   const sso = (req) => {
     try {
       const [payload, signature] = req.headers["x-codey-workspace-assertion"].split(".");
-      const expected = createHmac("sha256", nodeKey).update(payload).digest("base64url");
+      const expected = createHmac("sha256", activeSsoKey).update(payload).digest("base64url");
       const claims = JSON.parse(Buffer.from(payload, "base64url"));
-      return expected === signature && claims.aud === id && claims.sub === principal.id &&
-        claims.path === req.url && claims.method === req.method && claims.username === principal.name;
+      return expected === signature && claims.aud === id && claims.sub === activeSubject &&
+        claims.path === req.url && claims.method === req.method && claims.username === activeUsername;
     } catch { return false; }
   };
   const server = https.createServer({ cert, key }, (req, res) => {
@@ -64,7 +67,7 @@ test("actual TLS probes require the pinned node, correct owner/tickets, anonymou
       ? req.url === "/usage" ? usageStatus : req.url === "/token-usage" ? tokensStatus : 200 : 401;
     res.writeHead(status, { "content-type": "application/json" });
     res.end(JSON.stringify(req.url === "/api/auth/status"
-      ? { managedAuthentication: true, needsSetup: false, user: { username: "alice" } }
+      ? { managedAuthentication: true, needsSetup: false, user: { username: activeUsername } }
       : req.url === "/healthz" ? { ok: true, nodeId: relayNodeId, ...(dataService === "relay"
         ? { relay: "codey-node-relay" } : { service: dataService }) }
       : req.url === "/usage" ? usageBody : req.url === "/token-usage" ? tokensBody : { ok: true }));
@@ -93,6 +96,17 @@ test("actual TLS probes require the pinned node, correct owner/tickets, anonymou
   assert.equal(verified.websocket, true);
   assert.equal(verified.anonymousDenied, true);
   assert.equal(requests, 7);
+  const clientWorkspaceKey = randomBytes(32).toString("base64url");
+  activeSsoKey = Buffer.from(clientWorkspaceKey, "base64url");
+  activeSubject = `m-${randomBytes(12).toString("hex")}`;
+  activeUsername = "localowner";
+  assert.equal((await verifyMachine(machine, {
+    ...options,
+    workspaceBinding: { key: clientWorkspaceKey, subject: activeSubject, username: activeUsername },
+  })).workspaceSso, true);
+  activeSsoKey = nodeKey;
+  activeSubject = principal.id;
+  activeUsername = principal.name;
   const before = requests;
   await assert.rejects(verifyMachine({ ...machine, tlsServerName: "wrong.nodes.codey.internal" }, options), { status: 502 });
   assert.equal(requests, before, "Wrong SAN must be rejected during TLS, before any HTTP credentials are sent");

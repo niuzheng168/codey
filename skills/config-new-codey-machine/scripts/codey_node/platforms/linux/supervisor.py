@@ -26,15 +26,17 @@ def runtime(file):
     path = Path(config["devtunnelExe"])
     if not path.is_absolute() or not path.is_file() or path.is_symlink() or digest(path) != config["devtunnelSha256"]:
         raise ServiceError("Reviewed DevTunnel executable changed")
-    enrollment = private_json(config["enrollmentFile"])
-    if (enrollment.get("nodeId") != config["nodeId"] or enrollment.get("principalId") != config["ownerId"]
-            or enrollment.get("platform") != "linux-x64" or enrollment.get("network") != {"mode": "devtunnel"}):
-        raise ServiceError("Tunnel runtime and enrollment differ")
-    return config, enrollment
+    identity = private_json(config["identityFile"])
+    if (identity.get("nodeId") != config["nodeId"]
+            or identity.get("workspaceSubject") != config["ownerId"]
+            or identity.get("platform") != "linux-x64"
+            or identity.get("network") != {"mode": "devtunnel"}):
+        raise ServiceError("Tunnel runtime and local registration identity differ")
+    return config, identity
 
 
 def serve(config_file, component):
-    config, enrollment = runtime(config_file)
+    config, identity = runtime(config_file)
     import fcntl
     with open(Path(config["configRoot"]) / ("tunnel-" + component + ".lock"), "a") as lock:
         try:
@@ -42,11 +44,11 @@ def serve(config_file, component):
         except BlockingIOError:
             return
         if component == "renew":
-            result = renewal.renew(config, enrollment)
+            result = renewal.renew(config, identity)
             print(json.dumps({"ok": True, "expiresAt": result["expiresAt"]}))
             return
         auth.require_github_login(config["devtunnelExe"])
-        tunnels.ensure_tunnel(config["devtunnelExe"], enrollment, config["configRoot"],
+        tunnels.ensure_tunnel(config["devtunnelExe"], identity, config["configRoot"],
                              reuse_only=True, inspect_only=True,
                              expected_binding={key: config[key] for key in ("tunnelId", "clusterId")})
         os.set_inheritable(lock.fileno(), True)

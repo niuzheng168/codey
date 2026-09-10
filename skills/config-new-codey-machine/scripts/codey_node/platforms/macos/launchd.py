@@ -13,6 +13,7 @@ def launch_agent(label, mode, config, runtime_path):
         "StandardErrorPath": str(Path(config["configRoot"]) / (mode + ".log")),
     }
     if mode == "renew":
+        agent["RunAtLoad"] = False
         agent["StartInterval"] = 300
         agent["KeepAlive"] = {"SuccessfulExit": False}
     else:

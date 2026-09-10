@@ -1,5 +1,6 @@
 """Mac first-install defaults orchestration with every native operation mocked."""
 from contextlib import contextmanager, ExitStack, redirect_stdout
+import base64
 import hashlib
 import importlib
 import io
@@ -7,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import sys
-import time
 import tomllib
 from types import SimpleNamespace, ModuleType
 import unittest
@@ -20,6 +20,10 @@ sys.path.insert(0, str(ROOT / "test"))
 from test_model_defaults import fixture, ACTIVE_KEY, OLD_KEY
 from codey_node.common import config_defaults, config_files
 from codey_node.service.launcher import runtime_files
+
+
+def key(value):
+    return base64.urlsafe_b64encode(bytes([value]) * 32).decode().rstrip("=")
 
 
 @contextmanager
@@ -54,13 +58,20 @@ def mac_fixture():
         identity = "\n".join([manifest["node"], manifest["bunBuildTool"], "d" * 64] +
                              [row["sha256"] for row in manifest["artifacts"]])
         manifest["releaseId"] = "machine-" + hashlib.sha256(identity.encode()).hexdigest()[:16]
-        enrollment = {
-            "schema": 1, "platform": "macos-arm64", "nodeId": node_id, "principalId": "fixture-owner", "username": "alice",
-            "releaseId": manifest["releaseId"], "expiresAt": int(time.time() * 1000) + 86400000,
-            "portalOrigin": "https://codey.example.test", "network": {"mode": "devtunnel"}, "tunnelAuthProvider": "github",
-            "clientSigningKey": "a" * 43, "workspaceSsoKey": "b" * 43, "tunnelUpdateKey": "c" * 43,
+        setup = {
+            "schema": 1, "platform": "macos-arm64", "releaseId": manifest["releaseId"],
+            "portalOrigin": "https://codey.example.test",
+            "network": {"mode": "devtunnel"}, "tunnelAuthProvider": "github",
         }
-        for name, value in (("manifest", manifest), ("enrollment", enrollment)):
+        local_identity = {
+            "platform": "macos-arm64", "nodeId": node_id,
+            "workspaceSubject": "m-" + "f" * 24, "workspaceUsername": "fixture-owner",
+            "releaseId": manifest["releaseId"], "portalOrigin": setup["portalOrigin"],
+            "network": {"mode": "devtunnel"}, "tunnelAuthProvider": "github",
+            "clientSigningKey": key(1), "workspaceSsoKey": key(2),
+            "tunnelUpdateKey": key(3), "updaterCredential": key(4),
+        }
+        for name, value in (("manifest", manifest), ("setup", setup)):
             (skill / "assets" / (name + ".json")).write_text(json.dumps(value))
         tools = f.home / "tools"
         tools.mkdir()
@@ -73,7 +84,8 @@ def mac_fixture():
         args = SimpleNamespace(
             apply=False, retry_failed=False, name="Mac fixture", codex_home=str(f.codex), codex_bin=str(tools / "codex"),
             devtunnel_bin=str(tools / "devtunnel"), openssl_bin=str(tools / "openssl"), usage_key_file=str(usage),
-            workspace_root=str(f.home), npm_registry="https://registry.npmjs.org/", out=f.home / "out/machine.json",
+            workspace_root=str(f.home), npm_registry="https://registry.npmjs.org/",
+            out=f.home / "out/codey-machine-registration.json",
             copilot_api_config=str(f.gateway), model_key_file=None,
         )
         commands = []
@@ -104,6 +116,8 @@ def mac_fixture():
         stack.enter_context(patch.object(installer.pwd, "getpwuid", return_value=SimpleNamespace(pw_name="fixture-owner"), create=True))
         stack.enter_context(patch.object(config_files, "current_identity", return_value=f.kwargs["owner"].identity))
         stack.enter_context(patch.object(installer.platform, "machine", return_value="arm64"))
+        stack.enter_context(patch.object(installer.registration, "existing", return_value=local_identity))
+        stack.enter_context(patch.object(installer.registration, "load_or_create", return_value=local_identity))
         stack.enter_context(patch.object(installer, "port_busy", side_effect=lambda port: port == 4141))
         stack.enter_context(patch.object(installer.codex_cli, "require_cli", return_value=tools / "codex"))
         login = stack.enter_context(patch.object(installer.auth, "cli", return_value=SimpleNamespace(
@@ -111,12 +125,18 @@ def mac_fixture():
         stack.enter_context(patch.object(installer, "run", side_effect=run))
         builder = stack.enter_context(patch.object(installer, "build_runtime", side_effect=build))
         stack.enter_context(patch.object(installer, "token_bound_tunnel", return_value=("codey-" + node_id, "jpe1")))
-        stack.enter_context(patch.object(installer.service, "renew", return_value={"ok": True}))
+        portal_renew = stack.enter_context(patch.object(installer.service, "renew"))
+        stack.enter_context(patch.object(installer, "connect_token", return_value="header.connect.signature"))
         stack.enter_context(patch.object(installer.service, "private_json", side_effect=lambda path: json.loads(Path(path).read_bytes())))
         stack.enter_context(patch.object(installer.common, "verify", return_value={"mocked": True}))
         stack.enter_context(patch.object(installer, "verify_backend"))
+        model = stack.enter_context(patch.object(
+            installer.model_test, "codex",
+            return_value={"marker": "CODEY_INSTALL_OK", "passed": True},
+        ))
         stack.enter_context(patch.dict(os.environ, {"CODEY_MODEL_API_KEY": OLD_KEY}))
         f.module, f.args, f.node_id, f.commands, f.builder, f.login = installer, args, node_id, commands, builder, login
+        f.identity, f.portal_renew, f.model = local_identity, portal_renew, model
         f.output = stack.enter_context(redirect_stdout(io.StringIO()))
         yield f
 
@@ -132,6 +152,7 @@ class MacDefaultsInstallTests(unittest.TestCase):
             self.assertEqual(plan["codexSettings"]["approval_policy"], "never")
             f.builder.assert_not_called()
             f.login.assert_not_called()
+            f.model.assert_not_called()
             self.assertTrue(all(command[1:] == ["version"] for command in f.commands))
             self.assertEqual({str(path): path.read_bytes() for path in f.home.rglob("*") if path.is_file()}, before)
 
@@ -140,10 +161,14 @@ class MacDefaultsInstallTests(unittest.TestCase):
             auth_before = (f.codex / "auth.json").read_bytes()
             f.args.apply = True
             f.module.configure(f.args)
+            first_result = json.loads(f.output.getvalue())
+            self.assertTrue(first_result["realModelCallsTested"])
+            self.assertEqual(first_result["modelTest"]["marker"], "CODEY_INSTALL_OK")
             config_root = f.home / ".config/codey-machine-macos" / f.node_id
             runtime = json.loads((config_root / "runtime.json").read_bytes())
             self.assertEqual(runtime["providerEnv"], {"CODEY_MODEL_API_KEY": ACTIVE_KEY})
-            self.assertEqual(f.module.service.environment(runtime, json.loads((config_root / "enrollment.json").read_bytes()))
+            self.assertEqual(f.module.service.environment(
+                runtime, json.loads((config_root / "registration-secrets.json").read_bytes()))
                              ["CODEY_MODEL_API_KEY"], ACTIVE_KEY)
             self.assertFalse(json.loads(f.gateway.read_bytes())["useResponsesApiWebSocket"])
             parsed = tomllib.loads((f.codex / "config.toml").read_text())
@@ -151,9 +176,17 @@ class MacDefaultsInstallTests(unittest.TestCase):
             self.assertEqual(parsed["mcp_servers"], {"keep": {"command": "original"}})
             self.assertEqual((f.codex / "auth.json").read_bytes(), auth_before)
             self.assertEqual(len([command for command in f.commands if command[:2] == ["launchctl", "bootstrap"]]), 5)
+            self.assertEqual(f.model.call_count, 1)
+            exported = json.loads(Path(f.args.out).read_text())
+            self.assertEqual(exported["schema"], 2)
+            self.assertEqual(exported["credentials"], f.module.registration.exported_credentials(f.identity))
+            f.portal_renew.assert_not_called()
             for secret in (ACTIVE_KEY, OLD_KEY, "private TLS fixture"):
                 self.assertNotIn(secret, f.output.getvalue())
                 self.assertNotIn(secret, Path(f.args.out).read_text())
+            for secret in f.module.registration.exported_credentials(f.identity).values():
+                self.assertIn(secret, Path(f.args.out).read_text())
+                self.assertNotIn(secret, f.output.getvalue())
             (f.codex / "config.toml").write_text('model = "owner-changed-after-install"\n')
             before = {str(path): path.read_bytes() for path in f.home.rglob("*") if path.is_file()}
             f.commands.clear()
@@ -162,6 +195,7 @@ class MacDefaultsInstallTests(unittest.TestCase):
             with patch.object(config_defaults, "prepare") as prepare:
                 f.module.configure(f.args)
                 prepare.assert_not_called()
+            self.assertEqual(f.model.call_count, 2)
             f.builder.assert_not_called()
             f.login.assert_not_called()
             self.assertEqual(f.commands, [])

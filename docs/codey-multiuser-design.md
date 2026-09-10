@@ -118,19 +118,27 @@ CloudCLI 列是节点端版本，共享 Workspace UI 独立发布，当前协议
 - Session History 的节点分类来自本人列表；Shared 是明确公共共享区，
   已经主动上传到 Shared 的内容允许其他已登录用户阅读。
 
-## 新节点 Workspace / VNet 部署
+## 新节点静态 Skill / DevTunnel 接入
 
-注册节点保存设置并给出独立接入参数，不等于自动安装软件或建立网络路由。
+Portal 提供按平台固定、可重复分发的 Skill 包。包内只有公开的 Portal origin、
+发行版 manifest、源码和升级签名公钥，不预留节点，也不包含 owner、node ID 或私密 token。
 
-1. 用户创建自己的节点，取得其 node ID、client key、Workspace key、account ID。
-2. 在自己的 VM 配置 copilot-api HTTPS。部署 CloudCLI fork，使用该用户的
-   `CODEY_PORTAL_USERNAME` / `CODEY_PORTAL_PRINCIPAL_ID` 及该节点 SSO key。
-3. 运维将该 node ID 对应的可信私网 upstream / TLS SNI 加入
-   `config/node-data.aca.json` 和 `config/cloudcli-nodes.aca.json` 后发布。
-4. 同一个节点只能有一个 owner；新用户不会自动获得当前 zhn 的 VM。
+1. 每台目标机器独立生成随机 node ID、数据票据 key、Workspace SSO key、
+   DevTunnel 续期 key 和 updater credential，并建立只含 `3001/8443` HTTPS 的
+   GitHub 私有 DevTunnel。
+2. 本机完成 TLS、Usage/History、Workspace SSO、匿名拒绝及真实模型验收后，
+   生成 owner-only 的 `codey-machine-registration.json`；该文件含私密注册凭据，
+   不能分享或提交 Git。
+3. 用户只把最终注册文件上传到当前 HTTPS Portal。Portal 先验证 connect-only token、
+   隧道 ACL、固定 TLS 证书及两个服务，再从当前登录会话绑定真实 owner。
+4. 客户端 key 使用 Portal root 加密后写入签名节点表；updater 只保存 credential hash，
+   connect token 单独加密。公开节点列表和管理员总览均不返回这些值。
+5. Workspace 在节点内使用客户端随机 subject/本机用户名；Portal owner ID 始终只在
+   服务端 ACL 中使用。Gateway 仅在确认当前 owner 后，用该节点的独立 key 签发断言。
 
-网页不能填写 arbitrary 私网 proxy target，防止将节点设置变成 SSRF 入口。
-这是整节点隔离，不是在同一个 Linux 用户下为不互信用户提供 OS 沙箱。
+同一个静态包可以并行发给多台机器，但每台机器的注册文件都不同。同一个 node ID 或
+DevTunnel 不能被另一账号重新认领。旧 VNet/manual 节点仍可读取，不作为新节点默认流程。
+这是整节点隔离，不是在同一个 OS 用户下为不互信用户提供系统级沙箱。
 
 ## 仍然存在的边界
 
