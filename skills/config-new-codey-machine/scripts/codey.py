@@ -5,13 +5,13 @@ import importlib
 from pathlib import Path
 import sys
 
-MODULES = {
-    "linux": "codey_node.platforms.linux.install",
-    "macos": "codey_node.platforms.macos.install",
-    "windows": "codey_node.platforms.windows.install",
-    "codex": "codey_node.common.codex_cli",
-    "defaults": "codey_node.common.config_defaults",
-}
+SCRIPTS = Path(__file__).resolve().parent
+MODULES = {"defaults": "codey_node.common.config_defaults"}
+for platform in ("linux", "macos", "windows"):
+    if (SCRIPTS / f"codey_node/platforms/{platform}/install.py").is_file():
+        MODULES[platform] = f"codey_node.platforms.{platform}.install"
+if (SCRIPTS / "codey_node/common/codex_cli.py").is_file():
+    MODULES["codex"] = "codey_node.common.codex_cli"
 
 
 def main():

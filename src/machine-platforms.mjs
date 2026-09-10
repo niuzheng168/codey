@@ -5,13 +5,14 @@ const defaultsFiles = [
   "templates/a100-models.json",
   ...["config_defaults.py", "config_files.py", "toml_edit.py"].map(name => `scripts/codey_node/common/${name}`),
 ];
+const pinnedCodexCli = "scripts/codey_node/common/codex_cli.py";
 
 export const MACHINE_PLATFORMS = Object.freeze([
   Object.freeze({
     id: "windows-x64", name: "Windows", entrypoint: "scripts/setup-windows.ps1",
     nodeSuffix: "win-x64.zip", updater: false, implemented: true, tunnel: true, privateNetwork: true, dataRelay: true,
     description: "Windows x64 · GitHub 私有 DevTunnel · 登录后运行 · 保留现有 Codex/模型代理",
-    files: [...defaultsFiles, "scripts/setup-windows.ps1", ...nativeFiles("windows", [
+    files: [...defaultsFiles, pinnedCodexCli, "scripts/setup-windows.ps1", ...nativeFiles("windows", [
       "__init__.py", "install.py", "build.py", "cli.py", "preflight.py", "package.py",
       "archives.py", "helpers.py", "owner.py", "process.py", "codex_runtime.py",
       "supervisor.py", "windows-tunnel-tasks.ps1",
@@ -22,15 +23,15 @@ export const MACHINE_PLATFORMS = Object.freeze([
     nodeSuffix: "linux-x64.tar.xz", updater: true, implemented: true, tunnel: true, privateNetwork: true,
     description: "Linux x64 · GitHub 私有 DevTunnel · systemd 用户服务 · 独立签名升级器",
     files: [...defaultsFiles, "scripts/setup-linux.sh", ...nativeFiles("linux", [
-      "__init__.py", "install.py", "build.py", "cli.py", "client_repair.py", "codex_latest.py", "codex_process.py",
-      "legacy_takeover.py", "login.py", "systemd.py", "supervisor.py",
+      "__init__.py", "install.py", "build.py", "cli.py", "codex_latest.py", "codex_process.py",
+      "copilot_api.py", "replacement.py", "login.py", "systemd.py", "supervisor.py", "updater_service.py",
     ])],
   }),
   Object.freeze({
     id: "macos-arm64", name: "macOS · Apple Silicon", entrypoint: "scripts/setup-macos.sh",
     nodeSuffix: "darwin-arm64.tar.gz", updater: false, implemented: true, tunnel: true, dataRelay: true,
     description: "macOS Apple Silicon · GitHub 私有 DevTunnel · 本人 launchd 服务 · 不改现有 Codex/模型代理",
-    files: [...defaultsFiles, "scripts/setup-macos.sh", ...nativeFiles("macos", [
+    files: [...defaultsFiles, pinnedCodexCli, "scripts/setup-macos.sh", ...nativeFiles("macos", [
       "__init__.py", "install.py", "build.py", "process.py", "launchd.py", "supervisor.py",
     ])],
   }),
@@ -38,7 +39,7 @@ export const MACHINE_PLATFORMS = Object.freeze([
     id: "macos-x64", name: "macOS · Intel", entrypoint: "scripts/setup-macos.sh",
     nodeSuffix: "darwin-x64.tar.gz", updater: false, implemented: true, tunnel: true, dataRelay: true,
     description: "macOS Intel · GitHub 私有 DevTunnel · 本人 launchd 服务 · 不改现有 Codex/模型代理",
-    files: [...defaultsFiles, "scripts/setup-macos.sh", ...nativeFiles("macos", [
+    files: [...defaultsFiles, pinnedCodexCli, "scripts/setup-macos.sh", ...nativeFiles("macos", [
       "__init__.py", "install.py", "build.py", "process.py", "launchd.py", "supervisor.py",
     ])],
   }),

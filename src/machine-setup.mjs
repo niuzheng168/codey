@@ -14,9 +14,9 @@ import { MachineTunnelService } from "./machine-tunnel.mjs";
 export const MACHINE_SKILL = "config-new-codey-machine";
 export const MACHINE_SKILL_FILES = Object.freeze([
   "SKILL.md", "agents/openai.yaml", "dependencies.json",
-  "scripts/codey.py", "references/verification.md",
+  "scripts/codey.py",
   "scripts/codey_node/__init__.py", "scripts/codey_node/platforms/__init__.py",
-  ...["__init__.py", "errors.py", "files.py", "archives.py", "verification.py", "codex_cli.py"]
+  ...["__init__.py", "errors.py", "files.py", "archives.py", "verification.py"]
     .map(file => `scripts/codey_node/common/${file}`),
   ...["__init__.py", "auth.py", "binding.py", "renewal.py"].map(file => `scripts/codey_node/devtunnel/${file}`),
   ...["__init__.py", "bundle.py", "launcher.py"].map(file => `scripts/codey_node/service/${file}`),

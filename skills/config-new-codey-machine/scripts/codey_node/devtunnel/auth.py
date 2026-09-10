@@ -52,3 +52,22 @@ def require_github_login(executable, *, runner=subprocess.run):
     result = cli(executable, ["user", "show", "--json"], runner=runner, check=False)
     if not github_logged_in(result):
         raise TunnelError("github_login_required_no_account_switch_or_entra_fallback")
+
+
+def login_github_device(executable, *, runner=subprocess.run):
+    try:
+        require_github_login(executable, runner=runner)
+        return {"action": "reuse", "provider": "github"}
+    except TunnelError:
+        print("GitHub DevTunnel login is required; complete the device authorization shown below.", flush=True)
+    try:
+        result = runner(
+            [str(executable), "user", "login", "--github", "--use-device-code-auth"],
+            env=cli_environment(), timeout=900,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise TunnelError("github_device_login_failed") from None
+    if result.returncode:
+        raise TunnelError("github_device_login_failed")
+    require_github_login(executable, runner=runner)
+    return {"action": "login", "provider": "github"}

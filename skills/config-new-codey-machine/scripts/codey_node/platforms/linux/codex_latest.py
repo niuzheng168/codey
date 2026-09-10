@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import urllib.error
 import urllib.request
 
 from ...common.config_files import Owner
@@ -18,6 +19,43 @@ from . import codex_process
 INSTALLER_URL = "https://chatgpt.com/codex/install.sh"
 INSTALLER_FINAL_URL = "https://releases.openai.com/codex/install.sh"
 INSTALLER_LIMIT = 512 * 1024
+
+
+def wrapper(codex, codex_home, provider_env):
+    return (
+        "#!/bin/sh\n"
+        f"export CODEX_HOME=\"{codex_home}\"\n"
+        f"if [ -r \"{provider_env}\" ]; then\n"
+        f"  . \"{provider_env}\"\n"
+        "  export CODEY_MODEL_API_KEY\n"
+        "fi\n"
+        f"exec \"{codex}\" \"$@\"\n"
+    ).encode()
+
+
+def test_model(executable, codex_home, key, home):
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "CODEX_HOME": str(codex_home),
+        "CODEY_MODEL_API_KEY": key,
+        "PATH": str(Path(executable).parent) + os.pathsep + os.environ.get("PATH", ""),
+    }
+    marker = "CODEY_INSTALL_OK"
+    try:
+        result = subprocess.run(
+            [str(executable), "exec", "--skip-git-repo-check", f"Reply with only {marker}"],
+            cwd=home, env=environment, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise SetupError("Codex real model test could not be completed") from None
+    output = (result.stdout or "") + (result.stderr or "")
+    if result.returncode or marker not in output:
+        log = Path(home) / ".config/codey-machine/codex-model-test.log"
+        protected_write(log, output)
+        raise SetupError(f"Codex real model test failed; protected diagnostic: {log}")
+    return {"marker": marker, "passed": True}
 
 
 def _version(executable):
@@ -71,15 +109,20 @@ def _bin_directory(owner, existing):
 
 def _download_installer():
     request = urllib.request.Request(INSTALLER_URL, headers={"User-Agent": "codey-node-installer/1"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        if response.geturl() not in {INSTALLER_URL, INSTALLER_FINAL_URL}:
-            raise SetupError("The official Codex installer redirected unexpectedly")
-        chunks, size = [], 0
-        while chunk := response.read(64 * 1024):
-            size += len(chunk)
-            if size > INSTALLER_LIMIT:
-                raise SetupError("The official Codex installer is unexpectedly large")
-            chunks.append(chunk)
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            if response.geturl() not in {INSTALLER_URL, INSTALLER_FINAL_URL}:
+                raise SetupError("The official Codex installer redirected unexpectedly")
+            chunks, size = [], 0
+            while chunk := response.read(64 * 1024):
+                size += len(chunk)
+                if size > INSTALLER_LIMIT:
+                    raise SetupError("The official Codex installer is unexpectedly large")
+                chunks.append(chunk)
+    except SetupError:
+        raise
+    except (OSError, urllib.error.URLError):
+        raise SetupError("The official Codex installer could not be downloaded") from None
     data = b"".join(chunks)
     if (not data.startswith(b"#!/bin/sh\n") or
             b'RELEASES_BASE_URL="https://releases.openai.com/codex"' not in data or
@@ -133,11 +176,14 @@ class Plan:
         }
         environment.pop("CODEX_RELEASE", None)
         try:
-            result = subprocess.run(
-                ["/bin/sh", str(installer)], stdin=subprocess.DEVNULL,
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                env=environment, timeout=900,
-            )
+            try:
+                result = subprocess.run(
+                    ["/bin/sh", str(installer)], stdin=subprocess.DEVNULL,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    env=environment, timeout=900,
+                )
+            except (OSError, subprocess.SubprocessError):
+                raise SetupError("Official Codex installation did not complete") from None
         finally:
             installer.unlink(missing_ok=True)
         if result.returncode:

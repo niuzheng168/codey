@@ -185,7 +185,10 @@ test("all native packages use GitHub DevTunnel without VNet and activate only af
       assert.match(files.get("config-new-codey-machine/scripts/codey_node/common/verification.py").toString(), /copilot_quota_unavailable_model_inference_not_tested/);
       assert.match(files.get("config-new-codey-machine/scripts/codey_node/platforms/windows/install.py").toString(), /native\.pin\(codex, root, node_id/);
     }
-    assert.ok(files.has("config-new-codey-machine/scripts/codey_node/common/codex_cli.py"));
+    assert.equal(
+      files.has("config-new-codey-machine/scripts/codey_node/common/codex_cli.py"),
+      platform !== "linux-x64",
+    );
     const dependencies = JSON.parse(files.get("config-new-codey-machine/dependencies.json"));
     assert.equal(dependencies.codexCli.version, "0.146.0");
     assert.deepEqual(dependencies.linuxCodexInstaller, {

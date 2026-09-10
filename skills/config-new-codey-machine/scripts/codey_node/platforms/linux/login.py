@@ -1,5 +1,4 @@
 """Plan owner shell hooks that load the private Codey model environment."""
-from pathlib import Path
 import re
 
 from ...common.config_files import Change, Owner, commit

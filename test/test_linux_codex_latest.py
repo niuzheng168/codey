@@ -10,7 +10,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills/config-new-codey-machine/scripts"))
 
-from codey_node.platforms.linux import codex_latest
+from codey_node.platforms.linux import codex_latest  # noqa: E402
 
 
 class FakeOwner:
@@ -81,6 +81,17 @@ class LinuxCodexLatestTests(unittest.TestCase):
             self.assertEqual(calls[0][0][0], "/bin/sh")
             self.assertEqual(calls[0][1]["env"]["CODEX_NON_INTERACTIVE"], "true")
             self.assertNotIn("CODEX_RELEASE", calls[0][1]["env"])
+
+    def test_real_model_probe_uses_the_configured_home_and_local_key(self):
+        result = SimpleNamespace(returncode=0, stdout="CODEY_INSTALL_OK\n", stderr="")
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(codex_latest.subprocess, "run", return_value=result) as run:
+            home = Path(directory)
+            probe = codex_latest.test_model(home / ".local/bin/codex", home / ".codex", "local-key", home)
+        self.assertTrue(probe["passed"])
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(environment["CODEX_HOME"], str(home / ".codex"))
+        self.assertEqual(environment["CODEY_MODEL_API_KEY"], "local-key")
 
 
 if __name__ == "__main__":

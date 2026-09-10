@@ -1,4 +1,4 @@
 interface:
   display_name: "Config new Codey machine"
-  short_description: "DevTunnel、copilot-api、Codex、CloudCLI 一键覆盖"
-  default_prompt: "使用 $config-new-codey-machine。在 Linux 目标普通用户下直接运行 bash scripts/setup-linux.sh --apply：配置 GitHub DevTunnel，停止并归档已有 Codey 守护进程，覆盖安装并登录 copilot-api，停止旧 Codex 进程并用官方 installer 更新到 latest，写入模型配置并做真实请求，最后覆盖安装 CloudCLI、创建 systemd 守护和升级器并验收。保留 Home、.codex、auth 和 sessions。"
+  short_description: "五步覆盖安装并配置更新守护"
+  default_prompt: "使用 $config-new-codey-machine。在 Linux 目标普通用户下直接运行 bash scripts/setup-linux.sh --apply，严格按五步完成：GitHub DevTunnel；覆盖安装、登录并测试 copilot-api；停止旧 Codex 并用官方 installer 更新到 latest、写配置和真实测试；覆盖安装并测试 CloudCLI；安装独立 updater、启用所有 systemd 守护和 owner linger。保留 Home、.codex、auth 和 sessions。"

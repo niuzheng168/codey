@@ -1,7 +1,6 @@
 """Native Linux onboarding tests; all cloud, login and service mutations are mocked."""
 import contextlib
 import hashlib
-import importlib.util
 import io
 import json
 import os
@@ -21,12 +20,12 @@ SCRIPTS = ROOT / "skills/config-new-codey-machine/scripts"
 
 
 sys.path.insert(0, str(SCRIPTS))
-from codey_node.platforms.linux import install as installer
-from codey_node.platforms.linux import client_repair, codex_process, login
-from codey_node.devtunnel import auth, binding as tunnels, renewal
-from codey_node.common.errors import SetupError, TunnelError
-from codey_node.common import config_defaults
-from codey_node.service.launcher import runtime_files
+from codey_node.platforms.linux import install as installer  # noqa: E402
+from codey_node.platforms.linux import codex_process, login  # noqa: E402
+from codey_node.devtunnel import auth, binding as tunnels, renewal  # noqa: E402
+from codey_node.common.errors import SetupError, TunnelError  # noqa: E402
+from codey_node.common import config_defaults  # noqa: E402
+from codey_node.service.launcher import runtime_files  # noqa: E402
 
 ID = "n-" + "a" * 24
 
@@ -194,6 +193,32 @@ class LinuxContractTests(unittest.TestCase):
             auth.cli("fixture", ["user", "show", "--json"], runner=runner)
             self.assertNotIn("GITHUB_TOKEN", calls[0]["env"])
 
+    def test_devtunnel_device_login_is_github_only_and_rechecked(self):
+        calls = []
+
+        def runner(args, **kwargs):
+            calls.append((args, kwargs))
+            if args[1:4] == ["user", "login", "--github"]:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            logged_in = len(calls) > 2
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({
+                    "status": "Logged in" if logged_in else "Not logged in",
+                    "provider": "github" if logged_in else "",
+                    "username": "alice" if logged_in else "",
+                }),
+                stderr="",
+            )
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = auth.login_github_device("/home/alice/devtunnel", runner=runner)
+        self.assertEqual(result, {"action": "login", "provider": "github"})
+        self.assertEqual(calls[1][0], [
+            "/home/alice/devtunnel", "user", "login", "--github", "--use-device-code-auth",
+        ])
+        self.assertNotIn("GITHUB_TOKEN", calls[1][1]["env"])
+
     def test_shell_hook_loads_provider_env_without_copying_its_key(self):
         provider = Path("/home/alice/.config/codey-machine/provider.env")
         original = "# preserve existing profile\n"
@@ -216,34 +241,6 @@ class LinuxContractTests(unittest.TestCase):
         self.assertFalse(codex_process.recognized(home, native, [str(native), "exec"]))
         self.assertFalse(codex_process.recognized(home, Path("/opt/other/codex"),
                                                  ["/opt/other/codex", "app-server"]))
-
-    def test_ready_client_apply_stops_only_planned_stale_processes_and_verifies_new_key(self):
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            owner = SimpleNamespace(home=home)
-            process = {"pid": 44, "start": "8", "executable": str(home / "codex")}
-            plan = client_repair.Plan(
-                owner, ID, home / "codex", home / ".codex",
-                home / ".config/codey-machine/provider.env", "active-key", [], [process], None)
-            calls = []
-            def runner(args, **_kwargs):
-                calls.append(args)
-                value = "active" if args[:3] == ["systemctl", "--user", "is-active"] else "77"
-                return SimpleNamespace(returncode=0, stdout=value)
-            with patch.object(client_repair, "commit", return_value=["backup"]), \
-                    patch.object(client_repair.codex_process, "stop", return_value=[44]) as stop, \
-                    patch.object(client_repair.codex_process, "inspect", return_value=[]), \
-                    patch.object(client_repair, "_process_environment", return_value={
-                        "CODEY_CODEX_EXECUTABLE": str(plan.codex), "CODEY_MODEL_API_KEY": "active-key",
-                    }), \
-                    patch.object(client_repair, "_login_environment",
-                                 return_value={"CODEY_MODEL_API_KEY": "active-key"}), \
-                    patch.object(client_repair, "_http_status", return_value=200):
-                result = plan.apply(runner)
-            self.assertTrue(result["applied"] and result["freshLoginKeyVerified"])
-            stop.assert_called_once_with(home, [process])
-            self.assertIn(["systemctl", "--user", "restart", "codey-cloudcli.service"], calls)
-
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "native Linux transaction tests")
 class LinuxTransactionTests(unittest.TestCase):
@@ -268,7 +265,7 @@ class LinuxTransactionTests(unittest.TestCase):
                     unit.write_text(("[Timer]\nOnCalendar=daily\n" if executable is None else
                                      f"[Service]\nExecStart={executable}\n"))
                     legacy_units[name] = unit
-                    service_states[name] = {"active": active, "pid": pid}
+                    service_states[name] = {"active": active, "pid": pid, "enabled": True}
             def run(args, **kwargs):
                 nonlocal linger
                 args = [str(arg) for arg in args]
@@ -297,7 +294,30 @@ class LinuxTransactionTests(unittest.TestCase):
                         ])
                 elif args[:4] == ["systemctl", "--user", "disable", "--now"]:
                     if args[-1] in service_states:
-                        service_states[args[-1]].update(active=False, pid=0)
+                        service_states[args[-1]].update(active=False, pid=0, enabled=False)
+                elif args[:4] == ["systemctl", "--user", "enable", "--now"]:
+                    name = args[-1]
+                    unit = service_dir / name
+                    legacy_units[name] = unit
+                    service_states[name] = {
+                        "active": True,
+                        "pid": 0 if name.endswith(".timer") else 5000,
+                        "enabled": True,
+                    }
+                elif args[:3] == ["systemctl", "--user", "restart"]:
+                    if args[-1] in service_states:
+                        service_states[args[-1]]["active"] = True
+                elif args[:3] == ["systemctl", "--user", "is-enabled"]:
+                    text = "enabled" if service_states.get(args[-1], {}).get("enabled") else "disabled"
+                elif args[:3] == ["systemctl", "--user", "is-active"]:
+                    text = "active" if service_states.get(args[-1], {}).get("active") else "inactive"
+                elif len(args) > 1 and args[1].endswith("codey-updater/install.py"):
+                    name = "codey-node-updater.service"
+                    unit = service_dir / name
+                    unit.parent.mkdir(parents=True, exist_ok=True)
+                    unit.write_text("# Managed by Codey node updater\n[Service]\nExecStart=/fixture/updater\n")
+                    legacy_units[name] = unit
+                    service_states[name] = {"active": True, "pid": 5001, "enabled": True}
                 elif args[0] == "openssl":
                     Path(args[args.index("-keyout") + 1]).write_text("PRIVATE_TEST_CERT_KEY")
                     Path(args[args.index("-out") + 1]).write_text("PUBLIC_TEST_CERTIFICATE")
@@ -322,7 +342,6 @@ class LinuxTransactionTests(unittest.TestCase):
                     }),
                 )
                 with patch.object(installer, "SKILL", f.skill), patch.object(Path, "home", return_value=f.home), \
-                      patch.object(installer.codex_cli, "version", return_value="codex-cli 0.146.0"), \
                       patch.object(installer.codex_latest, "prepare", return_value=codex_plan) as codex_prepare, \
                       patch.object(installer.socket, "socket") as socket_factory, \
                       patch.object(installer.shutil, "disk_usage", return_value=SimpleNamespace(free=free_bytes)), \
@@ -331,10 +350,10 @@ class LinuxTransactionTests(unittest.TestCase):
                      patch.object(installer, "verify", return_value={"usage": False, "tokenUsage": True, "warnings": ["quota unavailable"]}), \
                       patch.object(installer.cli, "prepare_cli", return_value=f.executable) as cli, \
                       patch.object(auth, "require_github_login") as login, \
-                      patch.object(installer, "_copilot_login",
+                      patch.object(installer.copilot_api, "login",
                                    return_value={"action": "login", "provider": "github-copilot"}), \
-                      patch.object(installer, "_wait_model_api", return_value={"modelsStatus": 200}), \
-                      patch.object(installer, "_test_codex",
+                      patch.object(installer.copilot_api, "wait_ready", return_value={"modelsStatus": 200}), \
+                      patch.object(installer.codex_latest, "test_model",
                                    return_value={"marker": "CODEY_INSTALL_OK", "passed": True}), \
                       patch.object(tunnels, "ensure_tunnel", return_value={"tunnelId": "codey-" + ID, "clusterId": "jpe1"}) as create, \
                      patch.object(renewal, "renew", return_value={"ok": True}), \
@@ -365,26 +384,25 @@ class LinuxTransactionTests(unittest.TestCase):
         with self.setup(existing=True) as f:
             installer.configure(f.args)
             plan = json.loads(f.output.getvalue())
-            self.assertTrue(plan["legacyTakeover"]["detected"])
+            self.assertTrue(plan["replacement"]["detected"])
             self.assertFalse(any("stop" in call or "disable" in call for call in f.calls))
 
-    def test_takeover_rejects_a_linked_or_external_unit_file(self):
+    def test_replacement_rejects_a_linked_or_external_unit_file(self):
         with self.setup(existing=True) as f:
             external = f.home / "external-copilot-api.service"
             external.write_text("[Service]\nExecStart=/unknown/copilot-api\n")
             f.legacy_unit.unlink()
             f.legacy_unit.symlink_to(external)
-            f.args.replace_existing = True
             with self.assertRaisesRegex(installer.SetupError, "not an ordinary unit owned by this user"):
                 installer.configure(f.args)
             self.assertFalse(any("stop" in call or "disable" in call for call in f.calls))
 
-    def test_takeover_plan_is_read_only_and_apply_archives_only_legacy_codey_paths(self):
+    def test_replacement_plan_is_read_only_and_apply_archives_only_codey_paths(self):
         process = {"pid": 9191, "start": "123", "executable": "/home/test/codex"}
         with self.setup(existing=True) as f, \
-                patch.object(installer.legacy_takeover.codex_process, "inspect",
+                patch.object(installer.replacement.codex_process, "inspect",
                              side_effect=[[process], [process], [process], []]), \
-                patch.object(installer.legacy_takeover.codex_process, "stop", return_value=[9191]) as stop:
+                patch.object(installer.replacement.codex_process, "stop", return_value=[9191]) as stop:
             root = f.home / ".local/share/codey-machine"
             config = f.home / ".config/codey-machine"
             root.mkdir(parents=True)
@@ -406,9 +424,9 @@ class LinuxTransactionTests(unittest.TestCase):
             session_before = session.read_bytes()
             installer.configure(f.args)
             plan = json.loads(f.output.getvalue())
-            self.assertTrue(plan["legacyTakeover"]["detected"])
-            self.assertEqual(plan["legacyTakeover"]["occupiedPorts"], [3001, 8443, 4141])
-            self.assertEqual(plan["legacyTakeover"]["codexProcesses"], [process])
+            self.assertTrue(plan["replacement"]["detected"])
+            self.assertEqual(plan["replacement"]["occupiedPorts"], [3001, 8443, 4141])
+            self.assertEqual(plan["replacement"]["codexProcesses"], [process])
             self.assertEqual(plan["modelDefaults"]["mode"],
                              "fresh defaults will be prepared after the existing installation is archived")
             self.assertFalse(any(call[:4] == ["systemctl", "--user", "disable", "--now"] for call in f.calls))
@@ -422,9 +440,9 @@ class LinuxTransactionTests(unittest.TestCase):
             backup = backups[0]
             self.assertEqual((backup / "runtime/old-runtime.txt").read_text(), "preserve old runtime")
             self.assertEqual((backup / "config/old-config.txt").read_text(), "preserve old config")
-            self.assertEqual((backup / "legacy-copilot-api-runtime/config.json").read_text(),
+            self.assertEqual((backup / "previous-copilot-api-runtime/config.json").read_text(),
                              '{"legacy":"credential-bearing config"}')
-            self.assertEqual((backup / "legacy-cloudcli-config/service.env").read_text(),
+            self.assertEqual((backup / "previous-cloudcli-config/service.env").read_text(),
                              "LEGACY_CONFIG=preserve\n")
             self.assertEqual((backup / "units/copilot-api.service").read_text(),
                              "[Service]\nExecStart=/legacy/copilot-api\n")
@@ -432,14 +450,19 @@ class LinuxTransactionTests(unittest.TestCase):
                              "[Service]\nExecStart=/legacy/codey-updater\n")
             self.assertEqual((backup / "units/copilot-api-update.timer").read_text(),
                              "[Timer]\nOnCalendar=daily\n")
-            self.assertTrue((backup / "takeover.json").is_file())
+            self.assertTrue((backup / "replacement.json").is_file())
             self.assertTrue(json.loads((f.home / ".config/codey-machine/installation.json").read_text())["ready"])
-            self.assertFalse(any(state["active"] for state in f.service_states.values()))
             stopped = {call[-1] for call in f.calls
                        if call[:4] == ["systemctl", "--user", "disable", "--now"]}
             self.assertTrue({"copilot-api.service", "copilot-api-update.service",
                              "copilot-api-update.timer", "codey-cloudcli.service",
                              "codey-node-updater.service"}.issubset(stopped))
+            for name in ("copilot-api.service", "copilot-api-update.service", "copilot-api-update.timer"):
+                self.assertFalse(f.service_states[name]["active"])
+            for name in ("codey-copilot-api.service", "codey-cloudcli.service",
+                         "codey-devtunnel.service", "codey-devtunnel-renew.timer",
+                         "codey-node-updater.service"):
+                self.assertTrue(f.service_states[name]["active"])
             stop.assert_called_once_with(f.home, [process])
             self.assertEqual((codex_home / "auth.json").read_bytes(), auth_before)
             self.assertEqual(session.read_bytes(), session_before)
@@ -447,7 +470,7 @@ class LinuxTransactionTests(unittest.TestCase):
             self.assertEqual(codex_config["mcp_servers"]["keep"]["command"], "preserve")
             self.assertEqual(codex_config["model_provider"], "copilot_api")
 
-    def test_occupied_ports_fail_before_any_download_or_takeover(self):
+    def test_occupied_ports_fail_before_any_download_or_replacement(self):
         with self.setup(occupied=True) as f:
             f.args.apply = True
             with self.assertRaisesRegex(installer.SetupError, "unknown process"):
@@ -472,8 +495,8 @@ class LinuxTransactionTests(unittest.TestCase):
             (root / "unrelated.txt").write_text("preserve")
             installer.configure(f.args)
             plan = json.loads(f.output.getvalue())
-            self.assertTrue(plan["legacyTakeover"]["detected"])
-            self.assertIn(str(root), [row["path"] for row in plan["legacyTakeover"]["archivePaths"]])
+            self.assertTrue(plan["replacement"]["detected"])
+            self.assertIn(str(root), [row["path"] for row in plan["replacement"]["archivePaths"]])
             self.assertEqual((root / "unrelated.txt").read_text(), "preserve")
         with self.setup() as f:
             file = f.skill / "assets/codey-updater/config.json"
@@ -503,7 +526,7 @@ class LinuxTransactionTests(unittest.TestCase):
     def test_explicit_linger_is_enabled_only_when_missing_and_before_services(self):
         for already_enabled in (False, True):
             with self.subTest(already_enabled=already_enabled), self.setup(linger=already_enabled) as f:
-                f.args.apply = f.args.enable_linger = True
+                f.args.apply = True
                 installer.configure(f.args)
                 enabled = [i for i, call in enumerate(f.calls) if call[:2] == ["loginctl", "enable-linger"]]
                 self.assertEqual(len(enabled), 0 if already_enabled else 1)
@@ -514,20 +537,29 @@ class LinuxTransactionTests(unittest.TestCase):
     def test_github_login_failure_precedes_runtime_or_service_mutations(self):
         with self.setup() as f:
             f.args.apply = True
-            with patch.object(installer, "_devtunnel_login", side_effect=SetupError("GitHub DevTunnel login did not complete")), \
+            with patch.object(auth, "login_github_device",
+                              side_effect=SetupError("GitHub DevTunnel login did not complete")), \
                     self.assertRaisesRegex(installer.SetupError, "DevTunnel login"):
                 installer.configure(f.args)
             f.builder.assert_not_called()
             f.create.assert_not_called()
             self.assertFalse((f.home / ".config/codey-machine").exists())
 
-    def test_success_has_supervision_timer_and_idempotent_verification(self):
+    def test_success_has_supervision_timer_and_next_run_plans_replacement(self):
         with self.setup() as f:
             f.args.apply = True
             with patch.dict(os.environ, {"CODEY_MODEL_API_KEY": "do-not-copy-old-shell-key"}):
                 installer.configure(f.args)
             config = f.home / ".config/codey-machine"
-            self.assertTrue(json.loads((config / "installation.json").read_text())["ready"])
+            installation = json.loads((config / "installation.json").read_text())
+            self.assertTrue(installation["ready"])
+            self.assertEqual(set(installation["supervision"]), {
+                "codey-copilot-api.service",
+                "codey-cloudcli.service",
+                "codey-devtunnel.service",
+                "codey-devtunnel-renew.timer",
+                "codey-node-updater.service",
+            })
             gateway = json.loads((f.home / ".local/share/codey-machine/data/copilot-api/config.json").read_text())
             self.assertFalse(gateway["useResponsesApiWebSocket"])
             self.assertEqual(len(gateway["auth"]["apiKeys"]), 1)
@@ -560,36 +592,8 @@ class LinuxTransactionTests(unittest.TestCase):
             f.args.apply = False
             installer.configure(f.args)
             replacement = json.loads(f.output.getvalue())
-            self.assertTrue(replacement["legacyTakeover"]["detected"])
+            self.assertTrue(replacement["replacement"]["detected"])
             self.assertEqual(replacement["codexUpdate"]["release"], "latest")
-
-    def test_ready_client_repair_has_an_explicit_plan_and_apply_route(self):
-        with self.setup() as f:
-            f.args.apply = True
-            installer.configure(f.args)
-            f.args.apply = False
-            f.args.repair_client = True
-            f.output.seek(0)
-            f.output.truncate(0)
-            restarts_before = sum(call[:3] == ["systemctl", "--user", "restart"] for call in f.calls)
-            process = {"pid": 8282, "start": "456", "executable": str(f.home / "codex")}
-            with patch.object(installer.client_repair, "_http_status", return_value=200), \
-                    patch.object(installer.client_repair.codex_process, "inspect", return_value=[process]):
-                installer.configure(f.args)
-            plan = json.loads(f.output.getvalue())
-            self.assertEqual(plan["clientRepair"]["codexExecutable"], str(f.home / "codex"))
-            self.assertEqual(plan["clientRepair"]["codexProcessesToStop"], [process])
-            self.assertEqual(
-                sum(call[:3] == ["systemctl", "--user", "restart"] for call in f.calls),
-                restarts_before,
-            )
-            f.args.apply = True
-            with patch.object(installer.client_repair, "_http_status", return_value=200), \
-                    patch.object(installer.client_repair.codex_process, "inspect", return_value=[process]), \
-                    patch.object(installer.client_repair.Plan, "apply",
-                                 return_value={"applied": True, "stoppedCodexProcesses": [8282]}) as repair:
-                installer.configure(f.args)
-            repair.assert_called_once()
 
     def test_failure_only_disables_new_services_and_never_marks_ready(self):
         with self.setup() as f:

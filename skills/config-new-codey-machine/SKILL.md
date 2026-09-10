@@ -11,8 +11,8 @@ Linux 完整包在解压后的目录中直接执行：
 bash scripts/setup-linux.sh --apply
 ```
 
-以目标普通用户运行，不使用 root。脚本自动处理已有 Codey，不需要先运行普通计划，
-也不需要 `--replace-existing`。需要 GitHub DevTunnel 或 GitHub Copilot 登录时，
+以目标普通用户运行，不使用 root。脚本自动处理已有 Codey，没有 legacy、ready 或 repair 分支。
+需要 GitHub DevTunnel 或 GitHub Copilot 登录时，
 按终端显示的 device code 由用户完成授权，然后脚本继续执行。
 
 脚本可以停止并覆盖当前用户的 Codey 服务，但始终保留整个 Home、`.codex`、
@@ -60,11 +60,22 @@ Codex auth 和 sessions。旧 Codey runtime、配置和 systemd unit 会移动�
 
 - **准备检查**：copilot-api 和 Codex 的测试已经通过。
 - **目标**：使用安装包内的新 CloudCLI 源码构建 Workspace，创建新的用户级守护进程。
-- **执行脚本**：写入并启动 `codey-cloudcli.service`，然后创建并启动：
-  `codey-devtunnel.service`、`codey-devtunnel-renew.timer` 和
-  `codey-node-updater.service`。脚本自动启用当前用户 linger，保证退出 SSH 和重启后继续运行。
+- **执行脚本**：写入并启动 `codey-cloudcli.service`。
 - **验收标准**：CloudCLI 本机 TLS、认证、Usage/History、Workspace SSO 和匿名拒绝通过；
-  所有长期服务 enabled/active，最终生成 `output/codey-machine.json`。
+  CloudCLI 使用第 3 步安装的 Codex 和当前模型 key。
+
+## 5. 安装更新器及守护进程
+
+- **准备检查**：前四步均通过，独立 updater 文件、节点凭据和发布公钥完整。
+- **目标**：让所有组件退出 SSH 后继续运行，并支持 owner 确认的签名自动更新。
+- **执行脚本**：创建并启用 `codey-devtunnel.service`、
+  `codey-devtunnel-renew.timer` 和 `codey-node-updater.service`；
+  自动启用当前用户 linger。copilot-api、CloudCLI、DevTunnel 和 updater
+  使用 systemd 用户服务，异常退出自动重启。
+- **验收标准**：`codey-copilot-api.service`、`codey-cloudcli.service`、
+  `codey-devtunnel.service`、`codey-devtunnel-renew.timer` 和
+  `codey-node-updater.service` 均 enabled/active；最终生成
+  `output/codey-machine.json`。更新器只执行签名且由 owner 确认的版本。
   Copilot 配额不是聊天健康检查；真实模型请求必须单独通过。
 
 ## 失败与重跑
