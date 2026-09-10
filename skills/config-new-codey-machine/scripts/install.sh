@@ -13,6 +13,36 @@ kill_matches() {
   sleep 1
   pkill -KILL -u "$(id -u)" -f "$pattern" >/dev/null 2>&1 || true
 }
+CODEX_PROCESS_PATTERN='(^|/)[c]odex([.]js)?([[:space:]]|$)'
+codex_processes_running() {
+  pgrep -u "$(id -u)" -x codex >/dev/null 2>&1 ||
+    pgrep -u "$(id -u)" -f "$CODEX_PROCESS_PATTERN" >/dev/null 2>&1
+}
+stop_codex_processes() {
+  local owner_uid
+  owner_uid="$(id -u)"
+  pkill -TERM -u "$owner_uid" -x codex >/dev/null 2>&1 || true
+  pkill -TERM -u "$owner_uid" -f "$CODEX_PROCESS_PATTERN" >/dev/null 2>&1 || true
+  for _ in $(seq 1 20); do
+    codex_processes_running || return 0
+    sleep 0.25
+  done
+  pkill -KILL -u "$owner_uid" -x codex >/dev/null 2>&1 || true
+  pkill -KILL -u "$owner_uid" -f "$CODEX_PROCESS_PATTERN" >/dev/null 2>&1 || true
+  sleep 1
+  if codex_processes_running; then
+    die "Old Codex processes are still running."
+  fi
+  return 0
+}
+stop_cloudcli_processes() {
+  local unit
+  for unit in codey-cloudcli.service cloudcli.service; do
+    stop_user_unit "$unit"
+    stop_system_unit "$unit"
+  done
+  kill_matches '[d]ist-server/server/index.js'
+}
 free_port() {
   local port="$1"
   if command -v fuser >/dev/null 2>&1; then
@@ -29,7 +59,7 @@ write_unit() {
   die "This package supports Linux x86_64 only."
 [[ "$(id -u)" != 0 ]] || die "Run as the target user; the script uses sudo only where required."
 
-for command in curl openssl sha256sum tar systemctl loginctl pkill; do need "$command"; done
+for command in curl openssl sha256sum tar systemctl loginctl pgrep pkill seq timeout; do need "$command"; done
 need sudo
 sudo -n true || die "Administrator access is required. Run sudo -v, then rerun this script."
 
@@ -234,6 +264,10 @@ printf '%s\n' "$CLIENT_KEY" >"$CONFIG_ROOT/client-signing.key"
 chmod 600 "$CERT" "$KEY" "$CONFIG_ROOT/client-signing.key"
 
 log 2 "Stop old copilot-api, install the packaged latest build, configure and start it"
+# Stop the old workspace before rotating the model key. Otherwise its watchdog
+# can immediately respawn a Codex app-server with the stale environment.
+stop_cloudcli_processes
+stop_codex_processes
 for unit in codey-copilot-api.service copilot-api.service copilot-api-update.service copilot-api-update.timer; do
   stop_user_unit "$unit"
   stop_system_unit "$unit"
@@ -312,8 +346,7 @@ curl -fsS -H "Authorization: Bearer $MODEL_KEY" http://127.0.0.1:4141/models >/d
   die "copilot-api model endpoint did not become ready."
 
 log 3 "Stop old Codex, install the latest official Codex CLI, configure and test it"
-kill_matches '[c]odex.*(app-server|app.server|exec)'
-kill_matches '[c]odex app-server proxy'
+stop_codex_processes
 existing_codex="$(command -v codex 2>/dev/null || true)"
 if [[ -n "$existing_codex" ]]; then
   CODEX_BIN_DIR="$(dirname "$existing_codex")"
@@ -385,15 +418,14 @@ done
 
 CODEX_LOG="$CONFIG_ROOT/codex-test.log"
 if ! HOME="$HOME_DIR" CODEX_HOME="$HOME_DIR/.codex" CODEY_MODEL_API_KEY="$MODEL_KEY" \
-  "$CODEX" exec --skip-git-repo-check "Reply with only CODEY_CODEX_OK" \
-  >"$CODEX_LOG" 2>&1 || ! grep -q CODEY_CODEX_OK "$CODEX_LOG"; then
+  timeout --kill-after=5s 300s "$CODEX" exec --skip-git-repo-check \
+    "Reply with only CODEY_CODEX_OK" </dev/null >"$CODEX_LOG" 2>&1 ||
+  ! grep -q CODEY_CODEX_OK "$CODEX_LOG"; then
   die "Codex model test failed; see $CODEX_LOG"
 fi
 
 log 4 "Stop old CloudCLI, install the packaged latest build and start it"
-stop_user_unit codey-cloudcli.service
-stop_system_unit codey-cloudcli.service
-kill_matches '[d]ist-server/server/index.js'
+stop_cloudcli_processes
 free_port 3001
 mkdir -p "$STAGE/cloudcli"
 tar -xzf "$ASSETS/cloudcli.tar.gz" -C "$STAGE/cloudcli"
@@ -501,11 +533,12 @@ stop_user_unit codey-node-updater.service
 stop_system_unit codey-node-updater.service
 rm -rf "$HOME_DIR/.local/share/codey-updater" "$HOME_DIR/.config/codey-updater"
 PYTHON=""
-for candidate in /opt/az/bin/python3 "$HOME_DIR/miniconda3/bin/python" \
-  /usr/bin/python3.13 /usr/bin/python3.12 /usr/local/bin/python3 \
+for candidate in /usr/bin/python3.13 /usr/bin/python3.12 \
+  "$HOME_DIR/miniconda3/bin/python" /usr/local/bin/python3 /opt/az/bin/python3 \
   "$(command -v python3 2>/dev/null || true)"; do
   if [[ -n "$candidate" && -x "$candidate" ]] &&
-     "$candidate" -c 'import sys, sqlite3, ssl; raise SystemExit(sys.version_info < (3,12))' \
+     timeout --kill-after=2s 10s "$candidate" \
+       -c 'import sys, sqlite3, ssl; raise SystemExit(sys.version_info < (3,12))' \
        >/dev/null 2>&1; then
     PYTHON="$candidate"
     break
@@ -670,3 +703,4 @@ echo
 echo "Codey Linux installation completed."
 echo "Registration file: $OUTPUT"
 echo "Node ID: $NODE_ID"
+echo "Previous Codex processes were stopped; reopen Codex from a new terminal."
