@@ -203,6 +203,78 @@ class DeploymentSafety(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Cannot resolve"):
             portal_node_ids(rows, ("zhn-a100", "jpe2", "jpe3", "westus2", "missing"))
 
+    def test_portal_only_controller_never_reads_node_or_local_service_state(self):
+        from deploy import Deploy
+        worker = object.__new__(Deploy)
+        worker.args = SimpleNamespace(builder="westus2", reviewed_working_tree=False)
+        worker.report = {"withinTarget": True}
+        worker.job = self.root / "portal-job"
+        worker.job.mkdir()
+        worker.record = worker.job / "report.json"
+        worker.scripts = Path(__file__).parent
+        worker.remote = "/isolated/release"
+        worker.base = {}
+        worker.manifest = None
+        worker.pool = SimpleNamespace(
+            submit=lambda function, *args, **kwargs:
+                SimpleNamespace(result=lambda: function(*args, **kwargs)),
+        )
+        results = {
+            "prepare": {"commits": {}},
+            "build_portal": {"scope": "portal"},
+            "activate": {"ready": True},
+            "verify_portal": {"portalHealth": 200, "nodeChecksPerformed": False},
+            "mcp_health": {"health": 200},
+        }
+        with patch("deploy.phase", side_effect=lambda *_: nullcontext()), \
+                patch.object(worker, "upload"), patch.object(worker, "finish"), \
+                patch.object(worker, "protected_local", side_effect=AssertionError("local state is out of scope")), \
+                patch.object(worker, "node_services", side_effect=AssertionError("node state is out of scope")), \
+                patch.object(worker, "worker", side_effect=lambda mode, **_: results[mode]):
+            self.assertEqual(worker.run_portal(), 0)
+        self.assertEqual(worker.report["status"], "complete")
+        self.assertEqual(worker.report["selectedNodes"], [])
+        self.assertEqual(worker.report["skippedNodes"], ["zhn-a100", "jpe2", "jpe3", "westus2"])
+        self.assertFalse(worker.report["nodeChecksPerformed"])
+
+    def test_portal_only_verifier_never_requests_node_routes(self):
+        import hashlib
+        import sys
+        from types import ModuleType
+        storage = ModuleType("azure.storage")
+        fileshare = ModuleType("azure.storage.fileshare")
+        fileshare.ShareFileClient = object
+        with patch.dict(sys.modules, {"azure.storage": storage, "azure.storage.fileshare": fileshare}):
+            from portal import Portal
+        worker = object.__new__(Portal)
+        worker.job = self.root / "portal-verifier"
+        worker.job.mkdir()
+        public = b"frozen portal settings"
+        save(worker.job / "manifest.json", {
+            "scope": "portal",
+            "publicSha256": {"/settings": hashlib.sha256(public).hexdigest()},
+            "features": {"sessionHistory": False},
+        })
+        save(worker.job / "aca-result.json", {"ready": True})
+        paths = []
+
+        def http(path, **_kwargs):
+            paths.append(path)
+            if path == "/settings":
+                return SimpleNamespace(content=public, text=public.decode())
+            if path == "/?view=sessions":
+                return SimpleNamespace(content=b"", text='<button data-portal-view="sessions" hidden>')
+            return SimpleNamespace(content=b"ok", text="ok")
+
+        worker.http = http
+        result = worker.verify_portal()
+        self.assertEqual(paths, ["/api/health", "/settings", "/?view=sessions"])
+        self.assertFalse(result["nodeChecksPerformed"])
+        self.assertTrue(result["authenticatedPortalSession"])
+        self.assertNotIn("nodes", result)
+        self.assertFalse(any(path.startswith("/cloudcli/") or path.startswith("/api/node-data/")
+                             for path in paths))
+
     def test_test_home_and_tmp_stay_outside_source_worktrees_without_credentials(self):
         from builder import Builder
         worker = object.__new__(Builder)

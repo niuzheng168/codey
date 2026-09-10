@@ -52,8 +52,10 @@ python <skill-dir>/scripts/deploy.py --scope portal --apply --target-seconds 600
 ```
 
 仅更新 Portal 镜像，保留 MCP 镜像、共享 UI、远程节点的包和进程。验证生产静态文件、
-导航开关、Workspace SSO/Usage、实际 MCP 侧车健康，以及本地/远程进程未变。
-该模式不重新执行模型推理；不能把上次模型测试计为本轮测试。
+导航开关、Portal 登录会话和实际 MCP 侧车健康。**Portal-only 不 SSH、枚举或探测任何
+节点，也不检查 Workspace SSO/Usage、节点心跳、节点服务或本机 4141。** 节点离线、
+被删除或尚未重新接入都不能阻塞 Portal 发布。该模式不重新执行模型推理；不能把上次
+模型测试计为本轮测试。
 
 ### 只更新 Workspace 前端及所选节点 CloudCLI
 
@@ -97,12 +99,12 @@ Git index 生成不可变 tree/archive，不改真实 index、不创建 commit�
 
 ## 固定执行流程
 
-1. 记录完整开始时间及本地受保护进程；并行获取干净源码快照、ACA 基线、节点基线和已认证的任务空闲状态。
+1. 记录完整开始时间。全量/Workspace 模式并行获取干净源码快照、ACA 基线、节点基线和已认证的任务空闲状态；Portal-only 只获取源码与 ACA 基线。
 2. Portal、CloudCLI、copilot-api 的检查/测试各做一次；CloudCLI 后端只编译一次。Portal/MCP 镜像并行构建，用唯一 tag 解析不可变 digest，不依赖 `az acr build --no-wait` 返回 run ID。
 3. 对两个预编译包签名，校验后发布到已有 `session-data/node-updates`，最后原子更新 catalog。签名私钥只存在构建机 `~/.config/codey-node-release-signing/`，不进 ACA/Git/节点。当前四节点已验证的矩阵是 CloudCLI Node 22/24、gateway Node 22/24/26；新版本需重新核对，不能盲目扩大支持矩阵。
 4. 并行更新 ACA 与共享 UI。首次启用只额外添加两个 `PORTAL_NODE_UPDATE_*` 路径，复用既有 `/data` 挂载，不改网络/身份/其他配置；后续保留。未绑定的既有节点通过 owner API 下载私密引导包，SSH 只安装独立 Python 升级器，并核对两个应用 PID 未变。使用健康的既有 Python 3.12+，`-I -S` 排除 CWD/PYTHONPATH/site 定制；诊断脚本也必须隔离并只加入已审核的模块目录，不从用户 HOME 隐式导入 `copy.py` 等文件。不修补/升级全局解释器。
 5. 用与页面相同的 owner API 预览并确认四台。第一台空闲上线者作为 canary；成功才放行其余，最多三台并发。只更新变化的组件；相同 lockfile/安装指纹复用依赖，否则锁定生产安装。包完全相同时不重启，但新签名发行版仍执行 Codey/Codex 真调用。失败只回退本次代码和版本标记，未知/API key 迁移不硬闯。
-6. 最后统一验收：ACA 指定修订和实际 MCP 健康、四节点 UI/SSO/Usage/鉴权与本地进程未变。正常新发行版共 **4 次 Codey + 4 次 Codex**，由节点升级器执行并归档合成会话；不要再额外重复调用。已验收的相同发行版 no-op 不算本轮新模型测试。
+6. 最后统一验收：全量/Workspace 模式验证对应节点及受保护进程；Portal-only 仅验证 ACA 指定修订、Portal 健康/认证/冻结静态文件与实际 MCP 健康，不访问节点。正常全量新发行版共 **4 次 Codey + 4 次 Codex**，由节点升级器执行并归档合成会话；不要再额外重复调用。已验收的相同发行版 no-op 不算本轮新模型测试。
 7. 撤销临时门户登录会话、归档合成 Codey 测试会话、释放自己持有的发布锁，然后**立即报告结果**，不追加与验收无关的审计。
 
 真实模型探测只使用独立测试目录，禁止工具和文件操作；Codex CLI 使用 `--ephemeral`、只读沙箱和无审批模式。门户凭据只在构建机进程内存中使用，不传回控制机、不写日志。

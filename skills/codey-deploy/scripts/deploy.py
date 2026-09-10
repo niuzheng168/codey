@@ -312,10 +312,11 @@ class Deploy:
 
     def run_portal(self):
         self.report["scope"] = "portal-only"
+        self.report["selectedNodes"] = []
+        self.report["skippedNodes"] = list(NODES)
+        self.report["nodeChecksPerformed"] = False
         try:
             with phase(self.report, "portal-preflight-and-source-snapshot", self.record):
-                self.report["localBefore"] = self.protected_local()
-                self.report["nodesBefore"] = self.node_services()
                 self.upload(self.args.builder, [str(file) for file in self.scripts.iterdir()
                                                if file.suffix in {".py", ".mjs"}], self.remote + "/scripts")
                 if self.args.reviewed_working_tree:
@@ -331,11 +332,6 @@ class Deploy:
                 mcp = self.pool.submit(self.worker, "mcp_health", timeout=60)
                 self.report["e2e"] = self.worker("verify_portal", script="portal.py", timeout=100)
                 self.report["mcp"] = mcp.result()
-                self.report["nodesAfter"] = self.node_services()
-                self.report["localAfter"] = self.protected_local()
-                require(self.report["nodesAfter"] == self.report["nodesBefore"], "A remote service changed")
-                require(self.report["localAfter"] == self.report["localBefore"], "Protected local gateway changed")
-                self.report["remoteServicesUnchanged"] = True
             self.report["status"] = "complete"
         except Exception as error:
             self.report["status"] = "needs-attention"
