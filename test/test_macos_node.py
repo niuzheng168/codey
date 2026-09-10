@@ -6,15 +6,22 @@ import hmac
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import plistlib
 import sys
 import tempfile
 import time
 import unittest
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+if os.name == "nt":
+    pwd_stub = ModuleType("pwd")
+    pwd_stub.getpwuid = lambda _uid: ("owner",)
+    sys.modules.setdefault("pwd", pwd_stub)
+    sys.modules.setdefault("fcntl", ModuleType("fcntl"))
 
 
 def load(name, file):
@@ -48,6 +55,88 @@ def inputs(target="macos-arm64"):
 
 
 class MacNodeTests(unittest.TestCase):
+    def test_cli_qualified_ids_are_normalized_and_the_same_tunnel_is_reused(self):
+        enrollment, _ = inputs()
+        requested = "codey-" + enrollment["nodeId"]
+        description = "Codey macOS " + enrollment["nodeId"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            calls = []
+
+            def run(args, **_kwargs):
+                calls.append(args)
+                self.assertNotIn("--allow-anonymous", args)
+                if args[1] == "create":
+                    self.assertEqual(json.loads((root / "tunnel.json").read_text()), {"requested": requested})
+                    value = {"tunnel": {"tunnelId": requested + ".jpe1", "description": description, "ports": []}}
+                elif args[1] == "show":
+                    self.assertEqual(args[2], requested + ".jpe1")
+                    value = {"tunnelId": requested, "clusterId": "jpe1", "description": description,
+                             "ports": [{"portNumber": p, "protocol": "https"} for p in (3001, 8443)]}
+                else:
+                    self.assertEqual(args[1:4], ["port", "create", requested + ".jpe1"])
+                    value = {}
+                return SimpleNamespace(returncode=0, stdout=json.dumps(value))
+
+            with patch.object(installer, "run", side_effect=run):
+                self.assertEqual(installer.token_bound_tunnel("/reviewed/devtunnel", enrollment, root), (requested, "jpe1"))
+                saved = json.loads((root / "tunnel.json").read_text())
+                self.assertEqual(saved, {"requested": requested, "tunnelId": requested, "clusterId": "jpe1",
+                                         "qualifiedId": requested + ".jpe1"})
+                self.assertEqual(installer.token_bound_tunnel("/reviewed/devtunnel", enrollment, root), (requested, "jpe1"))
+            self.assertEqual([args[1] for args in calls], ["create", "port", "port", "show"])
+
+    def test_tunnel_normalization_rejects_missing_or_conflicting_regions(self):
+        for value in (None, [], {"tunnel": None}, {"tunnelId": 123},
+                      {"tunnelId": "codey-test"}, {"tunnelId": "codey-test.jpe1.extra"},
+                      {"tunnelId": "codey-test.jpe1", "clusterId": "usw2"},
+                      {"tunnelId": "codey-test.jpe1", "clusterId": None},
+                      {"tunnelId": "../codey-test", "clusterId": "jpe1"}):
+            with self.subTest(value=value), self.assertRaises(installer.tunnels.TunnelError):
+                installer.tunnels.normalize_tunnel(value)
+        value = {"tunnelId": "codey-test.jpe1", "clusterId": "jpe1"}
+        self.assertEqual(installer.tunnels.normalize_tunnel(value), {"tunnelId": "codey-test", "clusterId": "jpe1"})
+        self.assertEqual(value["tunnelId"], "codey-test.jpe1", "Do not mutate raw CLI records or token claims")
+
+    def test_existing_tunnel_binding_cannot_change_on_retry(self):
+        enrollment, _ = inputs()
+        requested = "codey-" + enrollment["nodeId"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            saved = {"requested": requested, "qualifiedId": requested + ".jpe1",
+                     "tunnelId": requested, "clusterId": "jpe1"}
+            service.write_private(root / "tunnel.json", saved)
+            response = {"tunnelId": requested + ".usw2", "description": "Codey macOS " + enrollment["nodeId"],
+                        "ports": []}
+            with patch.object(installer, "run", return_value=SimpleNamespace(
+                    returncode=0, stdout=json.dumps(response))) as run:
+                with self.assertRaises(installer.tunnels.TunnelError):
+                    installer.token_bound_tunnel("/reviewed/devtunnel", enrollment, root)
+                run.assert_called_once()
+            self.assertEqual(json.loads((root / "tunnel.json").read_text()), saved)
+
+    def test_wrong_tunnel_or_invalid_ports_never_create_ports(self):
+        enrollment, _ = inputs()
+        requested = "codey-" + enrollment["nodeId"]
+        valid = {"tunnelId": requested + ".jpe1", "description": "Codey macOS " + enrollment["nodeId"], "ports": []}
+        cases = [
+            {**valid, "tunnelId": "another-node.jpe1"},
+            {**valid, "description": "another installation"},
+            {**valid, "ports": None},
+            {**valid, "ports": [{"portNumber": 22, "protocol": "https"}]},
+            {**valid, "ports": [{"portNumber": 3001, "protocol": "http"}]},
+            {**valid, "ports": [{"portNumber": 3001, "protocol": "https"}] * 2},
+        ]
+        for response in cases:
+            with self.subTest(response=response), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                with patch.object(installer, "run", return_value=SimpleNamespace(
+                        returncode=0, stdout=json.dumps(response))) as run:
+                    with self.assertRaises(installer.tunnels.TunnelError):
+                        installer.token_bound_tunnel("/reviewed/devtunnel", enrollment, root)
+                    run.assert_called_once()
+                self.assertEqual(json.loads((root / "tunnel.json").read_text()), {"requested": requested})
+
     def test_architecture_release_and_purpose_keys_are_checked(self):
         for target in ("macos-arm64", "macos-x64"):
             enrollment, manifest = inputs(target)
@@ -86,6 +175,31 @@ class MacNodeTests(unittest.TestCase):
             file.write_text(json.dumps({"packages": {"node_modules/pkg": package}}))
             with self.assertRaises(service.ServiceError):
                 build.normalize_registry(file, "https://registry.npmjs.org/")
+
+    def test_registry_rebasing_preserves_aliases_and_uses_the_actual_package_name(self):
+        with tempfile.TemporaryDirectory() as temp:
+            file = Path(temp) / "package-lock.json"
+            packages = {
+                "node_modules/wrap-ansi-cjs": {
+                    "name": "wrap-ansi", "version": "7.0.0", "integrity": "sha512-wrap-original",
+                    "resolved": "https://registry.npmjs.org/wrap-ansi/-/wrap-ansi-7.0.0.tgz",
+                },
+                "node_modules/scoped-alias": {
+                    "name": "@scope/package", "version": "1.2.3", "integrity": "sha512-scoped-original",
+                    "resolved": "https://registry.npmjs.org/@scope/package/-/package-1.2.3.tgz",
+                },
+            }
+            file.write_text(json.dumps({"lockfileVersion": 3, "packages": packages}))
+            build.normalize_registry(file, "https://feed.example.test/public/npm/registry/")
+            actual = json.loads(file.read_text())
+            self.assertEqual(actual["lockfileVersion"], 3)
+            self.assertEqual(set(actual["packages"]), set(packages))
+            for key, before in packages.items():
+                after = actual["packages"][key]
+                self.assertEqual({k: v for k, v in after.items() if k != "resolved"},
+                                 {k: v for k, v in before.items() if k != "resolved"})
+                self.assertEqual(after["resolved"], "https://feed.example.test/public/npm/registry/"
+                                 + before["resolved"].removeprefix("https://registry.npmjs.org/"))
 
     def test_launchd_jobs_are_user_login_scoped_and_renewal_is_periodic(self):
         config = {"worker": "/private/worker.py", "releaseRoot": "/private/release", "configRoot": "/private/state"}
@@ -136,7 +250,8 @@ class MacNodeTests(unittest.TestCase):
             self.assertNotIn(token, saved)
             self.assertNotIn(enrollment["tunnelUpdateKey"], saved)
             service.renew(config, enrollment, runner=lambda *a, **kw: self.fail("Unnecessary token issuance"), now=now)
-            self.assertEqual((Path(temp) / "renewal.json").stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual((Path(temp) / "renewal.json").stat().st_mode & 0o777, 0o600)
 
     def test_privileged_or_wrong_tunnel_tokens_never_reach_the_portal(self):
         with tempfile.TemporaryDirectory() as temp:

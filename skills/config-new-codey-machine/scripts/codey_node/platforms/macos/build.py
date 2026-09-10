@@ -24,9 +24,12 @@ def normalize_registry(lock, registry):
         source = urllib.parse.urlsplit(package["resolved"])
         if source.hostname not in allowed or source.scheme != "https" or not package.get("integrity"):
             raise Error("Unreviewed dependency source; refusing to weaken npm integrity or URL policy")
-        name = key.rsplit("node_modules/", 1)[-1]
+        # npm aliases keep their install-directory key, while the tarball URL
+        # uses the actual package name recorded in the lockfile.
+        name = package.get("name", key.rsplit("node_modules/", 1)[-1])
         version = package.get("version", "")
-        if not re.fullmatch(r"(?:@[a-z0-9_.-]+/)?[a-z0-9_.-]+", name) or not re.fullmatch(r"\d[\w.+-]*", version):
+        if (not isinstance(name, str) or not re.fullmatch(r"(?:@[a-z0-9_.-]+/)?[a-z0-9_.-]+", name)
+                or not isinstance(version, str) or not re.fullmatch(r"\d[\w.+-]*", version)):
             raise Error("Invalid locked registry package")
         package["resolved"] = registry.rstrip("/") + "/" + name + "/-/" + name.rsplit("/", 1)[-1] + "-" + version + ".tgz"
     write_private(lock, value)

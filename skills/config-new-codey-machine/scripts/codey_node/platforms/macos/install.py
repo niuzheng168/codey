@@ -82,7 +82,10 @@ def port_busy(port):
 
 
 def token_bound_tunnel(executable, enrollment, config_root):
-    binding = tunnels.ensure_tunnel(executable, enrollment, config_root)
+    def runner(args, **kwargs):
+        return run(args, check=False, timeout=kwargs.get("timeout", 45))
+
+    binding = tunnels.ensure_tunnel(executable, enrollment, config_root, runner=runner)
     return binding["tunnelId"], binding["clusterId"]
 
 

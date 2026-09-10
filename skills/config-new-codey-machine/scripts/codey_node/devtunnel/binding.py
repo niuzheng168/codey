@@ -85,8 +85,6 @@ def ensure_tunnel(executable, enrollment, config_root, *, runner=subprocess.run,
         raise TunnelError("tunnel_binding_changed_no_replacement_created")
     qualified = tunnel["tunnelId"] + "." + tunnel["clusterId"]
     ports = tunnel.get("ports", [])
-    if ports is None:
-        ports = []
     if not isinstance(ports, list) or any(not isinstance(port, dict) or type(port.get("portNumber")) is not int
                                          or port["portNumber"] not in (3001, 8443) for port in ports):
         raise TunnelError("unrelated_ports_in_tunnel")
