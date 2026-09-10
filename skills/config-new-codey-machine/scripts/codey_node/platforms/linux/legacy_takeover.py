@@ -1,4 +1,4 @@
-"""Explicitly archive recognized owner systemd services before a fresh install."""
+"""Archive an existing owner Codey installation before replacing it."""
 import json
 import os
 from pathlib import Path
@@ -34,6 +34,7 @@ LEGACY_PATHS = (
     ("legacy-updater-config", ".config/codey-updater"),
     ("legacy-relay-runtime", ".local/share/codey-node-relay"),
     ("legacy-relay-config", ".config/codey-node-relay"),
+    ("legacy-codex-tools", ".local/share/codey-tools/codex"),
 )
 
 
@@ -102,14 +103,15 @@ def inspect(home, root, config, runner, *, port_available=_port_available):
                 or info.st_uid != os.getuid()):
             raise SetupError(f"Existing Codey {label} path is not an ordinary owner directory")
         paths.append({"label": label, "path": str(path)})
-    processes = codex_process.inspect(home)
+    detected = bool(units or paths)
+    processes = codex_process.inspect(home) if detected else []
     return {
-        "detected": bool(units or processes),
+        "detected": detected,
         "units": units,
         "codexProcesses": processes,
         "occupiedPorts": occupied,
         "archivePaths": paths,
-        "action": "stop-disable-and-archive-then-install-fresh",
+        "action": "stop-disable-and-archive-then-install-current-package",
         "restoresOldServicesOnFailure": False,
     }
 
@@ -133,7 +135,7 @@ def execute(home, root, config, node_id, runner, *, port_available=_port_availab
     home, root, config = Path(home), Path(root), Path(config)
     plan = inspect(home, root, config, runner, port_available=port_available)
     if not plan["detected"]:
-        raise SetupError("No recognized legacy Codey user service is available for replacement")
+        raise SetupError("No existing owner Codey installation is available for replacement")
     owner = Owner.target(home)
     backup_base = home / ".local/state/codey-service-backups"
     owner.mkdir(backup_base)

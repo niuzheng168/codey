@@ -3,8 +3,8 @@
 ## 验收
 
 1. 使用本人对应平台完整包，确认 owner/node ID、独立凭据、源码与 Node 摘要匹配。
-   优先验证并复用 owner 已有的官方 Codex CLI（包括 npm wrapper）；仅缺失时安装固定官方包并验证 SHA-512。
-   保留已有 config/auth，模型登录与本步骤分开。
+   Linux 停止旧 Codex app-server 后，使用 OpenAI 官方 installer 在原用户 bin 目录更新或安装 `latest`；
+   保留 `.codex`、config/auth 和 sessions。
 2. DevTunnel `user show --json` 显示 GitHub；不接受泛化的“已登录”，不切换现有账号。
 3. 新服务只监听回环地址；私有隧道仅有 HTTPS 3001/8443，没有匿名访问或额外端口。
    未改防火墙、IP、SSH、迁移清单外的代理进程或其他节点；Codex/gateway 仅有明确批准的默认配置变更，
@@ -22,10 +22,9 @@
    登录过期时由原 owner 完成 GitHub 授权；不静默切换 provider 或创建替代隧道。
 8. Linux 升级器需 active/enabled、添加后在门户在线且 owner/ID 一致。
    Windows/macOS 仅以实际 Workspace 检查报告在线，不伪造 Linux 更新心跳。
-9. 模型登录与接入分开验收。用户要求聊天能力时，需真实 Codey 和 Codex 回答。
-10. 已 ready 后去掉 `--replace-existing`，重跑普通入口只验收，不改服务、身份或运行版本；
-    仅明确的 `--repair-client` plan/apply 可重绑 owner CLI/新 key、停止旧 app-server 并重启 CloudCLI；
-    重启/注销恢复必须另行实测。
+9. Linux 安装时完成 GitHub Copilot 登录，并以真实 Codex 请求取得 `CODEY_INSTALL_OK`；
+   仅 health、PID 或 `/models` 不能代替模型验收。
+10. 重跑 `bash scripts/setup-linux.sh --apply` 会再次归档并完整覆盖当前用户的 Codey 安装。
 
 ## 独立默认配置
 
@@ -61,29 +60,22 @@ python -I -B scripts/codey.py defaults --owner-home "<目标 Home>" --codex-home
 - 重跑应 `changedFiles=[]`、不新增备份、不改字节或 mtime；哈希核对包括 config、catalog、
   gateway 与 provider.env。文件落盘不等于旧进程环境或 gateway runtime 已重载，必要重载须另获授权。
 
-## Linux legacy 显式迁移
+## Linux 直接覆盖
 
-- **准备检查**：Agent 先运行普通安装 plan；只有同一当前用户、已识别的旧 Codey user services
-  可进入此分支。核对 unit/进程/路径归属及中断窗口；当前 ready 安装、未知服务和任意进程不适用。
-  所用完整包必须支持 `--replace-existing`，不能用手动停止服务绕过缺失的迁移入口。
-- **目标**：归档旧 Codey 安装，再用当前个人包的新节点身份安装；不是保留旧身份的签名升级，
-  也不是恢复旧 key 的兼容模式。Home、`.codex`、session/auth 保留。
-- **执行脚本**：在 Skill 根目录先 plan，再经用户批准 apply；附加参数与普通计划保持一致：
+- **执行脚本**：
 
   ```bash
-  bash scripts/setup-linux.sh --replace-existing
-  bash scripts/setup-linux.sh --replace-existing --apply
+  bash scripts/setup-linux.sh --apply
   ```
 
-  plan 无停服或归档动作；apply 才 stop/disable 计划明确的旧 unit、停止清单中的 owner
-  Codex app-server，并归档计划列出的
-  `codey-machine`、旧 CloudCLI、copilot-api、updater 和 relay 标准 runtime/config。
-  以计划及结果给出的精确归档清单为准，归档可能含凭据，不公开上传。
-  不删除或搬走整个 Home/`.codex`，不恢复旧 key/服务；仍被未知进程占用的端口会终止安装，不杀进程。
-- **验收标准**：旧实例已退出、unit/runtime/config 已归档，新身份及新 key 生效且旧 key 被拒绝；
-  新服务运行路径、模型、SSO、守护和 updater 验收通过，session/auth 未丢失。
-  新服务可能复用 unit 名，应核对内容/路径/PID，而不是要求该名字永久 disabled。
-  失败保留归档与诊断，不自动恢复旧服务；ready 后去掉迁移选项，回到普通验收或签名升级流程。
+- 无论机器是首次安装、旧版服务、失败安装还是 ready 节点，都使用同一入口。
+- apply 自动 stop/disable 当前用户的已识别 Codey units，停止旧 Codex app-server，
+  将旧 runtime/config/unit 移动到 `~/.local/state/codey-service-backups/`，然后安装当前包。
+- `--replace-existing` 仅保留为兼容参数，不再改变行为或作为前置门禁。
+- Home、`.codex`、Codex auth 和 sessions 不移动、不删除；旧 key 和旧服务不恢复。
+- 停止已识别服务后若 `3001`、`8443` 或 `4141` 仍被未知程序占用，安装停止且不杀无关进程。
+- 完成后必须验证 GitHub DevTunnel、GitHub Copilot、最新版 Codex、真实模型调用、
+  CloudCLI TLS/SSO、systemd 守护、linger 和 updater。
 
 ## Linux ready 客户端修复
 
@@ -107,8 +99,8 @@ python -I -B scripts/codey.py defaults --owner-home "<目标 Home>" --codex-home
 ## 排障
 
 - 包/摘要/平台不匹配：停止，重下同一待配置身份的完整包，不拼凑凭据。
-- 端口或服务已占用：默认停止；同用户已识别的旧 Codey 仅走上述显式迁移计划，
-  未知服务/端口或当前 ready 安装不得用 `--replace-existing` 强行覆盖。
+- 端口或服务已占用：普通安装入口自动停止并归档当前用户已识别的 Codey；
+  只有停止后仍存在的未知监听才中止安装。
 - CLI 是 Microsoft 登录：保留缓存，要求本人审查 GitHub 登录，不能自动 logout。
 - Linux 新代理模型请求 401：区分 GitHub 模型登录与本机 API key。核对新 CloudCLI 环境、
   owner 登录环境及 Codex 后台是否都使用新 key；文件更新不会改变已运行进程的环境。
@@ -118,8 +110,7 @@ python -I -B scripts/codey.py defaults --owner-home "<目标 Home>" --codex-home
 - CLI 输出中 ID 已带区域后缀：仅使用经过严格核对的 ID/cluster，不猜区域。
 - 权限不足、公司代理或 GitHub/DevTunnel 策略拒绝：报告具体阶段，不开放匿名访问。
 - TLS、ticket、SSO、匿名拒绝失败：保持未添加，不关闭证书验证或跳过认证。
-- 普通既有节点修复不重新建节点；已明确批准的 legacy 迁移才使用全新身份。
-  历史修复工具不随首次安装包分发，不能代替当前迁移计划。
+- 当前包的 enrollment 是最终身份；覆盖不同旧身份时使用当前包身份，旧门户记录不会自动删除。
 
 ## 原生守护检查
 
@@ -169,10 +160,9 @@ codex/workspace/data/tunnel/renew jobs；renew 间歇执行，其他组件使用
 
 ## 精确回退
 
-- 普通安装失败只停止本次新建、归属/路径明确的进程或服务；保留诊断和原有数据。
+- Linux 覆盖失败时停止本次新服务并保留归档和诊断，不自动恢复旧 key 或旧服务。
 - Linux 范围：本次新建的 codey-copilot-api、codey-cloudcli、codey-node-updater、
   codey-devtunnel、codey-devtunnel-renew 服务/定时器。不能因同名就停止未获批准的旧服务。
-- legacy 迁移只停用并归档已批准的旧清单；失败不自动恢复旧 key/服务，不扩大删除范围。
 - Windows/macOS 只撤回本次明确创建的任务/LaunchAgent，不接管原 Desktop/代理。
 - 隧道/待配置身份的取消或删除需单独确认，只操作本节点已记录的精确 ID。
 - 已添加节点由 owner 在门户移除，仅撤销门户访问；不删除机器文件/项目/会话。

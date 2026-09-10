@@ -21,7 +21,8 @@ def recognized(home, executable, arguments):
     if not executable.is_relative_to(home):
         return False
     text = executable.as_posix()
-    return "/@openai/codex" in text or "/codey-tools/codex/" in text
+    return ("/@openai/codex" in text or "/codey-tools/codex/" in text
+            or "/packages/standalone/releases/" in text)
 
 
 def record(home, pid):

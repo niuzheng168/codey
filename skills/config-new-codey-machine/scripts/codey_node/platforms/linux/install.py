@@ -1,4 +1,4 @@
-"""Plan/install a fresh Linux x64 node via private GitHub DevTunnel."""
+"""Install or replace a Linux x64 Codey node via private GitHub DevTunnel."""
 import argparse
 import base64
 import hashlib
@@ -10,9 +10,12 @@ import platform
 import re
 import shutil
 import socket
+import subprocess
 import sys
 import tarfile
 import time
+import urllib.error
+import urllib.request
 from urllib.parse import urlsplit
 
 from ...common import verification as common
@@ -22,7 +25,7 @@ from ...common.files import digest, protected_write
 from ...common.verification import verify
 from ...devtunnel import auth, binding as tunnels, renewal
 from ...service.bundle import install_bundle
-from . import cli, client_repair, legacy_takeover, login, supervisor as worker
+from . import cli, client_repair, codex_latest, legacy_takeover, login, supervisor as worker
 from .build import prepare_runtime, run
 from .systemd import unit
 
@@ -89,9 +92,79 @@ def emit_machine(enrollment, network, cert, output, name=None, already_configure
         "localHttps": True, "usageHistory": True, "workspaceSso": True, "anonymousDenied": True,
         "alreadyConfigured": already_configured,
         "next": "Import codey-machine.json in Codey; Portal must verify the private tunnel and WebSocket before adding",
-        "modelAuthentication": "not tested; use the owner's existing Codex login or the bundled copilot-api auth login",
+        "modelAuthentication": "GitHub Copilot login and a real Codex model request passed",
         "rebootTested": False, "verification": verification,
     }, indent=2))
+
+
+def _copilot_login(executable, working_directory, token_file, environment):
+    token_file = Path(token_file)
+    if token_file.is_file() and token_file.stat().st_size > 0:
+        return {"action": "reuse", "provider": "github-copilot"}
+    print("GitHub Copilot login is required; complete the device authorization shown below.", flush=True)
+    result = subprocess.run(
+        [str(executable), "auth", "login", "--provider", "copilot"],
+        cwd=working_directory, env=environment, timeout=900,
+    )
+    if result.returncode or not token_file.is_file() or token_file.stat().st_size <= 0:
+        raise SetupError("GitHub Copilot login did not complete; rerun this installer after authorizing the device")
+    return {"action": "login", "provider": "github-copilot"}
+
+
+def _devtunnel_login(executable):
+    try:
+        auth.require_github_login(executable)
+        return {"action": "reuse", "provider": "github"}
+    except TunnelError:
+        print("GitHub DevTunnel login is required; complete the device authorization shown below.", flush=True)
+    result = subprocess.run(
+        [str(executable), "user", "login", "--github", "--use-device-code-auth"],
+        env=auth.cli_environment(), timeout=900,
+    )
+    if result.returncode:
+        raise SetupError("GitHub DevTunnel login did not complete")
+    auth.require_github_login(executable)
+    return {"action": "login", "provider": "github"}
+
+
+def _wait_model_api(key):
+    status = 0
+    for _ in range(30):
+        request = urllib.request.Request(
+            "http://127.0.0.1:4141/models", headers={"Authorization": "Bearer " + key})
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                status = response.status
+        except urllib.error.HTTPError as error:
+            status = error.code
+        except OSError:
+            status = 0
+        if status == 200:
+            return {"modelsStatus": 200}
+        time.sleep(1)
+    raise SetupError(f"Copilot API did not become ready after login (HTTP {status})")
+
+
+def _test_codex(executable, codex_home, key, home):
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "CODEX_HOME": str(codex_home),
+        "CODEY_MODEL_API_KEY": key,
+        "PATH": str(Path(executable).parent) + os.pathsep + os.environ.get("PATH", ""),
+    }
+    marker = "CODEY_INSTALL_OK"
+    result = subprocess.run(
+        [str(executable), "exec", "--skip-git-repo-check", f"Reply with only {marker}"],
+        cwd=home, env=environment, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+    if result.returncode or marker not in output:
+        log = Path(home) / ".config/codey-machine/codex-model-test.log"
+        protected_write(log, output)
+        raise SetupError(f"Codex real model test failed; protected diagnostic: {log}")
+    return {"marker": marker, "passed": True}
 
 
 def configure(args):
@@ -134,25 +207,23 @@ def configure(args):
             state = worker.private_json(state_file)
         except (worker.ServiceError, ValueError) as error:
             state_error = error
-    if state_error and not args.replace_existing:
-        raise SetupError("An unrecognized Codey installation state exists; rerun with --replace-existing only "
-                         "to review an identified legacy service migration") from state_error
-    artifacts = validate_inputs(enrollment, manifest, network, ready=bool(state and state.get("ready")))
+    if args.replace_existing and args.repair_client:
+        raise SetupError("--replace-existing and --repair-client are separate operations")
+    if state_error and args.repair_client:
+        raise SetupError("The existing Codey state is invalid; use the normal installer to replace it") from state_error
+    ready_repair = bool(args.repair_client and state and state.get("ready"))
+    artifacts = validate_inputs(enrollment, manifest, network, ready=ready_repair)
     for artifact in artifacts:
         archive = SKILL / "assets" / artifact["file"]
         if archive.is_symlink() or not archive.is_file() or archive.stat().st_size != artifact["size"] or digest(archive) != artifact["sha256"]:
             raise SetupError("A reviewed source package is missing, truncated or has the wrong checksum")
     network_hash = hashlib.sha256(json.dumps(network, sort_keys=True).encode()).hexdigest()
-    if state and (state.get("nodeId") != enrollment["nodeId"] or state.get("networkSha256") != network_hash):
-        raise SetupError("This OS account already has a different Codey machine/release; do not overwrite its identity")
-    if state and state.get("releaseId") != manifest["releaseId"] and (state.get("ready") or not args.retry_failed):
-        raise SetupError("A different release exists; only an unfinished installation may be retried with --retry-failed")
-    if args.replace_existing and args.repair_client:
-        raise SetupError("--replace-existing and --repair-client are separate operations")
-    if args.repair_client and not (state and state.get("ready")):
-        raise SetupError("--repair-client is only for this same ready Codey installation")
-    if state and args.replace_existing:
-        raise SetupError("--replace-existing is only for an identified legacy install without current installation state")
+    if args.repair_client:
+        if not ready_repair:
+            raise SetupError("--repair-client is only for this same ready Codey installation")
+        if (state.get("nodeId") != enrollment["nodeId"] or state.get("networkSha256") != network_hash
+                or state.get("releaseId") != manifest["releaseId"]):
+            raise SetupError("--repair-client cannot change this ready node's identity or release")
     service_dir = home / ".config/systemd/user"
     def port_available(port):
         try:
@@ -162,11 +233,8 @@ def configure(args):
         except OSError:
             return False
     takeover = None
-    if not state:
+    if not args.repair_client:
         takeover = legacy_takeover.inspect(home, root, config, run, port_available=port_available)
-        if takeover["detected"] and not args.replace_existing:
-            raise SetupError("Recognized legacy Codey user services exist; rerun with --replace-existing to review "
-                             "the exact stop/disable/archive plan. No process was stopped")
         if not takeover["detected"]:
             if config.exists() and any(config.iterdir()):
                 raise SetupError("An unrecognized Codey configuration exists; review instead of overwriting")
@@ -175,14 +243,11 @@ def configure(args):
             occupied = [port for port in legacy_takeover.PORTS if not port_available(port)]
             if occupied:
                 raise SetupError("Required listeners are occupied by an unknown process; no process was stopped")
-    codex = (Path(state["codexExecutable"]) if state and state.get("ready") and not args.repair_client else
-             codex_cli.require_cli(SKILL, args.codex_bin))
-    if not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(codex)):
-        raise SetupError("This systemd installer requires a Codex path without whitespace or shell/systemd specifiers")
     defaults = None
     shell_owner = None
     shell_changes = None
-    if not (state and state.get("ready")):
+    codex_update = None
+    if not args.repair_client:
         if takeover and takeover["detected"]:
             preflight_root = home / (".codey-takeover-preflight-" + enrollment["nodeId"])
             try:
@@ -207,9 +272,15 @@ def configure(args):
             target_codex_home = defaults.codex_home
         if not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(target_codex_home)):
             raise SetupError("This systemd installer requires a Codex home without whitespace or systemd specifiers")
+        codex_update = codex_latest.prepare(home, target_codex_home, args.codex_bin, skill=SKILL)
+        codex = codex_update.executable
+        if not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(codex)):
+            raise SetupError("This systemd installer requires a Codex path without whitespace or systemd specifiers")
         shell_owner, shell_changes = login.prepare(home, config / "provider.env")
+    else:
+        codex = codex_cli.require_cli(SKILL, args.codex_bin)
     client_plan = None
-    if state and state.get("ready") and args.repair_client:
+    if ready_repair:
         managed = codex_cli.tool_root(codex_cli.pin(SKILL, codex_cli.native_platform()))
         client_plan = client_repair.prepare(home, root, config, state_file, state, codex, managed)
     summary = {
@@ -217,16 +288,16 @@ def configure(args):
         "services": SERVICES + ["codey-node-updater.service", "codey-devtunnel.service", "codey-devtunnel-renew.timer"],
         "listenIp": network["listenIp"], "modelApi": "127.0.0.1:4141",
         "installationRoot": str(root), "configRoot": str(config),
-        "enableLinger": args.enable_linger, "existingCodexConfig": "only approved defaults merged; other values and credentials preserved",
+        "enableLinger": True, "existingCodexConfig": "only approved defaults merged; other values and credentials preserved",
         "modelDefaults": (
             defaults.report() if defaults else
-            {"mode": "fresh defaults will be prepared after the approved legacy archive"}
+            {"mode": "fresh defaults will be prepared after the existing installation is archived"}
             if takeover and takeover["detected"] else
-            {"mode": "verification-only; use the explicit defaults command for changes"}
+            {"mode": "fresh defaults will be installed"}
         ),
         "codexExecutable": str(codex),
         "dependencyInstallation": f"Download verified Node {manifest['node']}; install locked npm/Bun dependencies and build in a separate release",
-        "providerLogin": "Owner authentication is separate; no shared provider credentials are bundled",
+        "providerLogin": "GitHub Copilot device login runs during installation when no active token exists",
         "transport": "private-devtunnel", "tunnelLogin": "GitHub only",
         "azurePermissionsRequired": False, "inboundFirewallChanges": False,
         "supervisor": "systemd; Restart=always; 5-second restart delay",
@@ -234,13 +305,14 @@ def configure(args):
         "legacyTakeover": legacy_takeover.public(takeover) if takeover else {"detected": False},
         "shellModelEnvironment": login.report(shell_changes) if shell_changes else {"mode": "unchanged"},
         "clientRepair": client_plan.report() if client_plan else {"requested": False},
+        "codexUpdate": codex_update.report() if codex_update else {"requested": False},
     }
     if not args.apply:
         print(json.dumps(summary, indent=2))
         return
     if shutil.disk_usage(home).free < 8 * 1024 ** 3:
         raise SetupError("At least 8 GiB free disk space is required for isolated dependency installation/build")
-    if state and state.get("ready"):
+    if ready_repair:
         repair = client_plan.apply(run) if client_plan else None
         saved, saved_enrollment = worker.runtime(config / "tunnel-runtime.json")
         if saved_enrollment != enrollment:
@@ -254,20 +326,20 @@ def configure(args):
     owner = run(["id", "-un"]).stdout.strip()
     linger = run(["loginctl", "show-user", owner, "-p", "Linger", "--value"], check=False)
     linger_enabled = linger.stdout.strip().lower() == "yes"
-    if not linger_enabled and not args.enable_linger:
-        raise SetupError("Boot autostart needs this owner's linger. Review and rerun with --enable-linger; no service was installed")
     executable = cli.prepare_cli(args.devtunnel_bin or shutil.which("devtunnel"), SKILL, enrollment["nodeId"])
-    try:
-        auth.require_github_login(executable)
-    except TunnelError:
-        raise SetupError("GitHub tunnel login is required. As this Linux owner run: "
-                         + str(executable) + " user login --github --use-device-code-auth"
-                         + ". No existing account was logged out or switched.") from None
+    tunnel_login = _devtunnel_login(executable)
+    existing_binding = None
+    if (takeover and takeover["detected"] and state
+            and state.get("nodeId") == enrollment["nodeId"] and (config / "tunnel.json").is_file()):
+        try:
+            existing_binding = tunnels.ensure_tunnel(executable, enrollment, config, inspect_only=True)
+        except TunnelError as error:
+            raise SetupError("The existing node's DevTunnel could not be verified before replacement") from error
     lock = home / ".codey-machine-install.lock"
     with lock.open("x") as handle:
         handle.write(str(os.getpid()))
     started = []
-    was_ready = state and state.get("ready")
+    was_ready = False
     try:
         enrollment_file.chmod(0o600)
         if takeover and takeover["detected"]:
@@ -285,6 +357,21 @@ def configure(args):
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         config.chmod(0o700)
         root.chmod(0o700)
+        if existing_binding:
+            requested = "codey-" + enrollment["nodeId"]
+            protected_write(config / "tunnel.json", json.dumps({
+                "requested": requested,
+                "qualifiedId": requested + "." + existing_binding["clusterId"],
+                **existing_binding,
+            }, indent=2) + "\n")
+        binding = tunnels.ensure_tunnel(
+            executable, enrollment, config,
+            expected_binding=existing_binding if existing_binding else None,
+        )
+        network["devTunnel"] = binding
+        summary["devTunnel"] = {**binding, "provider": "github", "ports": [3001, 8443]}
+        summary["devTunnel"]["login"] = tunnel_login
+        protected_write(config / "enrollment.json", json.dumps(enrollment, indent=2) + "\n")
         if not state:
             state = {**summary, "ready": False, "networkSha256": network_hash}
             protected_write(state_file, json.dumps(state, indent=2) + "\n")
@@ -333,8 +420,8 @@ def configure(args):
         key.chmod(0o600)
         protected_write(config / "client-signing.key", enrollment["clientSigningKey"] + "\n")
         data = root / "data"
-        # The same explicit new COPILOT_API_HOME supplies the gateway config and
-        # CloudCLI model key. Never import keys from an old proxy or invoking shell.
+        # The new COPILOT_API_HOME supplies the gateway config and CloudCLI model
+        # key. Old services/data were archived and are not used by the new process.
         defaults.apply()
         shell_result = login.apply(shell_owner, shell_changes)
         state["shellModelEnvironment"] = shell_result
@@ -372,15 +459,40 @@ def configure(args):
              .replace("WorkingDirectory=", f"EnvironmentFile={provider_env}\nWorkingDirectory=")),
         ]:
             protected_write(service_dir / name, content)
-        if args.enable_linger and not linger_enabled:
+        if not linger_enabled:
             run(["loginctl", "enable-linger", owner])
             if run(["loginctl", "show-user", owner, "-p", "Linger", "--value"]).stdout.strip().lower() != "yes":
                 raise SetupError("Linger did not become enabled; boot autostart was not verified")
-        if not was_ready:
-            run(["systemctl", "--user", "daemon-reload"])
-            for service in SERVICES:
-                started.append(service)
-                run(["systemctl", "--user", "enable", "--now", service])
+        run(["systemctl", "--user", "daemon-reload"])
+
+        # Copilot API: start the new build, complete GitHub login if needed,
+        # restart it under systemd, then prove the authenticated model endpoint.
+        started.append(SERVICES[0])
+        run(["systemctl", "--user", "enable", "--now", SERVICES[0]])
+        provider_values = defaults.provider_env
+        model_key = provider_values["CODEY_MODEL_API_KEY"]
+        copilot_environment = {
+            **os.environ,
+            "HOME": str(home),
+            "COPILOT_API_HOME": str(data / "copilot-api"),
+            "PATH": service_path,
+        }
+        provider_login = _copilot_login(
+            bins / "copilot-api", copilot, data / "copilot-api/github_token", copilot_environment)
+        run(["systemctl", "--user", "restart", SERVICES[0]])
+        copilot_test = _wait_model_api(model_key)
+        state["copilotApi"] = {"login": provider_login, "test": copilot_test}
+
+        # Codex: stop old app-server processes, update/install the official
+        # latest CLI in the owner's existing bin location, then make a real call.
+        codex_result = codex_update.apply()
+        state["codexUpdate"] = codex_result
+        codex_test = _test_codex(codex, defaults.codex_home, model_key, home)
+        state["codexTest"] = codex_test
+
+        # CloudCLI: only start after Copilot API and Codex have passed.
+        started.append(SERVICES[1])
+        run(["systemctl", "--user", "enable", "--now", SERVICES[1]])
         error = None
         for _ in range(20):
             try:
@@ -392,10 +504,6 @@ def configure(args):
                 time.sleep(2)
         if error:
             raise SetupError(f"Local TLS/authentication verification failed ({error}); no machine import file was produced")
-        auth.require_github_login(executable)
-        binding = tunnels.ensure_tunnel(executable, enrollment, config)
-        network["devTunnel"] = binding
-        protected_write(config / "enrollment.json", json.dumps(enrollment, indent=2) + "\n")
         python_runtime = install_bundle(SKILL / "scripts", config / "service", "linux")
         runtime = {
             "schema": 1, "uid": os.geteuid(), "nodeId": enrollment["nodeId"],
@@ -454,11 +562,11 @@ def arguments(argv=None):
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--replace-existing", action="store_true",
-                        help="Plan/apply replacement of recognized owner legacy Codey user services")
+                        help="Compatibility alias; normal Linux installation already replaces existing owner Codey services")
     parser.add_argument("--repair-client", action="store_true",
                         help="Plan/apply rebinding of this same ready node to the owner's existing Codex CLI and current key")
     parser.add_argument("--enable-linger", action="store_true",
-                        help="Explicitly keep this owner's user services running after logout")
+                        help="Compatibility alias; Linux installation always enables owner linger for boot autostart")
     return parser.parse_args(argv)
 
 

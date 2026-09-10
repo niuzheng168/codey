@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Native Linux entry point. Planning is the default; --apply is explicit.
+# Native Linux entry point. Use --apply for the one-command replacement install.
 set -euo pipefail
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "Use setup-windows.ps1 on Windows or setup-macos.sh on macOS." >&2

@@ -14,7 +14,7 @@ import time
 import tomllib
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills/config-new-codey-machine/scripts"
@@ -24,7 +24,7 @@ sys.path.insert(0, str(SCRIPTS))
 from codey_node.platforms.linux import install as installer
 from codey_node.platforms.linux import client_repair, codex_process, login
 from codey_node.devtunnel import auth, binding as tunnels, renewal
-from codey_node.common.errors import TunnelError
+from codey_node.common.errors import SetupError, TunnelError
 from codey_node.common import config_defaults
 from codey_node.service.launcher import runtime_files
 
@@ -116,6 +116,11 @@ class LinuxContractTests(unittest.TestCase):
                 with self.assertRaises(installer.SetupError):
                     installer.validate_inputs(f.enrollment, f.manifest, {**f.network, **changes})
             installer.validate_inputs({**f.enrollment, "expiresAt": 0}, f.manifest, f.network, ready=True)
+
+    def test_official_standalone_codex_app_server_is_recognized(self):
+        home = Path("/home/alice")
+        executable = home / ".codex/packages/standalone/releases/0.200.0-linux-x64/bin/codex"
+        self.assertTrue(codex_process.recognized(home, executable, [str(executable), "app-server"]))
 
     def test_machine_export_has_only_public_binding_not_credentials_or_vm_metadata(self):
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
@@ -306,16 +311,32 @@ class LinuxTransactionTests(unittest.TestCase):
                 (stage / "release.json").write_text(json.dumps(manifest))
             old_mask = os.umask(0o077)
             try:
+                codex_plan = SimpleNamespace(
+                    executable=Path(f.args.codex_bin),
+                    report=lambda: {
+                        "action": "update", "release": "latest",
+                        "targetExecutable": str(Path(f.args.codex_bin)),
+                    },
+                    apply=Mock(return_value={
+                        "applied": True, "version": "0.999.0", "stoppedProcesses": [],
+                    }),
+                )
                 with patch.object(installer, "SKILL", f.skill), patch.object(Path, "home", return_value=f.home), \
-                     patch.object(installer.codex_cli, "version", return_value="codex-cli 0.146.0"), \
-                     patch.object(installer.socket, "socket") as socket_factory, \
-                     patch.object(installer.shutil, "disk_usage", return_value=SimpleNamespace(free=free_bytes)), \
-                     patch.object(installer, "run", side_effect=run), \
+                      patch.object(installer.codex_cli, "version", return_value="codex-cli 0.146.0"), \
+                      patch.object(installer.codex_latest, "prepare", return_value=codex_plan) as codex_prepare, \
+                      patch.object(installer.socket, "socket") as socket_factory, \
+                      patch.object(installer.shutil, "disk_usage", return_value=SimpleNamespace(free=free_bytes)), \
+                      patch.object(installer, "run", side_effect=run), \
                      patch.object(installer, "prepare_runtime", side_effect=build) as builder, \
                      patch.object(installer, "verify", return_value={"usage": False, "tokenUsage": True, "warnings": ["quota unavailable"]}), \
-                     patch.object(installer.cli, "prepare_cli", return_value=f.executable) as cli, \
-                     patch.object(auth, "require_github_login") as login, \
-                     patch.object(tunnels, "ensure_tunnel", return_value={"tunnelId": "codey-" + ID, "clusterId": "jpe1"}) as create, \
+                      patch.object(installer.cli, "prepare_cli", return_value=f.executable) as cli, \
+                      patch.object(auth, "require_github_login") as login, \
+                      patch.object(installer, "_copilot_login",
+                                   return_value={"action": "login", "provider": "github-copilot"}), \
+                      patch.object(installer, "_wait_model_api", return_value={"modelsStatus": 200}), \
+                      patch.object(installer, "_test_codex",
+                                   return_value={"marker": "CODEY_INSTALL_OK", "passed": True}), \
+                      patch.object(tunnels, "ensure_tunnel", return_value={"tunnelId": "codey-" + ID, "clusterId": "jpe1"}) as create, \
                      patch.object(renewal, "renew", return_value={"ok": True}), \
                      contextlib.redirect_stdout(io.StringIO()) as output:
                     def bind(_address):
@@ -323,6 +344,7 @@ class LinuxTransactionTests(unittest.TestCase):
                             raise OSError("occupied test listener")
                     socket_factory.return_value.__enter__.return_value.bind.side_effect = bind
                     f.calls, f.builder, f.cli, f.login, f.create = calls, builder, cli, login, create
+                    f.codex_plan, f.codex_prepare = codex_plan, codex_prepare
                     f.output, f.legacy_units, f.service_states = output, legacy_units, service_states
                     f.legacy_unit = legacy_units.get("copilot-api.service", service_dir / "copilot-api.service")
                     yield f
@@ -339,12 +361,11 @@ class LinuxTransactionTests(unittest.TestCase):
             self.assertFalse((f.home / ".config/codey-machine").exists())
             self.assertFalse(any("enable" in call for call in f.calls))
 
-    def test_existing_services_require_explicit_takeover_and_default_never_stops_them(self):
+    def test_existing_services_are_automatically_planned_for_replacement(self):
         with self.setup(existing=True) as f:
-            f.args.apply = True
-            with self.assertRaisesRegex(installer.SetupError, "--replace-existing"):
-                installer.configure(f.args)
-            f.cli.assert_not_called()
+            installer.configure(f.args)
+            plan = json.loads(f.output.getvalue())
+            self.assertTrue(plan["legacyTakeover"]["detected"])
             self.assertFalse(any("stop" in call or "disable" in call for call in f.calls))
 
     def test_takeover_rejects_a_linked_or_external_unit_file(self):
@@ -383,14 +404,13 @@ class LinuxTransactionTests(unittest.TestCase):
             session.write_text('{"preserve":"session"}\n')
             auth_before = (codex_home / "auth.json").read_bytes()
             session_before = session.read_bytes()
-            f.args.replace_existing = True
             installer.configure(f.args)
             plan = json.loads(f.output.getvalue())
             self.assertTrue(plan["legacyTakeover"]["detected"])
             self.assertEqual(plan["legacyTakeover"]["occupiedPorts"], [3001, 8443, 4141])
             self.assertEqual(plan["legacyTakeover"]["codexProcesses"], [process])
             self.assertEqual(plan["modelDefaults"]["mode"],
-                             "fresh defaults will be prepared after the approved legacy archive")
+                             "fresh defaults will be prepared after the existing installation is archived")
             self.assertFalse(any(call[:4] == ["systemctl", "--user", "disable", "--now"] for call in f.calls))
             self.assertTrue(f.legacy_unit.exists())
             f.output.seek(0)
@@ -445,14 +465,15 @@ class LinuxTransactionTests(unittest.TestCase):
             f.builder.assert_not_called()
             self.assertFalse(any("enable" in call for call in f.calls))
 
-    def test_unknown_runtime_and_reused_updater_key_fail_before_actions(self):
+    def test_existing_runtime_is_planned_for_archive_and_reused_updater_key_is_rejected(self):
         with self.setup() as f:
             root = f.home / ".local/share/codey-machine"
             root.mkdir(parents=True)
             (root / "unrelated.txt").write_text("preserve")
-            with self.assertRaisesRegex(installer.SetupError, "unrecognized Codey runtime"):
-                installer.configure(f.args)
-            f.cli.assert_not_called()
+            installer.configure(f.args)
+            plan = json.loads(f.output.getvalue())
+            self.assertTrue(plan["legacyTakeover"]["detected"])
+            self.assertIn(str(root), [row["path"] for row in plan["legacyTakeover"]["archivePaths"]])
             self.assertEqual((root / "unrelated.txt").read_text(), "preserve")
         with self.setup() as f:
             file = f.skill / "assets/codey-updater/config.json"
@@ -463,13 +484,12 @@ class LinuxTransactionTests(unittest.TestCase):
                 installer.configure(f.args)
             f.cli.assert_not_called()
 
-    def test_boot_autostart_requires_linger_approval_before_installation(self):
+    def test_boot_autostart_enables_linger_automatically(self):
         with self.setup(linger=False) as f:
             f.args.apply = True
-            with self.assertRaisesRegex(installer.SetupError, "Boot autostart"):
-                installer.configure(f.args)
-            f.cli.assert_not_called()
-            self.assertFalse((f.home / ".config/codey-machine").exists())
+            installer.configure(f.args)
+            self.assertTrue(any(call[:2] == ["loginctl", "enable-linger"] for call in f.calls))
+            self.assertTrue((f.home / ".config/codey-machine").exists())
 
     def test_existing_bash_login_profile_receives_the_model_environment_hook(self):
         with self.setup() as f:
@@ -494,8 +514,8 @@ class LinuxTransactionTests(unittest.TestCase):
     def test_github_login_failure_precedes_runtime_or_service_mutations(self):
         with self.setup() as f:
             f.args.apply = True
-            f.login.side_effect = TunnelError("wrong-provider")
-            with self.assertRaisesRegex(installer.SetupError, "--github --use-device-code-auth"):
+            with patch.object(installer, "_devtunnel_login", side_effect=SetupError("GitHub DevTunnel login did not complete")), \
+                    self.assertRaisesRegex(installer.SetupError, "DevTunnel login"):
                 installer.configure(f.args)
             f.builder.assert_not_called()
             f.create.assert_not_called()
@@ -535,18 +555,13 @@ class LinuxTransactionTests(unittest.TestCase):
             self.assertIn("Type=oneshot", renew)
             self.assertNotIn("Restart=always", renew)
             self.assertIn("OnUnitInactiveSec=300", (units / "codey-devtunnel-renew.timer").read_text())
-            before = len(f.calls)
-            f.builder.reset_mock()
-            f.create.reset_mock()
-            with patch.object(config_defaults, "prepare") as defaults_prepare:
-                installer.configure(f.args)
-                defaults_prepare.assert_not_called()
-            self.assertEqual(len(f.calls), before)
-            f.builder.assert_not_called()
-            f.create.assert_not_called()
-            f.args.replace_existing = True
-            with self.assertRaisesRegex(installer.SetupError, "only for an identified legacy install"):
-                installer.configure(f.args)
+            f.output.seek(0)
+            f.output.truncate(0)
+            f.args.apply = False
+            installer.configure(f.args)
+            replacement = json.loads(f.output.getvalue())
+            self.assertTrue(replacement["legacyTakeover"]["detected"])
+            self.assertEqual(replacement["codexUpdate"]["release"], "latest")
 
     def test_ready_client_repair_has_an_explicit_plan_and_apply_route(self):
         with self.setup() as f:
@@ -556,6 +571,7 @@ class LinuxTransactionTests(unittest.TestCase):
             f.args.repair_client = True
             f.output.seek(0)
             f.output.truncate(0)
+            restarts_before = sum(call[:3] == ["systemctl", "--user", "restart"] for call in f.calls)
             process = {"pid": 8282, "start": "456", "executable": str(f.home / "codex")}
             with patch.object(installer.client_repair, "_http_status", return_value=200), \
                     patch.object(installer.client_repair.codex_process, "inspect", return_value=[process]):
@@ -563,7 +579,10 @@ class LinuxTransactionTests(unittest.TestCase):
             plan = json.loads(f.output.getvalue())
             self.assertEqual(plan["clientRepair"]["codexExecutable"], str(f.home / "codex"))
             self.assertEqual(plan["clientRepair"]["codexProcessesToStop"], [process])
-            self.assertFalse(any(call[:3] == ["systemctl", "--user", "restart"] for call in f.calls))
+            self.assertEqual(
+                sum(call[:3] == ["systemctl", "--user", "restart"] for call in f.calls),
+                restarts_before,
+            )
             f.args.apply = True
             with patch.object(installer.client_repair, "_http_status", return_value=200), \
                     patch.object(installer.client_repair.codex_process, "inspect", return_value=[process]), \
