@@ -188,6 +188,21 @@ class DeploymentSafety(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "duplicated"):
             worker.node_services(nodes=("zhn-a100",))
 
+    def test_portal_verifier_resolves_migrated_machine_ids_and_honors_selected_nodes(self):
+        from common import portal_node_ids
+        rows = [
+            {"id": "local", "name": "windows-devbox"},
+            {"id": "n-" + "a" * 24, "name": "ZHN A100 (DevTunnel)"},
+            {"id": "n-" + "b" * 24, "name": "zhn-jpe-2"},
+            {"id": "jpe3", "name": "Japan East 3"},
+            {"id": "westus2", "name": "West US 2"},
+        ]
+        self.assertEqual(portal_node_ids(rows, ("zhn-a100", "jpe3", "westus2")),
+                         ["n-" + "a" * 24, "jpe3", "westus2"])
+        self.assertEqual(portal_node_ids(rows, ("jpe2",)), ["n-" + "b" * 24])
+        with self.assertRaisesRegex(RuntimeError, "Cannot resolve"):
+            portal_node_ids(rows, ("zhn-a100", "jpe2", "jpe3", "westus2", "missing"))
+
     def test_test_home_and_tmp_stay_outside_source_worktrees_without_credentials(self):
         from builder import Builder
         worker = object.__new__(Builder)

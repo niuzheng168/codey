@@ -17,11 +17,10 @@ from azure.core.exceptions import ResourceNotFoundError
 from azure.storage.fileshare import ShareFileClient
 
 from builder import Builder
-from common import NODES, command, read, require, save
+from common import NODES, command, portal_node_ids, read, require, save
 from gateway_routes import PROOF_FILE, verify_published as verify_published_gateway
 
 logging.disable(logging.CRITICAL)
-
 
 def b64(data):
     return base64.urlsafe_b64encode(data).decode().rstrip("=")
@@ -178,8 +177,12 @@ class Portal:
             self.http(prefix + "/api/auth/status", authenticated=False, expected=401)
             self.http(f"/api/node-data/{node}/usage")
             return {"node": node, "workspaceSso": 200, "anonymous": 401, "usage": 200}
+        aliases = self.request.get("nodes", list(NODES))
+        require(aliases and set(aliases).issubset(NODES), "Unexpected Portal verification targets")
+        inventory = self.http("/api/cloudcli/nodes").json()["nodes"]
+        targets = portal_node_ids(inventory, aliases)
         with ThreadPoolExecutor(max_workers=4) as pool:
-            nodes = list(pool.map(check, NODES))
+            nodes = list(pool.map(check, targets))
         return {"portalHealth": 200, "sessionHistoryHidden": history_hidden,
                 "publicFilesVerified": len(manifest["publicSha256"]), "sharedUiUnchanged": True, "nodes": nodes,
                 "realModelCalls": 0, "acceptanceScope": "Portal navigation, deployed source, Workspace SSO and Usage"}

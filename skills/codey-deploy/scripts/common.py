@@ -10,11 +10,36 @@ import tarfile
 import time
 
 NODES = ("zhn-a100", "jpe2", "jpe3", "westus2")
+PORTAL_NODE_NAMES = {
+    "zhn-a100": {"zhna100", "zhna100devtunnel"},
+    "jpe2": {"japaneast2", "zhnjpe2"},
+    "jpe3": {"japaneast3", "zhnjpe3"},
+    "westus2": {"westus2", "zhnusw2"},
+}
 
 
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
+
+
+def portal_node_ids(rows, targets):
+    require(isinstance(rows, list), "Invalid owner Workspace inventory")
+    ids = [row.get("id") for row in rows if isinstance(row, dict)]
+    require(all(isinstance(node, str) and node for node in ids) and len(ids) == len(set(ids)),
+            "Invalid or duplicate owner Workspace node ID")
+    result = []
+    for target in targets:
+        if target in ids:
+            result.append(target)
+            continue
+        names = PORTAL_NODE_NAMES.get(target, set())
+        matches = [row["id"] for row in rows
+                   if re.sub(r"[^a-z0-9]", "", str(row.get("name", "")).lower()) in names]
+        require(len(matches) == 1, "Cannot resolve the current Portal node ID for " + target)
+        result.append(matches[0])
+    require(len(result) == len(set(result)), "Portal node aliases resolved to the same node")
+    return result
 
 
 def release_name(value):
