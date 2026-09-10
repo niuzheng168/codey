@@ -60,19 +60,7 @@ async function bundle(root, platform = "linux-x64") {
   const manifest = {
     schema: 2, kind: "codey-machine-skill", platform, registrationSchema: 2,
     releaseId: `machine-${packageSha256.slice(0, 16)}`, installerReleaseId: "machine-" + "a".repeat(16),
-    node: "24.20.0",
-    cloudcli: {
-      version: "test-cloudcli", profile: "codex-only", enabledProviders: ["codex"],
-      providerDependencies: [],
-      runtimeDependencies: [
-        "@iarna/toml", "@octokit/rest", "@openai/codex-sdk", "@vscode/ripgrep",
-        "bcrypt", "better-sqlite3", "chokidar", "cors", "cross-spawn", "express",
-        "gray-matter", "ignore", "jsonwebtoken", "mime-types", "multer", "node-pty",
-        "web-push", "ws",
-      ],
-      excludedDependencies: ["@anthropic-ai/claude-agent-sdk"],
-    },
-    copilotApi: { version: "test-copilot" },
+    node: "24.20.0", cloudcli: { version: "test-cloudcli" }, copilotApi: { version: "test-copilot" },
     bundledRuntimes: ["cloudcli", "copilot-api", "updater"],
     downloadedOfficialRuntimes: ["node", "codex", "devtunnel"],
     package: {
@@ -287,7 +275,6 @@ test("complete Skill download is deterministic, owner-independent and contains n
   assert.deepEqual(await f.policy.pendingMachines(f.credential.principalId), []);
   const status = await (await f.request("/api/settings")).json();
   assert.equal(status.machineSetup.enabled, true);
-  assert.equal(status.machineSetup.cloudcliProfile, "codex-only");
   assert.equal(status.pendingMachines.length, 0);
   const repeat = await f.request("/api/settings/machines/skill", { method: "POST", user: f.admin });
   assert.equal(repeat.status, 200);

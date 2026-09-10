@@ -16,12 +16,6 @@ MARKER = b'{"schema":1,"kind":"codey-machine-skill-store"}\n'
 RELEASE = re.compile(r"machine-[a-f0-9]{16}")
 PACKAGE_NAME = "config-new-codey-machine.zip"
 MAX_PACKAGE = 1536 * 1024 * 1024
-CLOUDCLI_SERVER_RUNTIME_DEPENDENCIES = [
-    "@iarna/toml", "@octokit/rest", "@openai/codex-sdk", "@vscode/ripgrep",
-    "bcrypt", "better-sqlite3", "chokidar", "cors", "cross-spawn", "express",
-    "gray-matter", "ignore", "jsonwebtoken", "mime-types", "multer", "node-pty",
-    "web-push", "ws",
-]
 
 
 class PublishError(Exception):
@@ -88,30 +82,9 @@ def inspect_package(file):
             raise PublishError("OVERSIZED_PACKAGE_METADATA")
         manifest = json.loads(manifest_raw)
         setup = json.loads(setup_raw)
-        profile = manifest.get("cloudcli", {}).get("profile")
-        profile_shape = {
-            "codex-only": (["codex"], []),
-            "full": (["claude", "codex", "cursor", "opencode"], ["@anthropic-ai/claude-agent-sdk"]),
-        }
-        cloudcli = manifest.get("cloudcli", {})
-        provider_dependencies = cloudcli.get("providerDependencies")
-        excluded_dependencies = cloudcli.get("excludedDependencies")
         if (manifest.get("schema") != 1 or manifest.get("platform") != "linux-x64"
                 or manifest.get("dependencyMode") != "prebuilt-private-components"
                 or not RELEASE.fullmatch(manifest.get("releaseId", ""))
-                or not isinstance(profile, str) or profile not in profile_shape
-                or (
-                    cloudcli.get("enabledProviders"),
-                    provider_dependencies,
-                ) != profile_shape[profile]
-                or cloudcli.get("runtimeDependencies")
-                    != [*CLOUDCLI_SERVER_RUNTIME_DEPENDENCIES, *provider_dependencies]
-                or not isinstance(excluded_dependencies, list)
-                or any(not isinstance(name, str) for name in excluded_dependencies)
-                or excluded_dependencies != sorted(set(excluded_dependencies))
-                or any(name in cloudcli["runtimeDependencies"] for name in excluded_dependencies)
-                or ("@anthropic-ai/claude-agent-sdk" in excluded_dependencies)
-                    != (profile == "codex-only")
                 or setup.get("schema") != 1 or setup.get("platform") != "linux-x64"
                 or setup.get("releaseId") != manifest["releaseId"]
                 or setup.get("network") != {"mode": "devtunnel"}

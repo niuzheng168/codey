@@ -11,11 +11,6 @@ description: "在 Linux x64 上一键覆盖安装 Codey 节点：官方安装 De
 - `copilot-api.tar.gz`
 - `updater.tar.gz`
 
-当前正式包使用 `codex-only` CloudCLI profile，只注册 Codex，并在构建阶段排除
-Claude SDK 和已编译前端不再需要的 Node 模块；目标机安装流程没有 provider 分支。
-需要恢复 Claude/Cursor/OpenCode 时，
-重新以 `--cloudcli-profile full` 构建同一套包即可，不在目标机临时补装依赖。
-
 在目标普通用户下执行一条命令：
 
 ```bash
@@ -54,12 +49,10 @@ bash scripts/install.sh
 ## 4. 覆盖安装 CloudCLI
 
 - **准备检查**：停止旧 CloudCLI，释放 `3001`。
-- **目标**：安装包内最新版 CloudCLI，使用包内固定的 provider profile，并强制使用
-  第 3 步的官方 Codex 路径。
+- **目标**：安装包内最新版 CloudCLI，并强制使用第 3 步的官方 Codex 路径。
 - **执行脚本**：创建并启动 `codey-cloudcli.service`。
 - **验收标准**：匿名访问被拒绝；CloudCLI 自带的 Codex SDK 真实请求返回
-  `CODEY_CLOUDCLI_OK`；包内不存在 Codex native runtime；`codex-only` 包内不存在
-  `@anthropic-ai`。
+  `CODEY_CLOUDCLI_OK`；包内不存在 Codex native runtime。
 
 ## 5. 安装更新器
 
