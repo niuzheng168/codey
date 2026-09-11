@@ -202,13 +202,20 @@ export async function stagePackage(artifact, plan, job, { command = execute, npm
   await copyFile(artifact.file, archive);
   if (await fileHash(archive) !== artifact.sha256) throw new Error("The source tarball changed after inspection.");
   const prefix = path.join(job, "app");
-  const flags = ["--omit=dev", "--no-audit", "--no-fund", "--engine-strict", "--strict-ssl=true", "--registry=https://registry.npmjs.org"];
-  await command(plan.node, [npm, "install", "--global", "--prefix", prefix, "--ignore-scripts", ...flags, archive], {
+  // A permissive caller umask must not make the activated package fail the next
+  // owner-path check. Keep both the install and native rebuild private.
+  const flags = ["--omit=dev", "--no-audit", "--no-fund", "--engine-strict", "--umask=0077", "--strict-ssl=true", "--registry=https://registry.npmjs.org"];
+  // npm's option alone does not cover every directory it creates. Set the OS
+  // umask in the npm child, without mutating the caller's process-wide mask.
+  const npmArgs = process.platform === "win32" ? [npm] : [
+    "--input-type=commonjs", "-e", "process.umask(0o077); require(process.argv[1]);", npm,
+  ];
+  await command(plan.node, [...npmArgs, "install", "--global", "--prefix", prefix, "--ignore-scripts", ...flags, archive], {
     env, cwd: job, log: path.join(job, "npm-install.private.log"), timeout: 1200000,
   });
   const root = path.join(prefix, ...(process.platform === "win32" ? [] : ["lib"]), "node_modules", "codey");
   await verifyStagedPackage(root, artifact);
-  await command(plan.node, [npm, "rebuild", "--prefix", root, ...flags], {
+  await command(plan.node, [...npmArgs, "rebuild", "--prefix", root, ...flags], {
     env, cwd: root, log: path.join(job, "npm-rebuild.private.log"), timeout: 1200000,
   });
   await verifyStagedPackage(root, artifact);

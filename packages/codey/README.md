@@ -7,7 +7,7 @@ dependency. Both use Codey's single runtime dependency tree and shrinkwrap.
 ## Install a built package
 
 ```sh
-npm install --global ./codey-0.1.1.tgz
+npm install --global --umask=0077 ./codey-0.1.3.tgz
 codey --version
 codey doctor
 codey auth login --provider copilot
@@ -77,7 +77,7 @@ Only the prerequisite Node distribution is extracted by the launcher, not Codey.
 For an existing Node.js installation, standard npm installation also works:
 
 ```sh
-npm install --global --prefix "$HOME/.local" ./codey-0.1.1.tgz
+npm install --global --prefix "$HOME/.local" --umask=0077 ./codey-0.1.3.tgz
 "$HOME/.local/bin/codey" setup --check
 "$HOME/.local/bin/codey" setup
 ```
@@ -215,14 +215,14 @@ To validate a built artifact in a disposable npm prefix and HOME, without real
 credentials or model calls:
 
 ```sh
-CODEY_PACKAGE_TGZ="$PWD/artifacts/codey-npm-test/codey-0.1.1.tgz" \
+CODEY_PACKAGE_TGZ="$PWD/artifacts/codey-npm-test/codey-0.1.3.tgz" \
   node --test test/codey-package-shared-install.test.mjs test/codey-package-install.test.mjs
 ```
 
 The shared-install test also runs natively on Windows:
 
 ```powershell
-$env:CODEY_PACKAGE_TGZ = (Resolve-Path .\artifacts\codey-npm-test\codey-0.1.1.tgz).Path
+$env:CODEY_PACKAGE_TGZ = (Resolve-Path .\artifacts\codey-npm-test\codey-0.1.3.tgz).Path
 node --test test/codey-package-shared-install.test.mjs
 ```
 

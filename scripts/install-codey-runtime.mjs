@@ -218,16 +218,19 @@ export async function installRuntime(args) {
   }
   await chmod(prefix, 0o700);
   const env = { ...process.env, PATH: path.dirname(node) + path.delimiter + (process.env.PATH ?? "") };
-  const npmFlags = ["--omit=dev", "--no-audit", "--no-fund", "--strict-ssl=true", `--registry=${PUBLIC_REGISTRY}`];
+  const npmFlags = ["--omit=dev", "--no-audit", "--no-fund", "--umask=0077", "--strict-ssl=true", `--registry=${PUBLIC_REGISTRY}`];
+  const npmArgs = platform === "win32" ? [npm] : [
+    "--input-type=commonjs", "-e", "process.umask(0o077); require(process.argv[1]);", npm,
+  ];
   console.log(`Installing the shared Codey artifact through npm into ${prefix}`);
   // Call npm's JS entrypoint directly: npm.cmd is not spawnable without a shell.
-  await command(node, [npm, "install", "--global", "--prefix", prefix, "--ignore-scripts", ...npmFlags, file], env);
+  await command(node, [...npmArgs, "install", "--global", "--prefix", prefix, "--ignore-scripts", ...npmFlags, file], env);
   const app = npmPackageRoot(prefix);
   const pkg = JSON.parse(await readFile(path.join(app, "package.json"), "utf8"));
   if (pkg.name !== "codey" || pkg.bin?.codey !== "bin/codey.mjs") throw new Error("Not the shared Codey application.");
   const cli = path.join(app, "bin/codey.mjs");
   await command(node, [cli, "doctor", "--package-only", "--json"], env);
-  await command(node, [npm, "rebuild", "--prefix", app, ...npmFlags], env);
+  await command(node, [...npmArgs, "rebuild", "--prefix", app, ...npmFlags], env);
   await command(node, [cli, "doctor", "--json"], env);
   const bin = options.check ? null : await installLauncher(home, node, app);
   console.log(JSON.stringify({ ok: true, name: "codey", version: pkg.version, packageSha256: options.sha256,

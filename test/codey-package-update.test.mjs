@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { commandPlan } from "../packages/codey/lib/cli.mjs";
@@ -346,6 +346,8 @@ test("npm/native hooks receive a private HOME and no provider credentials or npm
 test("real npm staging and CLI update work in a disposable HOME without any model/native dependency", {
   timeout: 120000, skip: process.platform !== "linux",
 }, async t => {
+  const previousMask = process.umask(0o002);
+  t.after(() => process.umask(previousMask));
   const f = await updateFixture(t);
   const result = await runUpdate(f.old, [f.archive], {
     ...dependencies(f), stage: stagePackage, command: execute,
@@ -359,6 +361,9 @@ test("real npm staging and CLI update work in a disposable HOME without any mode
   const doctor = await readJson(path.join(result.job, "doctor.private.log"));
   assert.equal(doctor.fixture, true, "This test must not claim real native-module/model validation");
   assert.ok(await exists(path.join(result.job, "previous-codey/bin/codey.mjs")));
+  assert.equal((await stat(f.old)).mode & 0o022, 0, "The staged package must remain safe under a group-writable caller umask");
+  const unchanged = await runUpdate(f.old, [f.archive], dependencies(f));
+  assert.equal(unchanged.unchanged, true, "The new package must remain eligible for the next local update");
 });
 
 test("changed source archives fail before npm is started", async t => {

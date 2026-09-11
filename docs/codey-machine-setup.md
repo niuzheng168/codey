@@ -2,7 +2,7 @@
 
 ## Linux / Windows 共用的应用包
 
-`codey-0.1.1.tgz` 是两个系统共用的运行包，不再独立生成 Windows 应用发行物。
+`codey-0.1.3.tgz` 是两个系统共用的运行包，不再独立生成 Windows 应用发行物。
 构建器从同一源码与公共 npm 锁生成一次，打包前规范化文本换行；
 不把任一系统的 `node_modules` 或原生二进制装进应用包。原生依赖在目标机安装。
 包内 `runtimePlatforms` 同时列出 `linux-x64` 与 `windows-x64`。
@@ -51,9 +51,9 @@ bash install-codey-linux.sh
 私有 registry：
 
 ```bash
-bash scripts/linux/install-codey.sh --package ./codey-0.1.1.tgz
-bash scripts/linux/install-codey.sh --package https://packages.example/codey-0.1.1.tgz
-bash scripts/linux/install-codey.sh --package codey@0.1.1 --registry https://npm.example/
+bash scripts/linux/install-codey.sh --package ./codey-0.1.3.tgz
+bash scripts/linux/install-codey.sh --package https://packages.example/codey-0.1.3.tgz
+bash scripts/linux/install-codey.sh --package codey@0.1.3 --registry https://npm.example/
 ```
 
 上述 `scripts/linux/install-codey.sh` 是仓库内的源脚本。发布后的脚本名为
@@ -64,7 +64,7 @@ bash scripts/linux/install-codey.sh --package codey@0.1.1 --registry https://npm
 已有 Node.js 22.13+ 时也可以直接安装并部署：
 
 ```bash
-npm install --global --prefix "$HOME/.local" ./codey-0.1.1.tgz
+npm install --global --prefix "$HOME/.local" --umask=0077 ./codey-0.1.3.tgz
 "$HOME/.local/bin/codey" setup --check
 "$HOME/.local/bin/codey" setup
 ```
@@ -150,7 +150,7 @@ Skill 通过 `scripts/install-npm.sh --package assets/codey-*.tgz` 走相同的 
 
 ```bash
 npm run codey:build -- --output artifacts/codey-npm
-npm install --global ./artifacts/codey-npm/codey-0.1.1.tgz
+npm install --global --umask=0077 ./artifacts/codey-npm/codey-0.1.3.tgz
 codey --version
 codey start
 ```

@@ -32,6 +32,10 @@ test("the identical shared artifact installs, validates native modules and start
   const apiHome = path.join(home, "gateway-data");
   await mkdir(apiHome, { recursive: true });
   const windows = process.platform === "win32";
+  if (!windows) {
+    const previousMask = process.umask(0o002);
+    t.after(() => process.umask(previousMask));
+  }
   const env = {
     HOME: home, USERPROFILE: home, APPDATA: path.join(home, "AppData/Roaming"),
     LOCALAPPDATA: path.join(home, "AppData/Local"),
@@ -63,6 +67,11 @@ test("the identical shared artifact installs, validates native modules and start
   assert.deepEqual(info.runtimePlatforms, ["linux-x64", "windows-x64"]);
   assert.deepEqual(info.native, { sqlite: true, bcrypt: true, ripgrep: true, pty: true, codexSdk: true });
   assert.equal(info.lockSha256, createHash("sha256").update(await readFile(path.join(root, "npm-shrinkwrap.json"))).digest("hex"));
+  if (!windows) assert.equal((await stat(root)).mode & 0o022, 0, "The runtime must stay eligible for owner-only local updates");
+  const updateCheck = JSON.parse((await exec(process.execPath, [cli, "update", file, "--check", "--sha256", hash],
+    { env, timeout: 20000 })).stdout);
+  assert.equal(updateCheck.unchanged, true);
+  assert.equal(updateCheck.serviceChanges, false);
   assert.deepEqual((await readdir(path.dirname(root))).filter(name => !name.startsWith(".")), ["codey"]);
   await assert.rejects(stat(path.join(home, ".local/bin")), { code: "ENOENT" });
   await assert.rejects(stat(path.join(home, ".codex")), { code: "ENOENT" });
