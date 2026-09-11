@@ -149,6 +149,7 @@ test("foreground supervisor starts one binary twice and terminates its sibling o
     assert.equal(child.executable, process.execPath);
     assert.equal(child.args[0], path.join("/tmp/codey", "bin/codey.mjs"));
     assert.equal(child.options.shell, false);
+    assert.equal(child.options.windowsHide, true);
     assert.deepEqual(child.options.env, { HOME: "/tmp/test" });
   }
   f.children[0].emit("exit", 7);

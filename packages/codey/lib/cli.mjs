@@ -125,7 +125,7 @@ export async function supervise(commands, {
     for (const args of commands) {
       if (stopping) break;
       const child = spawnProcess(process.execPath, [path.join(root, "bin/codey.mjs"), ...args], {
-        cwd: root, env, stdio: "inherit", shell: false,
+        cwd: root, env, stdio: "inherit", shell: false, windowsHide: true,
       });
       children.add(child);
       exits.push(new Promise((resolve) => {

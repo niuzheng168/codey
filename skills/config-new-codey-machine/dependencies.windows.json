@@ -1,0 +1,28 @@
+{
+  "schema": 2,
+  "platform": "windows-x64",
+  "bunBuildTool": "1.4.0",
+  "node": {
+    "version": "24.20.0",
+    "url": "https://nodejs.org/dist/v24.20.0/node-v24.20.0-win-x64.zip",
+    "sha256": "6cac9ffbca8f6a47091e4b5c772e0606049c3871cb67d900c0cedde630e545ba"
+  },
+  "codex": {
+    "url": "https://chatgpt.com/codex/install.ps1",
+    "release": "latest"
+  },
+  "devTunnel": {
+    "url": "https://aka.ms/TunnelsCliDownload/win-x64",
+    "sha256": "78190ac81c664828858de2390fd9c15eeec0e4edfe4e7b0d6a323dc49df625db",
+    "provider": "github"
+  },
+  "npmPackage": {
+    "name": "codey",
+    "dependencies": "npm-shrinkwrap.json",
+    "buildLock": "packages/codey/package-lock.windows.json"
+  },
+  "updater": {
+    "supported": false,
+    "reason": "The signed node updater currently requires Linux and systemd."
+  }
+}

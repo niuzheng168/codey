@@ -106,7 +106,9 @@ test("missing baked setup can use an explicit public config; missing or changed 
   await assert.rejects(installedSetup(f.pkg, explicit), /locked Codey/);
 });
 
-test("setup passes temporary metadata and the exact npm root to Bash, then removes metadata", async t => {
+test("setup passes temporary metadata and the exact npm root to Bash, then removes metadata", {
+  skip: process.platform !== "linux",
+}, async t => {
   const f = await fixture(t);
   let captured;
   const previousExitCode = process.exitCode;
@@ -126,12 +128,22 @@ test("setup passes temporary metadata and the exact npm root to Bash, then remov
   assert.equal(process.exitCode, 0);
 });
 
-test("setup refuses an unmanaged prefix before launching the deployment script", async t => {
+test("setup refuses an unmanaged prefix before launching the deployment script", {
+  skip: process.platform !== "linux",
+}, async t => {
   const f = await fixture(t);
   await assert.rejects(runSetup(f.pkg, [], {
     home: f.directory,
     spawnProcess() { throw new Error("Must not reach deployment"); },
   }), /supported HOME npm prefix/);
+});
+
+test("unsupported platforms reject Linux setup before launching any process", {
+  skip: process.platform === "linux",
+}, async () => {
+  await assert.rejects(runSetup(root, ["--check"], {
+    spawnProcess() { assert.fail("Must not launch a deployment on this platform"); },
+  }), /Managed service setup supports Linux x64 only/);
 });
 
 test("the npm one-click installer supports a local tarball and HTTPS URL without deploying in check mode", {
