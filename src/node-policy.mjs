@@ -4,7 +4,7 @@ import { validateConfig } from "./config.mjs";
 import { SignedStore, requestError } from "./signed-store.mjs";
 import { workspaceNodeKey } from "./workspace-sso.mjs";
 import { machineServerName, MACHINE_ID } from "./machine-identity.mjs";
-import { machinePlatform } from "./machine-platforms.mjs";
+import { machinePlatform, machineRegistrationPlatform } from "./machine-platforms.mjs";
 import { machineTunnelKey, sealMachineTunnelToken, openMachineTunnelToken } from "./machine-tunnel.mjs";
 import { validateDevTunnelConnectToken } from "./devtunnel-transport.mjs";
 import {
@@ -262,7 +262,7 @@ export class NodePolicy {
   }
 
   async stageImportedMachine(principalId, machine, rawCredentials, connectToken, now = Date.now()) {
-    machinePlatform(machine.platform);
+    machineRegistrationPlatform(machine.platform);
     if (!MACHINE_ID.test(machine.id ?? "") || machine.networkMode !== "devtunnel") {
       throw requestError("客户端注册只接受私有 DevTunnel 节点");
     }

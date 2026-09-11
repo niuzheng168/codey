@@ -6,7 +6,7 @@ import { pipeline } from "node:stream/promises";
 import { machineIdentity, MACHINE_ID, preparedGateways } from "./machine-identity.mjs";
 import { verifyMachine } from "./machine-verification.mjs";
 import { requestError } from "./signed-store.mjs";
-import { MACHINE_PLATFORMS, machinePlatform } from "./machine-platforms.mjs";
+import { MACHINE_PLATFORMS, machinePlatform, machineRegistrationPlatform } from "./machine-platforms.mjs";
 import { MachineTunnelService } from "./machine-tunnel.mjs";
 import { machineRegistration } from "./machine-registration.mjs";
 import { verifyDevTunnelAccess } from "./devtunnel-transport.mjs";
@@ -168,6 +168,17 @@ export class MachineSetup {
     try { await this.refreshing; } finally { this.refreshing = null; }
   }
 
+  registrationAvailability(platformId) {
+    const definition = machineRegistrationPlatform(platformId);
+    if (!this.cloudCliGateway || !this.nodeDataGateway) {
+      return { enabled: false, reason: "运维尚未启用机器注册所需的 Workspace 和数据网关" };
+    }
+    if (definition.updater && !this.machineUpdates?.catalog?.configured) {
+      return { enabled: false, reason: "请先配置节点升级器签名公钥，确保新机器可持续更新" };
+    }
+    return { enabled: true };
+  }
+
   async download(req, res, requestedPlatform) {
     for await (const chunk of req) {
       if (chunk.length) throw requestError("下载配置包不接受 owner、节点 ID 或密钥参数");
@@ -195,8 +206,8 @@ export class MachineSetup {
   async activateRegistration(req, res) {
     const raw = await input(req);
     const platformId = raw?.package?.platform;
-    const definition = machinePlatform(platformId);
-    const available = await this.availability(platformId, req.codeyPrincipal.id);
+    const definition = machineRegistrationPlatform(platformId);
+    const available = this.registrationAvailability(platformId);
     if (!available.enabled) throw requestError(available.reason, 503);
     const registration = machineRegistration(raw, {
       portalOrigin: this.origin,
