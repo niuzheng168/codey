@@ -5,7 +5,7 @@ export const MACHINE_PLATFORMS = Object.freeze([
     id: "linux-x64", name: "Linux", entrypoint: "scripts/install.sh",
     nodeSuffix: "linux-x64.tar.xz", updater: true, implemented: true,
     tunnel: true, privateNetwork: true, dataRelay: false,
-    description: "Linux x64 · GitHub 私有 DevTunnel · 一键覆盖安装 · systemd 守护",
+    description: "Linux x64 · 直接 npm 安装 · codey setup · 私有 DevTunnel · systemd 守护",
     files: ["scripts/install.sh", "templates/a100-models.json"],
   }),
   Object.freeze({

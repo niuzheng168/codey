@@ -23,6 +23,52 @@ does not package another Codex binary. The locked SDK's JavaScript is inlined
 as an internal module, without its transitive native CLI dependency. Native
 dependencies such as SQLite and PTY are installed by npm for the target machine.
 
+## Linux managed installation without a ZIP
+
+Download the machine build's `codey-<version>.tgz` and `install-codey-linux.sh`
+from Portal into the same directory, then run:
+
+```sh
+bash install-codey-linux.sh
+```
+
+The launcher uses npm directly, prepares native dependencies in a **new** private
+prefix, validates the package/configuration, and invokes the installed
+`codey setup`. It also accepts `--package /path/to/codey.tgz` or an explicit
+HTTPS `.tgz` URL. A pinned `codey@VERSION` requires an explicit private
+`--registry`; the unrelated public npm package is rejected.
+Only the prerequisite Node distribution is extracted by the launcher, not Codey.
+
+For an existing Node.js installation, standard npm installation also works:
+
+```sh
+npm install --global --prefix "$HOME/.local" ./codey-0.1.0.tgz
+"$HOME/.local/bin/codey" setup --check
+"$HOME/.local/bin/codey" setup
+```
+
+Setup uses the existing package root and Node runtime. Both services share this
+root; it does not install another copy, move npm-managed files, or overwrite the
+target of npm's `codey` symlink. Use an OS-user-owned HOME prefix compatible with
+the updater, not `sudo npm install` into a system prefix.
+
+Setup creates a stable `$HOME/.local/bin/codey` launcher and persistently adds
+`$HOME/.local/bin` to PATH in `.profile`, `.bashrc`, and any existing
+`.bash_profile` / `.bash_login`. The PATH block preserves other shell settings,
+and repeated installation or shell loading does not duplicate entries.
+Open a new Bash terminal afterward, or run `export PATH="$HOME/.local/bin:$PATH"`
+in the current one; the installer cannot change its parent shell's environment.
+Installing the npm package alone or using `--check` does not edit shell profiles.
+
+`machine:build` embeds only public Portal configuration (origin and updater public
+key). A generic `codey:build` needs `codey setup --config FILE`; the file has the
+same public fields as `onboarding/setup.json`, without node identity or credentials.
+`codey setup --check` does not change services or contact models.
+The launcher's `--check` still installs npm dependencies, but does not deploy.
+Actual setup requires Python 3.12+, sudo and the owner's interactive provider login.
+It replaces service/model settings and stops old Codex processes, retaining auth
+and session files. Merely installing the npm package never invokes setup.
+
 ## Commands
 
 - `codey start`: run both services in the foreground; stop both on Ctrl+C or
@@ -31,11 +77,12 @@ dependencies such as SQLite and PTY are installed by npm for the target machine.
 - `codey gateway start --headless --host 127.0.0.1 --port 4141`: run just the gateway.
 - `codey auth …`, `codey mcp …`, `codey gateway debug --json`: gateway tools
   through the same executable.
+- `codey setup [--config FILE] [--check]`: configure an installed Linux node.
 
 Existing environment configuration, gateway data and Codex sessions remain in
-their original user data directories. The CLI does not install system services,
-rewrite credentials, or update either component on its own. Managed machine
-installation still uses the Codey onboarding installer.
+their original user data directories. Service startup commands do not install
+system services, rewrite credentials or update either component. Only the explicit
+`codey setup` command runs the managed onboarding installer.
 
 ## Gateway defaults
 

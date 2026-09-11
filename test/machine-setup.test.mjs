@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { gzipSync } from "node:zlib";
 import { AccountStore } from "../src/account-store.mjs";
 import { validateConfig } from "../src/config.mjs";
 import { NodePolicy } from "../src/node-policy.mjs";
@@ -44,11 +45,15 @@ async function temporary(t) {
 async function bundle(root, platform = "linux-x64") {
   assert.equal(platform, "linux-x64");
   await mkdir(root, { recursive: true });
+  const npmBytes = gzipSync("fixture npm application");
+  const installerBytes = Buffer.from("#!/usr/bin/env bash\n# fixture npm launcher\n");
+  const metadata = (file, body) => ({ file, size: body.length, sha256: createHash("sha256").update(body).digest("hex") });
   const entries = [
     ["SKILL.md", "---\nname: config-new-codey-machine\ndescription: fixture\n---\n"],
     ["dependencies.json", "{}\n"], ["agents/openai.yaml", "interface: {}\n"],
     ["scripts/install.sh", "#!/usr/bin/env bash\n"], ["templates/a100-models.json", '{"models":[]}\n'],
-    ["assets/codey-0.1.0.tgz", "codey"], ["assets/manifest.json", '{"schema":2,"name":"codey"}\n'],
+    ["scripts/install-npm.sh", installerBytes],
+    ["assets/codey-0.1.0.tgz", npmBytes], ["assets/manifest.json", '{"schema":2,"name":"codey"}\n'],
     ["assets/setup.json", '{"schema":1}\n'], ["assets/SHA256SUMS", "fixture\n"],
   ].map(([name, data]) => ({ name: `config-new-codey-machine/${name}`, data }));
   const stream = zipStream(entries);
@@ -60,7 +65,8 @@ async function bundle(root, platform = "linux-x64") {
     schema: 2, kind: "codey-machine-skill", platform, registrationSchema: 2,
     releaseId: `machine-${packageSha256.slice(0, 16)}`, installerReleaseId: "machine-" + "a".repeat(16),
     node: "24.20.0", cloudcli: { version: "test-cloudcli" }, copilotApi: { version: "test-copilot" },
-    runtimePackage: { name: "codey", file: "codey-0.1.0.tgz" }, codey: { version: "0.1.0" },
+    runtimePackage: { name: "codey", ...metadata("codey-0.1.0.tgz", npmBytes) }, codey: { version: "0.1.0" },
+    npmSetup: 1, installer: metadata("install-codey-linux.sh", installerBytes),
     bundledRuntimes: ["cloudcli", "copilot-api", "updater"],
     downloadedOfficialRuntimes: ["node", "codex", "devtunnel"],
     package: {
@@ -72,13 +78,15 @@ async function bundle(root, platform = "linux-x64") {
   const release = path.join(store, "releases", manifest.releaseId);
   await mkdir(release, { recursive: true });
   await writeFile(path.join(release, manifest.package.file), packageBytes);
+  await writeFile(path.join(release, manifest.runtimePackage.file), npmBytes);
+  await writeFile(path.join(release, manifest.installer.file), installerBytes);
   const raw = JSON.stringify(manifest);
   await writeFile(path.join(release, "manifest.json"), raw);
   await writeFile(path.join(store, "active.json"), JSON.stringify({
     schema: 1, releaseId: manifest.releaseId,
     manifestSha256: createHash("sha256").update(raw).digest("hex"),
   }));
-  return { ...manifest, packageBytes };
+  return { ...manifest, packageBytes, npmBytes, installerBytes };
 }
 
 function unzip(archive) {
@@ -281,6 +289,58 @@ test("complete Skill download is deterministic, owner-independent and contains n
   assert.equal(repeat.status, 200);
   assert.deepEqual(Buffer.from(await repeat.arrayBuffer()), bytes,
     "The package must be identical for another authenticated owner");
+});
+
+test("Linux downloads a standalone npm tarball and launcher with the existing authentication and CSRF boundaries", async t => {
+  const f = await fixture(t);
+  for (const [format, expected, contentType, filename] of [
+    ["npm", f.manifest.npmBytes, "application/gzip", "codey-0.1.0.tgz"],
+    ["installer", f.manifest.installerBytes, "text/x-shellscript; charset=utf-8", "install-codey-linux.sh"],
+  ]) {
+    const endpoint = `/api/settings/machines/${format}`;
+    for (const user of [f.cookie, f.admin]) {
+      const response = await f.request(endpoint, { method: "POST", user });
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("content-type"), contentType);
+      assert.equal(response.headers.get("content-disposition"), `attachment; filename="${filename}"`);
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), expected);
+    }
+    assert.equal((await f.request(endpoint, { method: "POST", user: "" })).status, 401);
+    assert.equal((await f.request(endpoint, { method: "POST", headers: { origin: "https://evil.example" } })).status, 403);
+    assert.equal((await f.request(endpoint, { method: "POST", value: { ownerId: "other" } })).status, 400);
+    assert.equal((await f.request(endpoint, { method: "GET" })).status, 405);
+  }
+  const availability = await f.machineSetup.availability("linux-x64", f.member.id);
+  assert.equal(availability.npmAvailable, true);
+  assert.equal(availability.npmFile, "codey-0.1.0.tgz");
+  assert.equal(availability.entrypoint, "codey setup");
+  assert.equal(availability.bytes, f.manifest.npmBytes.length);
+  assert.deepEqual(await f.policy.list(f.member.id), []);
+});
+
+test("direct npm downloads reject corrupt artifacts and old releases never fall back to a ZIP", async t => {
+  const f = await fixture(t);
+  const selected = await loadMachineBundle(f.bundleRoot);
+  const corrupt = Buffer.from(f.manifest.npmBytes);
+  corrupt[corrupt.length - 1] ^= 1;
+  await writeFile(selected.npmPackage.path, corrupt);
+  await assert.rejects(loadMachineBundle(f.bundleRoot), /checksum/);
+  assert.equal((await f.request("/api/settings/machines/npm", { method: "POST" })).status, 503);
+  await writeFile(selected.npmPackage.path, f.manifest.npmBytes);
+  const store = path.join(f.bundleRoot, "packages-v2");
+  const manifestFile = path.join(store, "releases", f.manifest.releaseId, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestFile, "utf8"));
+  delete manifest.npmSetup;
+  delete manifest.installer;
+  const raw = JSON.stringify(manifest);
+  await writeFile(manifestFile, raw);
+  await writeFile(path.join(store, "active.json"), JSON.stringify({
+    schema: 1, releaseId: manifest.releaseId, manifestSha256: createHash("sha256").update(raw).digest("hex"),
+  }));
+  assert.equal((await f.machineSetup.availability("linux-x64", f.member.id)).npmAvailable, false);
+  assert.equal((await f.request("/api/settings/machines/npm", { method: "POST" })).status, 503);
+  assert.equal((await f.request("/api/settings/machines/skill", { method: "POST" })).status, 200);
 });
 
 test("a previously distributed static release remains importable after the active bundle changes", async (t) => {

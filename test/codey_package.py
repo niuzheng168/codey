@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -30,6 +31,39 @@ publisher = load("codey_machine_publisher", "scripts/publish-machine-skill.py")
 def write_json(file, value):
     file.write_text(json.dumps(value, indent=2) + "\n")
 
+class MemoryStore:
+    def __init__(self, fail_on=None):
+        self.files, self.directories, self.writes = {}, set(), []
+        self.fail_on = fail_on
+
+    def ensure_root(self): pass
+    def list_root(self): return list(self.files)
+    def read(self, name, limit):
+        value = self.files.get(name)
+        if value is not None:
+            assert len(value) <= limit
+        return value
+    def mkdir(self, name, exclusive=False):
+        if exclusive and name in self.directories:
+            raise FileExistsError(name)
+        self.directories.add(name)
+    def write_bytes_new(self, name, data):
+        publisher.checked_name(name)
+        assert name not in self.files
+        self.files[name] = data
+        self.writes.append(name)
+    def write_file_new(self, name, file, size, digest):
+        if self.fail_on and name.endswith(self.fail_on):
+            raise OSError("fixture upload failed")
+        data = Path(file).read_bytes()
+        assert len(data) == size and hashlib.sha256(data).hexdigest() == digest
+        self.write_bytes_new(name, data)
+    def replace(self, source, destination):
+        self.files[destination] = self.files.pop(source)
+        self.writes.append(destination)
+    def unlink(self, name): self.files.pop(name, None)
+    def rmdir(self, name): self.directories.remove(name)
+
 
 @unittest.skipUnless(sys.platform == "linux", "Linux package builder")
 class CodeyPackageTests(unittest.TestCase):
@@ -53,17 +87,29 @@ class CodeyPackageTests(unittest.TestCase):
         for name in (
             "dist-server/server/index.js", "dist/index.html", "gateway/main.js", "pages/index.html",
             "lib/codex-sdk/index.js",
-            "updater/install.py", "updater/engine.py", "updater/updater.py",
+            "updater/install.py", "updater/engine.py", "updater/updater.py", "updater/probe.mjs",
+            "onboarding/scripts/install.sh", "onboarding/templates/a100-models.json",
         ):
             file = self.runtime / name
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_text("fixture only\n")
         self.cloud = {"version": "1.37.2", "commit": "c" * 40}
         self.copilot = {"version": "2.5.3", "commit": "d" * 40}
+        self.setup = {
+            "schema": 1, "portalOrigin": "https://codey.example.test", "platform": "linux-x64",
+            "network": {"mode": "devtunnel"}, "tunnelAuthProvider": "github",
+            "updater": {"protocol": 1, "releasePublicKey": subprocess.check_output([
+                str(self.node / "bin/node"), "-e",
+                "process.stdout.write(require('node:crypto').generateKeyPairSync('ed25519').publicKey.export({type:'spki',format:'pem'}))",
+            ], text=True)},
+        }
+        write_json(self.runtime / "onboarding/setup.json", self.setup)
         write_json(self.runtime / "codey-build.json", {
             "schema": 1, "name": "codey", "version": pkg["version"], "sourceCommit": "b" * 40,
             "cloudcli": self.cloud, "copilotApi": self.copilot,
             "lockSha256": package.metadata(self.runtime / "npm-shrinkwrap.json")["sha256"],
+            "workspaceEntrySha256": package.metadata(self.runtime / "dist-server/server/index.js")["sha256"],
+            "gatewayEntrySha256": package.metadata(self.runtime / "gateway/main.js")["sha256"],
         })
         self.artifact = package.pack_runtime(self.runtime, self.root, self.node, None)
         self.file = self.root / self.artifact["file"]
@@ -75,7 +121,7 @@ class CodeyPackageTests(unittest.TestCase):
             "codey": package.inspect_npm_package(self.file), "artifact": self.artifact,
         }
         bundle.assemble_bundle(self.root, built, "https://codey.example.test",
-                               "-----BEGIN PUBLIC KEY-----\nfixture\n-----END PUBLIC KEY-----\n")
+                               self.setup["updater"]["releasePublicKey"])
         return self.root / "config-new-codey-machine.zip"
 
     def rewritten(self, transform):
@@ -112,6 +158,8 @@ class CodeyPackageTests(unittest.TestCase):
         self.assertEqual([file.name for file in (prefix / "bin").iterdir()], ["codey"])
         output = subprocess.check_output([str(prefix / "bin/codey"), "--version"], text=True)
         self.assertEqual(output.strip(), "codey 0.1.0")
+        help_text = subprocess.check_output([str(prefix / "bin/codey"), "setup", "--help"], text=True)
+        self.assertIn("--check", help_text)
 
     def test_missing_modules_nested_app_packages_archives_and_traversal_are_rejected(self):
         for transform in (
@@ -144,6 +192,9 @@ class CodeyPackageTests(unittest.TestCase):
         self.assertEqual(outer["runtimePackage"]["name"], "codey")
         self.assertEqual(outer["runtimePackage"]["file"], self.artifact["file"])
         self.assertEqual(outer["codey"], package.inspect_npm_package(self.file))
+        self.assertEqual(outer["npmSetup"], 1)
+        self.assertEqual(outer["installer"]["file"], "install-codey-linux.sh")
+        self.assertIn(self.artifact["file"], (self.root / "install-codey-linux.sh").read_text())
         self.assertEqual(outer["releaseId"], "machine-" + package.metadata(file)["sha256"][:16])
         self.assertEqual(json.loads(raw), outer)
         with zipfile.ZipFile(file) as archive:
@@ -155,6 +206,52 @@ class CodeyPackageTests(unittest.TestCase):
             "--expected-current", "none",
         ], check=True, capture_output=True, text=True)
         self.assertEqual(json.loads(result.stdout)["azureRequests"], 0)
+
+    def test_complete_skill_can_run_its_documented_npm_entrypoint_without_other_downloads(self):
+        file = self.machine_bundle()
+        extracted = self.root / "extracted"
+        with zipfile.ZipFile(file) as archive:
+            archive.extractall(extracted)
+        skill = extracted / "config-new-codey-machine"
+        self.assertTrue((skill / "SKILL.md").is_file())
+        self.assertTrue((skill / "agents/openai.yaml").is_file())
+        self.assertIn("bash scripts/install-npm.sh --package assets/codey-*.tgz",
+                      (skill / "SKILL.md").read_text())
+        self.assertEqual(len(list((skill / "assets").glob("*.tgz"))), 1)
+        home = self.root / "skill-home"
+        home.mkdir()
+        prefix = home / ".local/share/codey-skill-check"
+        result = subprocess.run([
+            "bash", "-c",
+            'bash scripts/install-npm.sh --package assets/codey-*.tgz --node-dir "$1" --prefix "$2" --check',
+            "skill-check", str(self.node), str(prefix),
+        ], cwd=skill, env={
+            **os.environ, "HOME": str(home), "npm_config_offline": "true",
+            "npm_config_cache": str(home / ".npm"),
+        }, check=True, capture_output=True, text=True, timeout=60)
+        self.assertIn('"serviceChanges":false', result.stdout)
+        self.assertTrue((prefix / "lib/node_modules/codey/bin/codey.mjs").is_file())
+        self.assertFalse((home / ".config/codey-machine").exists())
+        self.assertFalse((home / ".codex").exists())
+
+    def test_publisher_uploads_direct_npm_and_installer_before_activating_and_never_partial_releases(self):
+        file = self.machine_bundle()
+        _, manifest, raw = publisher.inspect_package(file)
+        store = MemoryStore()
+        publisher.publish(store, file, manifest, raw, "none")
+        release = "releases/" + manifest["releaseId"] + "/"
+        self.assertEqual(store.files[release + self.artifact["file"]], self.file.read_bytes())
+        self.assertEqual(store.files[release + "install-codey-linux.sh"], (self.root / "install-codey-linux.sh").read_bytes())
+        self.assertLess(store.writes.index(release + self.artifact["file"]), store.writes.index("active.json"))
+        self.assertLess(store.writes.index(release + "install-codey-linux.sh"), store.writes.index("active.json"))
+        self.assertEqual(json.loads(store.files["active.json"])["releaseId"], manifest["releaseId"])
+        self.assertEqual(len([name for name in store.writes if name.startswith(".active-")]), 1)
+        self.assertNotIn("publish.lock", store.directories)
+        failed = MemoryStore(fail_on="install-codey-linux.sh")
+        with self.assertRaises(OSError):
+            publisher.publish(failed, file, manifest, raw, "none")
+        self.assertNotIn("active.json", failed.files)
+        self.assertNotIn("publish.lock", failed.directories)
 
     def test_publisher_rejects_extra_split_archives_or_payload_corruption(self):
         file = self.machine_bundle()

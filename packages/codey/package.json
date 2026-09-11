@@ -29,6 +29,7 @@
     "public/",
     "shared/",
     "updater/",
+    "onboarding/",
     "scripts/fix-node-pty.js",
     "scripts/verify-package.mjs",
     "codey-build.json",

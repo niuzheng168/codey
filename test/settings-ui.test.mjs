@@ -22,7 +22,8 @@ async function page({ role = "user", hash = "", nodes = [ownedNode], pending = [
   const windowListeners = new Map();
   const state = {
     user: { role }, nodes: structuredClone(nodes), pendingMachines: pending,
-    machineSetup: { enabled: true, bytes: 4194304, node: "24.20.0", cloudcli: "1.37.2", copilotApi: "2.5.1" },
+    machineSetup: { enabled: true, npmAvailable: true, npmFile: "codey-0.1.0.tgz",
+      bytes: 4194304, node: "24.20.0", cloudcli: "1.37.2", copilotApi: "2.5.1" },
   };
   const users = [{ id: "owner", username: "demo", role: "admin", enabled: true },
     { id: "member", username: "alice", role: "user", enabled: true }];
@@ -197,7 +198,8 @@ test("legacy pending identities are ignored because static Skill downloads do no
   assert.equal(p.get("pending-machines"), null);
   assert.equal(p.requests.some((request) => request.url.includes(machineId)), false);
   await p.get("open-add-node").click();
-  assert.match(p.get("add-node").textContent, /Linux 固定包不含 token.*并行分发/);
+  assert.match(p.get("add-node").textContent, /不含 token 或机器身份.*分发到多台机器/);
+  assert.match(p.get("add-node").textContent, /无需解压 ZIP/);
 });
 
 test("collapsed nodes preserve all editable fields, VNet address restrictions and text-only rendering", async () => {

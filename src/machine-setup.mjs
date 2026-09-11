@@ -40,6 +40,26 @@ export function machineReleaseId(manifest) {
   return `machine-${manifest.package.sha256.slice(0, 16)}`;
 }
 
+async function releasedFile(release, item, expectedName, magic, maximum) {
+  if (item?.file !== expectedName || !Number.isSafeInteger(item?.size) ||
+      item.size <= 0 || item.size > maximum || !/^[a-f0-9]{64}$/.test(item?.sha256 ?? "")) {
+    throw new Error("Invalid direct npm download metadata");
+  }
+  const file = path.join(release, expectedName);
+  const info = await lstat(file);
+  if (!info.isFile() || info.isSymbolicLink() || await realpath(file) !== file || info.size !== item.size) {
+    throw new Error("Unsafe or missing direct npm download");
+  }
+  const hash = createHash("sha256");
+  let prefix = Buffer.alloc(0);
+  for await (const bytes of createReadStream(file)) {
+    hash.update(bytes);
+    if (prefix.length < magic.length) prefix = Buffer.concat([prefix, bytes.subarray(0, magic.length - prefix.length)]);
+  }
+  if (!prefix.equals(magic) || hash.digest("hex") !== item.sha256) throw new Error("Direct npm download checksum mismatch");
+  return { ...item, path: file };
+}
+
 export async function loadMachineBundle(root, platformId = "linux-x64") {
   machinePlatform(platformId);
   root = path.join(await realpath(root), MACHINE_STORE);
@@ -92,7 +112,19 @@ export async function loadMachineBundle(root, platformId = "linux-x64") {
   } finally {
     await descriptor.close();
   }
-  return { manifest, package: { ...packageInfo, path: packageFile } };
+  let npmPackage;
+  let installer;
+  if (manifest.npmSetup !== undefined) {
+    if (manifest.npmSetup !== 1 || manifest.runtimePackage?.name !== "codey" ||
+        !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(manifest.codey?.version ?? "")) {
+      throw new Error("Invalid npm setup release");
+    }
+    npmPackage = await releasedFile(release, manifest.runtimePackage, `codey-${manifest.codey.version}.tgz`,
+      Buffer.from([0x1f, 0x8b]), 512 * 1024 * 1024);
+    installer = await releasedFile(release, manifest.installer, "install-codey-linux.sh",
+      Buffer.from("#!/usr/bin/env bash\n"), 1024 * 1024);
+  }
+  return { manifest, package: { ...packageInfo, path: packageFile }, npmPackage, installer };
 }
 
 export function machineNetworkConfig(raw) {
@@ -142,10 +174,12 @@ export class MachineSetup {
       return { ...identity, enabled: false, reason: "请先配置节点升级器签名公钥，确保新机器可持续更新" };
     }
     try {
-      const { manifest, package: packageInfo } = await this.selectedBundle(platformId);
+      const { manifest, package: packageInfo, npmPackage, installer } = await this.selectedBundle(platformId);
       return {
         ...identity, enabled: true, platform: manifest.platform, releaseId: manifest.releaseId,
-        bytes: packageInfo.size,
+        bytes: npmPackage?.size ?? packageInfo.size,
+        npmAvailable: Boolean(npmPackage && installer),
+        ...(npmPackage ? { npmFile: npmPackage.file, entrypoint: "codey setup" } : {}),
         node: manifest.node, cloudcli: manifest.cloudcli.version, copilotApi: manifest.copilotApi.version,
         ...(manifest.codey ? { codey: manifest.codey.version } : {}),
       };
@@ -168,7 +202,7 @@ export class MachineSetup {
     try { await this.refreshing; } finally { this.refreshing = null; }
   }
 
-  async download(req, res, requestedPlatform) {
+  async download(req, res, requestedPlatform, format = "skill") {
     for await (const chunk of req) {
       if (chunk.length) throw requestError("下载配置包不接受 owner、节点 ID 或密钥参数");
     }
@@ -176,20 +210,24 @@ export class MachineSetup {
     machinePlatform(platformId);
     const available = await this.availability(platformId, req.codeyPrincipal.id);
     if (!available.enabled) throw requestError(available.reason, 503);
-    const { package: packageInfo } = await this.selectedBundle(platformId);
+    const selected = await this.selectedBundle(platformId);
+    const packageInfo = format === "npm" ? selected.npmPackage : format === "installer" ? selected.installer : selected.package;
+    if (!packageInfo) throw requestError("尚未发布支持直接 npm 安装的 Codey 包和 Linux 一键脚本，请先更新机器发行版", 503);
+    const contentType = format === "npm" ? "application/gzip"
+      : format === "installer" ? "text/x-shellscript; charset=utf-8" : "application/zip";
     res.writeHead(200, {
-      "content-type": "application/zip", "content-length": packageInfo.size,
-      "content-disposition": `attachment; filename="${MACHINE_SKILL}.zip"`,
+      "content-type": contentType, "content-length": packageInfo.size,
+      "content-disposition": `attachment; filename="${packageInfo.file}"`,
       "cache-control": "private, no-store", vary: "Cookie", "x-content-type-options": "nosniff",
       "referrer-policy": "no-referrer",
     });
     await pipeline(createReadStream(packageInfo.path), res);
   }
 
-  async limitedDownload(req, res, requestedPlatform) {
+  async limitedDownload(req, res, requestedPlatform, format = "skill") {
     if (this.downloading >= 4) throw requestError("配置包下载繁忙，请稍后重试", 429);
     this.downloading++;
-    try { await this.download(req, res, requestedPlatform); } finally { this.downloading--; }
+    try { await this.download(req, res, requestedPlatform, format); } finally { this.downloading--; }
   }
 
   async activateRegistration(req, res) {
@@ -256,14 +294,14 @@ export class MachineSetup {
     if (!pathname.startsWith("/api/settings/machines")) return false;
     try {
       if (!req.codeyPrincipal) throw requestError("需要登录", 401);
-      if (pathname === "/api/settings/machines/skill") {
+      if (["/api/settings/machines/skill", "/api/settings/machines/npm", "/api/settings/machines/installer"].includes(pathname)) {
         if (req.method !== "POST") throw requestError("Method not allowed", 405);
         if ([...url.searchParams.keys()].some((key) => key !== "platform") || url.searchParams.getAll("platform").length > 1) {
           throw requestError("只接受一个目标平台参数");
         }
         const platform = url.searchParams.get("platform") ?? undefined;
         machinePlatform(platform);
-        await this.limitedDownload(req, res, platform);
+        await this.limitedDownload(req, res, platform, pathname.split("/").at(-1));
         return true;
       }
       if (pathname === "/api/settings/machines/activate") {

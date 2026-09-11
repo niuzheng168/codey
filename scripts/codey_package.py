@@ -218,7 +218,7 @@ def pack_runtime(runtime, output, node, env):
     return metadata(package)
 
 
-def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work=False):
+def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work=False, setup_config=None):
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise RuntimeError("Build and validate Codey on Linux x86_64")
     output = Path(output).resolve()
@@ -254,6 +254,11 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     copy_required(ROOT / "node-updater", runtime / "updater", [
         "install.py", "updater.py", "engine.py", "probe.mjs", "UPGRADE.md",
     ])
+    copy_required(ROOT / "skills/config-new-codey-machine", runtime / "onboarding", [
+        "scripts/install.sh", "templates/a100-models.json", "dependencies.json",
+    ])
+    if setup_config is not None:
+        (runtime / "onboarding/setup.json").write_text(json.dumps(setup_config, indent=2) + "\n")
     shutil.copy2(cloud / "LICENSE", runtime / "LICENSE")
     (runtime / "licenses").mkdir()
     shutil.copy2(cloud / "LICENSE", runtime / "licenses/cloudcli-LICENSE")
@@ -264,7 +269,7 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     source_commit = run(["git", "-C", ROOT, "rev-parse", "HEAD"], capture=True).stdout.strip()
     source_dirty = bool(run([
         "git", "-C", ROOT, "status", "--porcelain", "--",
-        "packages/codey", "scripts/codey_package.py", "node-updater",
+        "packages/codey", "scripts/codey_package.py", "node-updater", "skills/config-new-codey-machine",
     ], capture=True).stdout.strip())
     provenance = {
         "schema": 1, "name": "codey", "version": package["version"], "sourceCommit": source_commit,
@@ -279,8 +284,14 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     home = work / "smoke-home"
     home.mkdir()
     smoke_env = {**env, "HOME": str(home), "COPILOT_API_HOME": str(home / "copilot-api")}
-    for args in (["--version"], ["--help"], ["gateway", "--help"], ["workspace", "--help"]):
+    for args in (["--version"], ["--help"], ["gateway", "--help"], ["workspace", "--help"], ["setup", "--help"]):
         run([node / "bin/node", runtime / "bin/codey.mjs", *args], cwd=runtime, env=smoke_env)
+    if setup_config is not None:
+        # A build tree is deliberately not an installed HOME prefix. Validate
+        # embedded configuration here; the real npm-install test checks the CLI.
+        run([node / "bin/node", "--input-type=module", "-e",
+             "import {installedSetup} from './lib/setup.mjs'; await installedSetup(process.cwd());"],
+            cwd=runtime, env=smoke_env)
     run([node / "bin/node", runtime / "bin/codey.mjs", "gateway", "debug", "--json"],
         cwd=runtime, env=smoke_env)
     gateway_defaults = json.loads((home / "copilot-api/config.json").read_text())

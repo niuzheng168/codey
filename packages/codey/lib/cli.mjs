@@ -13,6 +13,7 @@ Usage:
   codey gateway [start|auth|debug|mcp] [arguments...]
   codey auth [arguments...]
   codey mcp [arguments...]
+  codey setup [--config FILE] [--check]
   codey --version
 
 start runs both services in the foreground; Ctrl+C stops both.
@@ -62,6 +63,7 @@ export function commandPlan(args, env = process.env) {
     return { kind: "version" };
   }
   if (["auth", "mcp"].includes(command)) return { kind: "gateway", args: [command, ...rest] };
+  if (command === "setup") return { kind: "setup", args: rest };
   if (command === "gateway") return {
     kind: "gateway",
     args: rest.length ? rest : ["start", "--headless", "--host", "127.0.0.1", "--port", "4141"],
@@ -163,6 +165,11 @@ export async function runCli(args = process.argv.slice(2)) {
   }
   if (plan.kind === "start") {
     process.exitCode = await supervise(plan.commands);
+    return;
+  }
+  if (plan.kind === "setup") {
+    const { runSetup } = await import("./setup.mjs");
+    await runSetup(ROOT, plan.args);
     return;
   }
   const entry = path.join(ROOT, plan.kind === "gateway" ? "gateway/main.js" : "dist-server/server/index.js");

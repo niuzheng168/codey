@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Build a one-click Skill containing exactly one installable Codey npm package."""
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import shutil
+import shlex
 import urllib.parse
 import zipfile
 
@@ -24,8 +24,7 @@ def assemble_bundle(output, built, portal_origin, public_key):
         "artifacts": artifacts, "bundledRuntimes": ["cloudcli", "copilot-api", "updater"],
         "downloadedOfficialRuntimes": ["node", "codex", "devtunnel"],
     }
-    identity = "\n".join([manifest["node"], artifacts[0]["sha256"]])
-    manifest["releaseId"] = "machine-" + hashlib.sha256(identity.encode()).hexdigest()[:16]
+    manifest["releaseId"] = "machine-" + built["codey"]["entrySha256"][:16]
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     package_root = work / "package" / "config-new-codey-machine"
     for relative in [
@@ -36,6 +35,13 @@ def assemble_bundle(output, built, portal_origin, public_key):
         target = package_root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_file, target)
+    installer = (ROOT / "scripts/linux/install-codey.sh").read_text()
+    if installer.count('DEFAULT_PACKAGE_FILE=""') != 1:
+        raise RuntimeError("Invalid npm installer template")
+    installer = installer.replace('DEFAULT_PACKAGE_FILE=""',
+                                  "DEFAULT_PACKAGE_FILE=" + shlex.quote(artifacts[0]["file"]))
+    (output / "install-codey-linux.sh").write_text(installer)
+    (package_root / "scripts/install-npm.sh").write_text(installer)
     assets = package_root / "assets"
     assets.mkdir()
     for item in artifacts:
@@ -61,13 +67,14 @@ def assemble_bundle(output, built, portal_origin, public_key):
             info = zipfile.ZipInfo(file.relative_to(package_root.parent).as_posix())
             info.date_time = (1980, 1, 1, 0, 0, 0)
             info.compress_type = zipfile.ZIP_STORED
-            info.external_attr = ((0o100700 if file.name == "install.sh" else 0o100600) << 16)
+            info.external_attr = ((0o100700 if file.name.endswith(".sh") else 0o100600) << 16)
             archive.writestr(info, file.read_bytes())
     package_metadata = metadata(package_file)
     shutil.rmtree(work)
     return {
         "ok": True, "releaseId": manifest["releaseId"], "artifacts": artifacts,
-        "package": package_metadata,
+        "package": package_metadata, "npmPackage": artifacts[0],
+        "installer": metadata(output / "install-codey-linux.sh"),
     }
 
 
@@ -79,7 +86,13 @@ def build(args):
     public_key = Path(args.updater_public_key_file).read_text()
     if not public_key.startswith("-----BEGIN PUBLIC KEY-----\n") or len(public_key) > 8192:
         raise RuntimeError("Invalid updater public key")
-    built = build_package(args.output, allow_reviewed_diff=args.allow_reviewed_diff)
+    setup = {
+        "schema": 1, "portalOrigin": args.portal_origin, "platform": "linux-x64",
+        "network": {"mode": "devtunnel"}, "tunnelAuthProvider": "github",
+        "updater": {"protocol": 1, "releasePublicKey": public_key},
+    }
+    built = build_package(args.output, allow_reviewed_diff=args.allow_reviewed_diff,
+                          node_dir=args.node_dir, keep_work=args.keep_work, setup_config=setup)
     return assemble_bundle(args.output, built, args.portal_origin, public_key)
 
 
@@ -90,4 +103,6 @@ if __name__ == "__main__":
     parser.add_argument("--portal-origin", required=True)
     parser.add_argument("--updater-public-key-file", required=True)
     parser.add_argument("--allow-reviewed-diff", action="store_true")
+    parser.add_argument("--node-dir", help="Use an existing Node distribution for the build")
+    parser.add_argument("--keep-work", action="store_true")
     print(json.dumps(build(parser.parse_args()), indent=2))

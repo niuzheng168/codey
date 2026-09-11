@@ -11,8 +11,10 @@ import re
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import uuid
 import zipfile
+from urllib.parse import urlsplit
 from codey_package import inspect_npm_package
 
 MARKER = b'{"schema":1,"kind":"codey-machine-skill-store"}\n'
@@ -72,7 +74,7 @@ def inspect_package(file):
         root = "config-new-codey-machine/"
         base = {
             root + "SKILL.md", root + "dependencies.json", root + "agents/openai.yaml",
-            root + "scripts/install.sh", root + "templates/a100-models.json",
+            root + "scripts/install.sh", root + "scripts/install-npm.sh", root + "templates/a100-models.json",
             root + "assets/manifest.json",
             root + "assets/setup.json", root + "assets/SHA256SUMS",
         }
@@ -84,6 +86,19 @@ def inspect_package(file):
             raise PublishError("OVERSIZED_PACKAGE_METADATA")
         manifest = json.loads(manifest_raw)
         setup = json.loads(setup_raw)
+        public_fields = {"schema", "portalOrigin", "platform", "network", "tunnelAuthProvider", "updater", "releaseId"}
+        if not isinstance(setup, dict) or set(setup) != public_fields:
+            raise PublishError("SETUP_MUST_CONTAIN_PUBLIC_METADATA_ONLY")
+        origin = urlsplit(setup.get("portalOrigin", ""))
+        updater = setup.get("updater")
+        if (origin.scheme != "https" or not origin.hostname or origin.username or origin.password
+                or origin.path or origin.query or origin.fragment
+                or not isinstance(updater, dict) or set(updater) != {"protocol", "releasePublicKey"}
+                or updater.get("protocol") != 1
+                or not isinstance(updater.get("releasePublicKey"), str)
+                or not updater["releasePublicKey"].startswith("-----BEGIN PUBLIC KEY-----\n")
+                or "PRIVATE KEY" in updater["releasePublicKey"] or len(updater["releasePublicKey"]) > 8192):
+            raise PublishError("INVALID_PUBLIC_SETUP_METADATA")
         if (manifest.get("schema") != 2 or manifest.get("name") != "codey"
                 or manifest.get("platform") != "linux-x64"
                 or manifest.get("dependencyMode") != "npm-codey-package"
@@ -117,6 +132,21 @@ def inspect_package(file):
                 raise PublishError("INVALID_CODEY_NPM_PACKAGE") from error
             if npm_info != manifest["codey"]:
                 raise PublishError("CODEY_NPM_METADATA_MISMATCH")
+            with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as npm:
+                try:
+                    bundled_setup = json.load(npm.extractfile("package/onboarding/setup.json"))
+                    for required in ["package/lib/setup.mjs", "package/onboarding/scripts/install.sh",
+                                     "package/onboarding/templates/a100-models.json"]:
+                        if not npm.getmember(required).isfile():
+                            raise KeyError(required)
+                except (KeyError, TypeError, ValueError, AttributeError) as error:
+                    raise PublishError("MISSING_NPM_SETUP") from error
+            if (bundled_setup != {key: value for key, value in setup.items() if key != "releaseId"}
+                    or manifest["releaseId"] != "machine-" + npm_info["entrySha256"][:16]):
+                raise PublishError("NPM_SETUP_METADATA_MISMATCH")
+        installer = archive.read(root + "scripts/install-npm.sh")
+        if not installer.startswith(b"#!/usr/bin/env bash\n") or len(installer) > 1024 * 1024:
+            raise PublishError("INVALID_NPM_INSTALLER")
         checksums = archive.read(root + "assets/SHA256SUMS").decode("ascii").splitlines()
         expected_sums = {}
         for line in checksums:
@@ -142,6 +172,9 @@ def inspect_package(file):
         "cloudcli": manifest["cloudcli"],
         "copilotApi": manifest["copilotApi"],
         "runtimePackage": {"name": "codey", **expected[filename]},
+        "npmSetup": 1,
+        "installer": {"file": "install-codey-linux.sh", "size": len(installer),
+                      "sha256": hashlib.sha256(installer).hexdigest()},
         "codey": manifest["codey"],
         "bundledRuntimes": ["cloudcli", "copilot-api", "updater"],
         "downloadedOfficialRuntimes": ["node", "codex", "devtunnel"],
@@ -310,6 +343,20 @@ def publish(store, package_file, manifest, manifest_raw, expected_current):
             release_root + "/" + PACKAGE_NAME,
             package_file, package["size"], package["sha256"],
         )
+        if manifest.get("npmSetup") == 1:
+            # Publish the real npm tarball and the small launcher independently of
+            # the legacy Skill ZIP. Never activate a partially uploaded release.
+            with zipfile.ZipFile(package_file) as archive, tempfile.TemporaryDirectory(prefix="codey-publish-") as extraction_dir:
+                for item, member in [
+                    (manifest["runtimePackage"], "assets/" + manifest["runtimePackage"]["file"]),
+                    (manifest["installer"], "scripts/install-npm.sh"),
+                ]:
+                    body = archive.read("config-new-codey-machine/" + member)
+                    if len(body) != item["size"] or hashlib.sha256(body).hexdigest() != item["sha256"]:
+                        raise PublishError("PACKAGE_ARTIFACT_MISMATCH")
+                    extracted = Path(extraction_dir) / item["file"]
+                    extracted.write_bytes(body)
+                    store.write_file_new(release_root + "/" + item["file"], extracted, item["size"], item["sha256"])
         manifest_name = release_root + "/manifest.json"
         existing = store.read(manifest_name, 16384)
         if existing is None:

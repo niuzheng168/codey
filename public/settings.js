@@ -16,6 +16,7 @@ const machineSkillFilenames = Object.freeze({
   "macos-x64": "config-new-codey-machine-macos-x64.zip",
 });
 let machineSkillDownloading = false;
+let machineNpmFilename = null;
 let settingsReady = false;
 let activePanel = "nodes";
 let activeAdminPanel = "admin-nodes-panel";
@@ -298,7 +299,11 @@ async function load() {
   const macSetup = setup?.platforms?.find((item) => item.platform === "macos-arm64");
   const intelSetup = setup?.platforms?.find((item) => item.platform === "macos-x64");
   machineSkillButtons.clear();
-  machineSkillButtons.set(document.querySelector("#download-machine-skill"), Boolean(linuxSetup?.enabled));
+  machineNpmFilename = /^codey-\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?\.tgz$/.test(linuxSetup?.npmFile ?? "")
+    ? linuxSetup.npmFile : null;
+  const linuxNpmAvailable = Boolean(linuxSetup?.enabled && linuxSetup.npmAvailable && machineNpmFilename);
+  machineSkillButtons.set(document.querySelector("#download-machine-skill"), linuxNpmAvailable);
+  machineSkillButtons.set(document.querySelector("#download-machine-npm-installer"), linuxNpmAvailable);
   machineSkillButtons.set(document.querySelector("#download-machine-windows-skill"), Boolean(windowsSetup?.enabled));
   machineSkillButtons.set(document.querySelector("#download-machine-macos-skill"), Boolean(macSetup?.enabled));
   machineSkillButtons.set(document.querySelector("#download-machine-macos-intel-skill"), Boolean(intelSetup?.enabled));
@@ -317,6 +322,9 @@ async function load() {
         Math.ceil(entry.bytes / 1024 / 1024)} MB · Node ${entry.node} · ${runtime}`
       : entry?.reason || `${label} 完整机器配置包尚未发布；不会使用其他平台的包代替。`;
   }
+  if (linuxSetup?.enabled && !linuxNpmAvailable) {
+    document.querySelector("#machine-package-status").textContent = "尚未发布支持 codey setup 的直接 npm 安装包；不会退回 ZIP 解压流程。";
+  }
   updateMachineSkillButtons();
   adminTab.hidden = result.user.role !== "admin";
   if (adminTab.hidden && activePanel === "admin-section") activatePanel("nodes", true);
@@ -333,13 +341,15 @@ async function downloadMachineSkill(event) {
   const form = event.currentTarget;
   machineSkillDownloading = true;
   updateMachineSkillButtons();
-  machineDownloadNotice("正在下载可复用 Skill 包。包内不含 token，可分发到多台同平台机器。");
+  const kind = form.dataset.machineKind || "skill";
+  const contentType = kind === "npm" ? "application/gzip" : kind === "installer" ? "text/x-shellscript" : "application/zip";
+  machineDownloadNotice("正在下载。文件不含节点凭据，可分发到多台同平台机器。");
   try {
     // Native POST navigation under no-referrer can have an opaque Origin.
     // Keep strict server-side CSRF checks and limit this request to our origin.
     const response = await fetch(form.action, {
       method: "POST", mode: "same-origin", credentials: "same-origin", cache: "no-store",
-      redirect: "error", referrerPolicy: "same-origin", headers: { accept: "application/zip" },
+      redirect: "error", referrerPolicy: "same-origin", headers: { accept: contentType },
     });
     if (response.status === 401) {
       window.location.replace("/portal-auth/login");
@@ -350,12 +360,13 @@ async function downloadMachineSkill(event) {
       throw new Error(result?.error || `HTTP ${response.status}`);
     }
     const selectedPlatform = form.dataset.machinePlatform || "linux-x64";
-    const filename = machineSkillFilenames[selectedPlatform];
+    const filename = kind === "npm" ? machineNpmFilename : kind === "installer"
+      ? "install-codey-linux.sh" : machineSkillFilenames[selectedPlatform];
     const responseFilename = response.headers.get("content-disposition")
       ?.match(/^attachment;\s*filename="([^"]+)"$/i)?.[1];
-    if (response.headers.get("content-type")?.split(";")[0].trim() !== "application/zip" || !filename ||
+    if (response.headers.get("content-type")?.split(";")[0].trim() !== contentType || !filename ||
         !responseFilename) {
-      throw new Error("服务器未返回有效的 ZIP 配置包，请刷新页面后重试");
+      throw new Error("服务器未返回所选格式的安装文件，请刷新页面后重试");
     }
     if (responseFilename !== filename) {
       throw new Error("服务器返回的配置包平台或文件名与所选系统不一致");
@@ -377,7 +388,9 @@ async function downloadMachineSkill(event) {
       // Give the browser time to consume the Blob before releasing its memory.
       window.setTimeout(() => URL.revokeObjectURL(url), 60000);
     }
-    machineDownloadNotice(`已准备好 ${filename}。包内不含 token，可复用并分发到多台同平台机器。`);
+    machineDownloadNotice(kind === "skill"
+      ? `已准备好 ${filename}。包内不含 token，可复用并分发到多台同平台机器。`
+      : `已准备好 ${filename}。将 npm 包和脚本放在同一目录，运行 bash install-codey-linux.sh，无需解压。`);
   } catch (error) {
     machineDownloadNotice(`下载失败：${error.message}。请重试。`, true);
   } finally {
@@ -387,6 +400,7 @@ async function downloadMachineSkill(event) {
 }
 
 document.querySelector("#machine-skill-form").addEventListener("submit", downloadMachineSkill);
+document.querySelector("#machine-npm-installer-form").addEventListener("submit", downloadMachineSkill);
 document.querySelector("#machine-windows-skill-form").addEventListener("submit", downloadMachineSkill);
 document.querySelector("#machine-macos-skill-form").addEventListener("submit", downloadMachineSkill);
 document.querySelector("#machine-macos-intel-skill-form").addEventListener("submit", downloadMachineSkill);

@@ -55,6 +55,49 @@ write_unit() {
   cat >"$SYSTEMD_DIR/$name"
   chmod 600 "$SYSTEMD_DIR/$name"
 }
+configure_codey_path() {
+  local home="$1" bin="$1/.local/bin" profile
+  local profiles=("$home/.profile" "$home/.bashrc")
+  # Existing Bash login profiles take precedence over .profile. Do not create
+  # a new one, which would prevent the user's .profile from being loaded.
+  for profile in "$home/.bash_profile" "$home/.bash_login"; do
+    [[ ! -f "$profile" ]] || profiles+=("$profile")
+  done
+  for profile in "${profiles[@]}"; do
+    touch "$profile"
+    # Append once, preserving the user's settings and dotfile symlinks.
+    if ! grep -Fqx '# >>> Codey PATH >>>' "$profile"; then
+      cat >>"$profile" <<'EOF'
+
+# >>> Codey PATH >>>
+case ":${PATH:-}:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) PATH="$HOME/.local/bin${PATH:+:$PATH}" ;;
+esac
+export PATH
+# <<< Codey PATH <<<
+EOF
+    fi
+  done
+  case ":${PATH:-}:" in
+    *":$bin:"*) ;;
+    *) PATH="$bin${PATH:+:$PATH}" ;;
+  esac
+  export PATH
+}
+write_codey_cli() {
+  local destination="$1/.local/bin/codey" shim
+  shim="$(mktemp "$1/.local/bin/.codey-XXXXXX")"
+  cat >"$shim" <<EOF
+#!/bin/sh
+exec "$2" "$3/bin/codey.mjs" "\$@"
+EOF
+  chmod 700 "$shim"
+  # npm may already own this path as a symlink. Replace the link atomically,
+  # never redirect shell text through it into the installed JavaScript entry.
+  mv -f "$shim" "$destination"
+  configure_codey_path "$1"
+}
 
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] ||
   die "This package supports Linux x86_64 only."
@@ -65,7 +108,8 @@ need sudo
 sudo -n true || die "Administrator access is required. Run sudo -v, then rerun this script."
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-ASSETS="$ROOT/assets"
+INSTALLED_PACKAGE="${CODEY_INSTALLED_PACKAGE:-}"
+ASSETS="${CODEY_SETUP_ASSETS:-$ROOT/assets}"
 MODELS_SOURCE="$ROOT/templates/a100-models.json"
 [[ -f "$ASSETS/manifest.json" && -f "$ASSETS/setup.json" && -f "$ASSETS/SHA256SUMS" ]] ||
   die "Package metadata is incomplete."
@@ -89,6 +133,12 @@ chmod 700 "$TOOLS" "$RUNTIME_ROOT" "$CONFIG_ROOT" "$COPILOT_HOME" \
 # Runtime prerequisites are downloaded from their official publishers and are
 # deliberately not carried in this package.
 NODE_VERSION="24.20.0"
+if [[ -n "$INSTALLED_PACKAGE" ]]; then
+  [[ -n "${CODEY_SETUP_NODE:-}" && -x "$CODEY_SETUP_NODE" ]] || die "Use codey setup for npm-installed packages."
+  NODE="$CODEY_SETUP_NODE"
+  NODE_DIR="$(dirname "$(dirname "$NODE")")"
+  NODE_VERSION="$("$NODE" -p 'process.versions.node')"
+else
 NODE_SHA256="2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2"
 NODE_ARCHIVE="node-v${NODE_VERSION}-linux-x64.tar.xz"
 NODE_URL="https://nodejs.org/dist/v${NODE_VERSION}/${NODE_ARCHIVE}"
@@ -109,8 +159,9 @@ if [[ ! -x "$NODE_DIR/bin/node" ]]; then
 fi
 NODE="$NODE_DIR/bin/node"
 "$NODE" --version | grep -qx "v$NODE_VERSION" || die "Official Node installation failed."
+fi
 
-readarray -t PACKAGE < <("$NODE" - "$ASSETS/manifest.json" "$ASSETS/setup.json" "$NODE_VERSION" <<'NODE'
+readarray -t PACKAGE < <("$NODE" - "$ASSETS/manifest.json" "$ASSETS/setup.json" "$NODE_VERSION" "$INSTALLED_PACKAGE" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -118,25 +169,29 @@ const setup = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
 const artifact = manifest.artifacts?.[0];
 const assets = path.dirname(process.argv[2]);
 const sums = fs.readFileSync(path.join(assets, "SHA256SUMS"), "utf8").trim().split("\n");
+const installed = Boolean(process.argv[5]);
+const validRuntime = installed
+  ? manifest.dependencyMode === "npm-installed" && Array.isArray(manifest.artifacts) && manifest.artifacts.length === 0
+  : manifest.dependencyMode === "npm-codey-package" &&
+    Array.isArray(manifest.artifacts) && manifest.artifacts.length === 1 &&
+    artifact?.file === `codey-${manifest.codey?.version}.tgz` &&
+    /^[a-f0-9]{64}$/.test(artifact.sha256 ?? "") &&
+    Number.isSafeInteger(artifact.size) && artifact.size > 0 &&
+    fs.statSync(path.join(assets, artifact.file)).size === artifact.size &&
+    sums.includes(`${artifact.sha256}  ${artifact.file}`);
 if (manifest.schema !== 2 || manifest.name !== "codey" || setup.schema !== 1 ||
     manifest.platform !== "linux-x64" || setup.platform !== "linux-x64" ||
     manifest.node !== process.argv[4] ||
     !/^machine-[a-f0-9]{16}$/.test(manifest.releaseId ?? "") ||
     manifest.releaseId !== setup.releaseId ||
-    manifest.dependencyMode !== "npm-codey-package" ||
-    !Array.isArray(manifest.artifacts) || manifest.artifacts.length !== 1 ||
+    !validRuntime ||
     !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(manifest.codey?.version ?? "") ||
-    artifact?.file !== `codey-${manifest.codey.version}.tgz` ||
-    !/^[a-f0-9]{64}$/.test(artifact.sha256 ?? "") ||
-    !Number.isSafeInteger(artifact.size) || artifact.size <= 0 ||
-    fs.statSync(path.join(assets, artifact.file)).size !== artifact.size ||
-    !sums.includes(`${artifact.sha256}  ${artifact.file}`) ||
     JSON.stringify(manifest.bundledRuntimes) !== JSON.stringify(["cloudcli", "copilot-api", "updater"])) process.exit(2);
 const origin = new URL(setup.portalOrigin);
 if (origin.protocol !== "https:" || origin.origin !== setup.portalOrigin) process.exit(2);
 console.log(manifest.releaseId);
 console.log(setup.portalOrigin);
-console.log(artifact.file);
+console.log(artifact?.file ?? "installed");
 NODE
 )
 [[ "${#PACKAGE[@]}" -eq 3 ]] || die "Invalid package metadata."
@@ -147,6 +202,12 @@ RELEASE="$RUNTIME_ROOT/releases/$RELEASE_ID"
 STAGE="$RUNTIME_ROOT/releases/.${RELEASE_ID}.stage"
 STAGE_PACKAGE="$STAGE/lib/node_modules/codey"
 RELEASE_PACKAGE="$RELEASE/lib/node_modules/codey"
+if [[ -n "$INSTALLED_PACKAGE" ]]; then
+  STAGE_PACKAGE="$INSTALLED_PACKAGE"
+  RELEASE_PACKAGE="$INSTALLED_PACKAGE"
+  RELEASE="$CONFIG_ROOT/npm-releases/$RELEASE_ID"
+  mkdir -p "$RELEASE"
+fi
 
 IDENTITY="$STATE_ROOT/identity.json"
 if [[ ! -f "$IDENTITY" ]]; then
@@ -183,13 +244,14 @@ SSO_KEY="${ID[4]}"
 TUNNEL_KEY="${ID[5]}"
 UPDATER_KEY="${ID[6]}"
 
-rm -rf "$STAGE"
-mkdir -p "$STAGE"
-
 # Install exactly one application through npm, with one shared dependency tree.
 # Native dependencies are prepared before stopping any existing service.
-PATH="$NODE_DIR/bin:$PATH" "$NODE_DIR/bin/npm" install --global --prefix "$STAGE" \
-  --omit=dev --no-audit --no-fund "$ASSETS/$NPM_PACKAGE"
+if [[ -z "$INSTALLED_PACKAGE" ]]; then
+  rm -rf "$STAGE"
+  mkdir -p "$STAGE"
+  PATH="$NODE_DIR/bin:$PATH" "$NODE_DIR/bin/npm" install --global --prefix "$STAGE" \
+    --omit=dev --no-audit --no-fund "$ASSETS/$NPM_PACKAGE"
+fi
 for file in package.json npm-shrinkwrap.json bin/codey.mjs codey-build.json \
   dist-server/server/index.js gateway/main.js \
   updater/install.py updater/updater.py updater/engine.py updater/probe.mjs; do
@@ -546,6 +608,7 @@ NODE
   die "CloudCLI Codex runtime test failed; see $CLOUDCLI_TEST_LOG"
 fi
 
+if [[ -z "$INSTALLED_PACKAGE" ]]; then
 rm -rf "$RELEASE.next"
 mv "$STAGE" "$RELEASE.next"
 rm -rf "$RELEASE"
@@ -554,12 +617,9 @@ sed -i "s#WorkingDirectory=$STAGE/#WorkingDirectory=$RELEASE/#; s# $STAGE/# $REL
   "$SYSTEMD_DIR/codey-copilot-api.service" "$SYSTEMD_DIR/codey-cloudcli.service"
 systemctl --user daemon-reload
 systemctl --user restart codey-copilot-api.service codey-cloudcli.service
+fi
 
-cat >"$HOME_DIR/.local/bin/codey" <<EOF
-#!/bin/sh
-exec "$NODE" "$RELEASE_PACKAGE/bin/codey.mjs" "\$@"
-EOF
-chmod 700 "$HOME_DIR/.local/bin/codey"
+write_codey_cli "$HOME_DIR" "$NODE" "$RELEASE_PACKAGE"
 
 "$NODE" - "$ASSETS/manifest.json" "$RELEASE/release.json" <<'NODE'
 const fs = require("node:fs");
@@ -733,7 +793,9 @@ NODE
 chmod 600 "$OUTPUT"
 
 rm -f "$TOKEN_FILE"
-find "$RUNTIME_ROOT/releases" -mindepth 1 -maxdepth 1 -type d ! -name "$RELEASE_ID" -exec rm -rf -- {} +
+if [[ -z "$INSTALLED_PACKAGE" ]]; then
+  find "$RUNTIME_ROOT/releases" -mindepth 1 -maxdepth 1 -type d ! -name "$RELEASE_ID" -exec rm -rf -- {} +
+fi
 
 for unit in codey-copilot-api.service codey-cloudcli.service codey-devtunnel.service \
   codey-devtunnel-renew.timer codey-node-updater.service; do
@@ -746,4 +808,6 @@ echo
 echo "Codey Linux installation completed."
 echo "Registration file: $OUTPUT"
 echo "Node ID: $NODE_ID"
+echo 'Codey PATH is configured for new Bash terminals. For the current terminal, run:'
+echo '  export PATH="$HOME/.local/bin:$PATH"'
 echo "Previous Codex processes were stopped; reopen Codex from a new terminal."

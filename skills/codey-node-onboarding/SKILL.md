@@ -7,20 +7,26 @@ metadata:
 
 # Codey Node Onboarding
 
-新增节点使用 `config-new-codey-machine` 静态包，不再为每台机器从 Portal 下载带
-私密 token 的个性化安装包。
+新增 Linux 节点直接下载 Codey npm 包及小型一键脚本，不必解压 Skill ZIP，
+也不为每台机器从 Portal 下载带私密 token 的个性化安装包。
 
-## 1. 分发 Linux 静态包
+## 1. 分发 Linux npm 包
 
 - 当前只发布 Linux x64 包；Windows PowerShell 和 macOS 版本待 Linux 流程稳定后迁移。
-- 包内只有公开元数据、安装脚本和 CloudCLI、copilot-api、updater 三个 payload。
+- 只有一个 `codey-<version>.tgz` 应用 npm 包，直接包含 Workspace、网关、updater
+  和 `codey setup`；不是三个 payload，也不嵌套两个应用 npm 包。
+- `install-codey-linux.sh` 是单独的小型启动脚本，不内嵌 Base64 应用；允许 npm
+  从明确的 HTTPS `.tgz` URL 安装。不自动安装公共 registry 的同名项目。
 - Node、Codex 和 DevTunnel 必须由目标机从官方源下载安装，不进入包。
 - 不得包含 `assets/enrollment.json` 或 `assets/codey-updater/config.json`。
 - 同一个平台/发行版包可以安全复制到多台机器并行执行。
 
 ## 2. 在目标 Linux 机器执行
 
-- 运行 `bash scripts/install.sh`；不得在 Windows 或 macOS 回退执行本脚本。
+- 把 npm 包和一键脚本放在同一目录，运行 `bash install-codey-linux.sh`；
+  已完成 npm 安装时运行 `codey setup`。旧 ZIP 的 `bash scripts/install.sh` 仅保留兼容。
+- `codey setup --check` 只验证，不触发模型请求、停进程或服务变更。
+- 使用当前用户 HOME 下、升级器支持的 npm prefix；不得在 Windows 或 macOS 回退执行本脚本。
 - 本机生成 node ID、Workspace subject 和四把用途隔离的随机 key，并在失败重跑时
   安全复用。
 - DevTunnel 只使用当前用户的 GitHub 登录；不配置 VNet、路由或入站防火墙。

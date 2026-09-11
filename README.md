@@ -32,6 +32,19 @@ codey start
 registry，不要从公共源安装同名包。构建不会自动发布或部署。
 完整的一键安装与整包升级见 [节点接入说明](./docs/codey-machine-setup.md)。
 
+Linux 节点现在直接下载标准 npm 包和 `install-codey-linux.sh`，不必解压 ZIP。
+将两者放在同一目录后运行 `bash install-codey-linux.sh`；也可以从仓库执行：
+
+```sh
+bash scripts/linux/install-codey.sh --package ./codey-0.1.0.tgz
+```
+
+一键脚本先用 npm 在新的私有 prefix 安装，再调用包内的 `codey setup`。
+已通过 npm 安装的机器可直接执行 `codey setup --check` / `codey setup`，
+不会再次安装或搬动应用目录。`machine:build` 会内置公开的 Portal 配置；
+普通 `codey:build` 需要用 `codey setup --config <公开配置.json>` 指定配置。
+安装 npm 包本身不会启动服务或覆盖模型配置。
+
 ## Portal 本地检查
 
 实际机器配置、`.env`、证书、账号/会话数据及构建产物不在 Git 中。新 clone 先按

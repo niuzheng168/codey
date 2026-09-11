@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { once } from "node:events";
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
@@ -8,6 +8,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+import { installedSetup } from "../packages/codey/lib/setup.mjs";
 
 const exec = promisify(execFile);
 const artifact = process.env.CODEY_PACKAGE_TGZ;
@@ -27,7 +29,7 @@ test("built npm package installs as Codey and starts both real servers without u
   const root = await mkdtemp(path.join(os.tmpdir(), "codey-real-install-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = path.join(root, "home");
-  const prefix = path.join(root, "prefix");
+  const prefix = path.join(home, ".local");
   const apiHome = path.join(home, "gateway-data");
   await mkdir(apiHome, { recursive: true });
   const apiKey = "local-codey-package-smoke-key-not-a-real-credential";
@@ -40,8 +42,16 @@ test("built npm package installs as Codey and starts both real servers without u
     ELECTRON_SKIP_BINARY_DOWNLOAD: "1",
   };
   const npm = path.join(path.dirname(process.execPath), "npm");
-  await exec(npm, ["install", "--global", "--prefix", prefix, "--omit=dev",
-    "--no-audit", "--no-fund", path.resolve(artifact)], { env, maxBuffer: 8 * 1024 * 1024, timeout: 240000 });
+  const publicConfig = path.join(home, "setup-public.json");
+  await writeFile(publicConfig, JSON.stringify({
+    schema: 1, portalOrigin: "https://codey.example.test", platform: "linux-x64",
+    network: { mode: "devtunnel" }, tunnelAuthProvider: "github",
+    updater: { protocol: 1, releasePublicKey: generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }) },
+  }));
+  await exec("bash", [fileURLToPath(new URL("../scripts/linux/install-codey.sh", import.meta.url)),
+    "--package", path.resolve(artifact), "--node-dir", path.dirname(path.dirname(process.execPath)),
+    "--prefix", prefix, "--config", publicConfig, "--check"],
+  { env, maxBuffer: 8 * 1024 * 1024, timeout: 240000 });
   const installed = path.join(prefix, "lib/node_modules/codey");
   assert.deepEqual((await readdir(path.join(prefix, "lib/node_modules"))).filter(name => !name.startsWith(".")), ["codey"]);
   assert.deepEqual(await readdir(path.join(prefix, "bin")), ["codey"]);
@@ -53,6 +63,59 @@ test("built npm package installs as Codey and starts both real servers without u
   assert.equal((await exec(bin, ["--version"], { env })).stdout.trim(), `codey ${pkg.version}`);
   const listing = JSON.parse((await exec(npm, ["ls", "--global", "--prefix", prefix, "--depth=0", "--json"], { env })).stdout);
   assert.deepEqual(Object.keys(listing.dependencies), ["codey"]);
+  const setupCheck = JSON.parse((await exec(bin, ["setup", "--config", publicConfig, "--check"], { env })).stdout);
+  assert.equal(setupCheck.serviceChanges, false);
+  assert.equal(setupCheck.version, pkg.version);
+
+  // Exercise the actual npm-mode Bash preflight only. All service/process/network
+  // commands are blocked, and the script is cut before the first service action.
+  const preflightRoot = path.join(root, "preflight");
+  const preflightAssets = path.join(preflightRoot, "assets");
+  const stubs = path.join(preflightRoot, "stubs");
+  await mkdir(preflightAssets, { recursive: true });
+  await mkdir(stubs);
+  await mkdir(path.join(preflightRoot, "scripts"));
+  await mkdir(path.join(preflightRoot, "templates"));
+  const prepared = await installedSetup(installed, publicConfig);
+  const sums = [];
+  for (const [name, document] of [["manifest.json", prepared.manifest], ["setup.json", prepared.setup]]) {
+    const bytes = JSON.stringify(document) + "\n";
+    await writeFile(path.join(preflightAssets, name), bytes);
+    sums.push(`${createHash("sha256").update(bytes).digest("hex")}  ${name}`);
+  }
+  await writeFile(path.join(preflightAssets, "SHA256SUMS"), sums.join("\n") + "\n");
+  await writeFile(path.join(preflightRoot, "templates/a100-models.json"), "{}");
+  for (const name of ["systemctl", "loginctl", "pkill", "pgrep", "fuser", "curl", "sudo", "npm"]) {
+    const body = name === "sudo"
+      ? '#!/bin/sh\n[ "$*" = "-n true" ] || exit 88\n'
+      : '#!/bin/sh\necho "Unexpected external operation during preflight" >&2\nexit 88\n';
+    await writeFile(path.join(stubs, name), body);
+    await chmod(path.join(stubs, name), 0o700);
+  }
+  const setupScript = await readFile(path.join(installed, "onboarding/scripts/install.sh"), "utf8");
+  const stop = setupScript.indexOf('log 1 "Install and configure private GitHub DevTunnel"');
+  assert.ok(stop > 0);
+  const preflightFile = path.join(preflightRoot, "scripts/preflight.sh");
+  await writeFile(preflightFile, setupScript.slice(0, stop));
+  const entryBefore = await readFile(path.join(installed, "bin/codey.mjs"));
+  await exec("bash", [preflightFile], { env: {
+    ...env, PATH: `${stubs}:${env.PATH}`, CODEY_INSTALLED_PACKAGE: installed,
+    CODEY_SETUP_ASSETS: preflightAssets, CODEY_SETUP_NODE: process.execPath,
+  }, timeout: 20000 });
+  assert.deepEqual(await readFile(path.join(installed, "bin/codey.mjs")), entryBefore);
+  assert.equal(JSON.parse(await readFile(path.join(installed, "package.json"), "utf8")).name, "codey");
+
+  // Exercise only the packaged CLI/PATH helpers in the temporary HOME, not deployment.
+  const helpersEnd = setupScript.indexOf('[[ "$(uname -s)"');
+  assert.ok(helpersEnd > 0);
+  await exec("bash", ["--noprofile", "--norc", "-c",
+    setupScript.slice(0, helpersEnd) + '\nwrite_codey_cli "$HOME" "$1" "$2"\n',
+    "fixture", process.execPath, installed], { env });
+  const newShell = await exec("bash", ["--noprofile", "-ic", "codey --version"], {
+    env: { HOME: home, PATH: "/usr/bin:/bin" },
+  });
+  assert.equal(newShell.stdout.trimEnd().split("\n").at(-1), `codey ${pkg.version}`);
+  assert.deepEqual(await readFile(path.join(installed, "bin/codey.mjs")), entryBefore);
 
   // Defaults belong to Codey itself, not to the one-click installer's config writer.
   const freshApiHome = path.join(home, "fresh-gateway");

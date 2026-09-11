@@ -167,14 +167,17 @@
           <li>
             <span class="step-number" aria-hidden="true">1</span>
             <div class="step-content">
-              <h3>按目标系统下载可复用 Skill 包</h3>
-              <p class="muted">Linux 固定包不含 token 或机器身份，可并行分发。Node、Codex 和 DevTunnel 从官方源安装，包内只有 CloudCLI、copilot-api 和 updater。</p>
+              <h3>下载 Codey npm 包和一键安装脚本</h3>
+              <p class="muted">Linux 直接使用 npm 安装，无需解压 ZIP。一个 codey 包包含 Workspace、网关、更新器和部署入口，不含 token 或机器身份，可分发到多台机器。</p>
               <form id="machine-windows-skill-form" action="/api/settings/machines/skill?platform=windows-x64" method="post" data-machine-platform="windows-x64">
                 <button id="download-machine-windows-skill" type="submit" disabled>Windows · PowerShell 版本待迁移</button>
               </form>
               <p id="machine-windows-package-status" class="muted">正在检查 Windows 配置包…</p>
-              <form id="machine-skill-form" action="/api/settings/machines/skill" method="post" data-machine-platform="linux-x64">
-                <button id="download-machine-skill" type="submit" disabled>↓ Linux · install.sh</button>
+              <form id="machine-skill-form" action="/api/settings/machines/npm" method="post" data-machine-platform="linux-x64" data-machine-kind="npm">
+                <button id="download-machine-skill" type="submit" disabled>↓ Linux · Codey npm 包</button>
+              </form>
+              <form id="machine-npm-installer-form" action="/api/settings/machines/installer" method="post" data-machine-platform="linux-x64" data-machine-kind="installer">
+                <button id="download-machine-npm-installer" type="submit" disabled>↓ Linux · 一键安装脚本</button>
               </form>
               <p id="machine-package-status" class="muted">正在检查 Linux 配置包…</p>
               <form id="machine-macos-skill-form" action="/api/settings/machines/skill?platform=macos-arm64" method="post" data-machine-platform="macos-arm64">
@@ -191,8 +194,9 @@
           <li>
             <span class="step-number" aria-hidden="true">2</span>
             <div class="step-content">
-              <h3>在 Codex 中配置目标机器</h3>
-              <p class="muted">Linux 解压后执行 <code>bash scripts/install.sh</code>。脚本按六步直接覆盖旧服务并生成注册文件。</p>
+              <h3>通过 npm 安装并配置目标机器</h3>
+              <p class="muted">将下载的 .tgz 和脚本放在同一目录，执行 <code>bash install-codey-linux.sh</code>。脚本直接用 npm 安装，再运行包内的 <code>codey setup</code> 完成六步部署，无需手工解压。</p>
+              <p class="muted">也可先用 <code>npm install --global --prefix "$HOME/.local" ./codey-版本.tgz</code> 安装，再执行 <code>"$HOME/.local/bin/codey" setup</code>。仅 npm 安装不会修改系统服务。</p>
               <details class="setup-help">
                 <summary>支持范围与安全说明</summary>
                 <p class="muted">当前发布 Linux x64。Windows PowerShell 与 macOS 原生入口将在同一六步流程稳定后迁移；不得在这些系统回退执行 Bash 安装器。</p>
