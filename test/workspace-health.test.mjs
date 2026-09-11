@@ -128,6 +128,7 @@ test("admin differentiates live Workspace reachability from a missing updater he
   assert.equal(row.components.cloudcli.version, "1.37.2");
   assert.equal(row.components.cloudcli.commit, null);
   assert.equal(row.components.copilotApi, null, "Do not infer protected copilot-api metadata");
+  assert.equal(row.components.codey, null, "A standalone Workspace health version must not be mislabeled as Codey");
   health.reachable = false;
   const unavailable = await api.adminNodes();
   assert.equal(unavailable.summary.online, 0);

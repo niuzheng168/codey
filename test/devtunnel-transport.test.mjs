@@ -268,7 +268,8 @@ test("HTTP and WebSocket use raw TLS tunnel streams, preserve SSO/ownership and 
   assert.equal(response.headers.get("set-cookie"), null);
   assert.equal(response.headers.get("cache-control"), "private, no-store");
   assert.equal(observed[0].url, "/api/projects");
-  assert.deepEqual(Object.keys(gateway.publicNodes(["local"])[0]).sort(), ["id", "name", "path", "region"]);
+  assert.deepEqual(Object.keys(gateway.publicNodes(["local"])[0]).sort(), ["id", "name", "networkMode", "path", "region"]);
+  assert.equal(gateway.publicNodes(["local"])[0].networkMode, "devtunnel");
   const denied = await upgrade(port, "another-user");
   assert.match(denied.output, /401 Unauthorized/);
   denied.socket.destroy();

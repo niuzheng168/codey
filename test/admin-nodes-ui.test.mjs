@@ -9,18 +9,20 @@ const tick = () => new Promise(setImmediate);
 const now = Date.UTC(2026, 8, 8, 9, 0, 0);
 const owner = { id: "owner-zhn", username: "zhn", enabled: true };
 const bob = { id: "owner-bob", username: "bob", enabled: true };
-const version = { version: "1.37.2", commit: "a".repeat(40), nodeMajor: 24 };
+const version = { version: "0.1.0", commit: "a".repeat(40), nodeMajor: 24 };
 const node = (id, values = {}) => ({
   id, name: id, region: "Japan East", owner, status: "online", lastSeen: now,
   releaseId: "installed-release",
-  components: { cloudcli: version, copilotApi: { ...version, version: "2.5.1", commit: "b".repeat(40) } },
+  components: { codey: version, cloudcli: { ...version, version: "1.37.2" },
+    copilotApi: { ...version, version: "2.5.1", commit: "c".repeat(40) } },
   ...values,
 });
 const defaults = [
   node("zhn-a100"),
-  node("bob-machine", { owner: bob, status: "stale", lastSeen: now - 120000 }),
-  node("first-start", { owner: bob, status: "unreported", lastSeen: null, components: { cloudcli: null, copilotApi: null } }),
-  node("local", { status: "not_enrolled", lastSeen: null, components: { cloudcli: null, copilotApi: null } }),
+  node("bob-machine", { owner: bob, status: "stale", lastSeen: now - 120000,
+    components: { codey: { ...version, commit: "b".repeat(40) } } }),
+  node("first-start", { owner: bob, status: "unreported", lastSeen: null, components: { codey: null } }),
+  node("local", { status: "not_enrolled", lastSeen: null, components: { codey: null } }),
 ];
 
 function inventory(nodes, generatedAt = now) {
@@ -102,11 +104,13 @@ test("inventory renders all-owner counts, node versions and explicit unknown sta
   }
   assert.equal(p.rows().length, 4);
   const known = p.rows().find((row) => row.dataset.nodeId === "zhn-a100");
-  assert.match(known.textContent, /zhn.*心跳在线.*1\.37\.2.*aaaaaaaa · Node 24.*2\.5\.1/s);
+  assert.match(known.textContent, /zhn.*心跳在线.*0\.1\.0.*aaaaaaaa · Node 24/s);
+  assert.equal(known.children.length, 4);
+  assert.doesNotMatch(known.textContent, /1\.37\.2|2\.5\.1/);
   assert.match(known.children[3].title, new RegExp("Commit: " + "a".repeat(40)));
   assert.match(known.children[3].title, /installed-release/);
   const local = p.rows().find((row) => row.dataset.nodeId === "local");
-  assert.match(local.textContent, /未接入升级器.*尚无心跳记录.*未上报.*未上报/);
+  assert.match(local.textContent, /未接入升级器.*尚无心跳记录.*未上报 Codey 版本/);
   assert.ok(!local.textContent.includes("1.37.2"), "Never fill unknown installed versions from a target release");
   assert.match(p.get("admin-node-message").textContent, /90 秒.*30 秒/);
   assert.match(p.get("admin-node-help").textContent, /不代表模型或服务健康/);
@@ -136,12 +140,28 @@ test("Windows Workspace health counts as online without claiming an updater hear
   const row = p.rows()[0];
   assert.match(row.textContent, /windows-devbox.*兼容 ID: local.*Workspace 在线.*健康检查.*未接入升级器/s);
   assert.ok(!row.textContent.includes("心跳在线"));
-  assert.match(row.children[3].title, /来源：Workspace 健康检查/);
-  assert.match(row.children[4].textContent, /未上报/);
+  assert.match(row.children[3].textContent, /未上报 Codey 版本/);
+  assert.doesNotMatch(row.textContent, /1\.37\.2/);
+  assert.equal(row.children.length, 4);
   p.filter("admin-node-status", "online");
   assert.equal(p.rows().length, 1);
   p.filter("admin-node-status", "unknown");
   assert.equal(p.rows().length, 0);
+});
+
+test("the overview displays and searches only the actual Codey package, not retained legacy component metadata", async () => {
+  const p = await page({ nodes: [
+    node("codey-only", { components: { codey: version } }),
+    node("old-node", { components: { cloudcli: { ...version, version: "8.8.8" }, copilotApi: { ...version, version: "9.9.9" } } }),
+  ] });
+  assert.match(p.rows()[0].textContent, /0\.1\.0/);
+  assert.match(p.rows()[1].textContent, /未上报 Codey 版本/);
+  assert.doesNotMatch(p.get("admin-node-list").textContent, /8\.8\.8|9\.9\.9/);
+  p.filter("admin-node-search", "8.8.8", "input");
+  assert.equal(p.rows().length, 0);
+  assert.equal(p.get("admin-node-list").querySelector("td").getAttribute("colspan"), "4");
+  p.filter("admin-node-search", "0.1.0", "input");
+  assert.deepEqual(p.rows().map(row => row.dataset.nodeId), ["codey-only"]);
 });
 
 test("search, owner and status filters combine without changing global totals", async () => {

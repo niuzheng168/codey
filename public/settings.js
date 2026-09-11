@@ -1,3 +1,5 @@
+import { LEGACY_NODE_CONNECTIONS_ENABLED } from "./portal-features.js";
+
 const message = document.querySelector("#settings-message");
 const nodesRoot = document.querySelector("#my-nodes");
 const usersRoot = document.querySelector("#users-list");
@@ -194,12 +196,14 @@ function renderNodes(nodes) {
     const summary = element("summary", null, "node-summary");
     const identity = element("span", null, "node-identity");
     identity.append(element("strong", node.name), element("span", node.region || "未设置区域", "node-region"));
-    const endpoint = element("span", origin, "node-endpoint");
-    endpoint.title = origin;
+    const endpoint = element("span", LEGACY_NODE_CONNECTIONS_ENABLED ? origin
+      : node.networkMode === "devtunnel" ? "私有隧道 · 无需开放入站端口" : "旧配置 · 需要重新接入", "node-endpoint");
+    endpoint.title = endpoint.textContent;
     const badges = element("span", null, "badges");
-    const connection = element("span", node.networkMode === "devtunnel" ? "DevTunnel 专用"
-      : node.vnetOnly ? "VNet 专用" : node.vnetAvailable ? "VNet 已配置" : "浏览器直连", "badge");
-    connection.title = node.vnetOnly ? "VNet 专用，无需浏览器证书" : connection.textContent;
+    const connection = element("span", node.networkMode === "devtunnel" ? "DevTunnel"
+      : !LEGACY_NODE_CONNECTIONS_ENABLED ? "待接入 DevTunnel"
+        : node.vnetOnly ? "VNet 专用" : node.vnetAvailable ? "VNet 已配置" : "浏览器直连", "badge");
+    connection.title = connection.textContent;
     badges.append(connection, element("span", node.workspaceAvailable ? "Workspace 已配置" : "Workspace 未配置",
       `badge ${node.workspaceAvailable ? "configured" : "pending"}`));
     summary.append(identity, endpoint, badges, element("span", "设置", "node-disclosure"));
@@ -207,22 +211,25 @@ function renderNodes(nodes) {
 
     const editor = element("div", null, "node-editor");
     editor.append(element("p", `${node.id === "local" ? "兼容节点 ID" : "节点 ID"} · ${node.id}`, "node-id"));
-    if (node.id === "local") {
+    if (LEGACY_NODE_CONNECTIONS_ENABLED && node.id === "local") {
       editor.append(element("p", "保留旧 ID 以兼容现有会话与 SSO；它不是机器名称。此节点的 Workspace 是远程机器，Usage/History 的回环地址仍指向当前浏览器设备，不代表已开通远程 Windows 用量。", "muted"));
     }
     const form = element("form", null, "node-form");
     form.setAttribute("aria-label", `${node.name} 节点设置`);
-    const endpointField = field(node.vnetOnly ? "HTTPS 服务入口（VNet 专用，由机器配置提供）" : "HTTPS 服务入口", "endpoint", origin, "url");
-    endpointField.className = "node-endpoint-field";
-    endpointField.querySelector("input").placeholder = "https://host:8443";
-    if (node.vnetOnly) endpointField.querySelector("input").readOnly = true;
     form.append(field("名称", "name", node.name), field("区域", "region", node.region),
-      field("颜色", "accent", node.accent, "color"), endpointField);
+      field("颜色", "accent", node.accent, "color"));
+    if (LEGACY_NODE_CONNECTIONS_ENABLED) {
+      const endpointField = field(node.vnetOnly ? "HTTPS 服务入口（VNet 专用，由机器配置提供）" : "HTTPS 服务入口", "endpoint", origin, "url");
+      endpointField.className = "node-endpoint-field";
+      endpointField.querySelector("input").placeholder = "https://host:8443";
+      if (node.vnetOnly) endpointField.querySelector("input").readOnly = true;
+      form.append(endpointField);
+    }
     const actions = element("div", null, "actions");
     const save = element("button", "保存设置", "primary");
     save.type = "submit";
     actions.append(save);
-    if (!node.managedLegacy) {
+    if (LEGACY_NODE_CONNECTIONS_ENABLED && !node.managedLegacy) {
       const credentials = element("button", "查看本节点接入资料");
       credentials.type = "button";
       credentials.addEventListener("click", () => operation(credentials, async () => {
@@ -313,10 +320,7 @@ async function load() {
     ["machine-macos-status", macSetup, "macOS · Apple Silicon"],
     ["machine-macos-intel-status", intelSetup, "macOS · Intel"],
   ]) {
-    const runtime = entry?.codey ? `Codey ${entry.codey}（统一 npm 包）`
-      : `CloudCLI ${entry?.cloudcli} · ${
-        String(entry?.platform).startsWith("macos-") || entry?.platform === "windows-x64"
-          ? "复用本机模型代理" : `copilot-api ${entry?.copilotApi}`}`;
+    const runtime = entry?.codey ? `Codey ${entry.codey}（统一 npm 包）` : "Codey npm 包尚未发布";
     document.querySelector(`#${id}`).textContent = entry?.enabled
       ? `${label}${entry.preview ? `【验收版，仅限 ${entry.expectedComputerName}】` : ""} · 约 ${
         Math.ceil(entry.bytes / 1024 / 1024)} MB · Node ${entry.node} · ${runtime}`

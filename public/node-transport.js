@@ -14,6 +14,10 @@ export function saveConnectionMode(storage, mode) {
 }
 
 export function nodesForConnection(nodes, mode) {
+  if (mode === "devtunnel") {
+    return nodes.filter((node) => node.networkMode === "devtunnel" &&
+      node.proxyEndpoint === `/api/node-data/${node.id}/usage` && !isLoopback(node.endpoint));
+  }
   return mode === "vnet" ? nodes.filter((node) => node.proxyEndpoint) : nodes;
 }
 
@@ -30,7 +34,8 @@ export async function fetchNodeJson(node, url, {
 } = {}) {
   // Prepared machines use a node-pinned private certificate. They deliberately
   // have no browser-direct endpoint; this is a declared route, not a fallback.
-  const vnet = node.vnetOnly === true || connectionMode === "vnet";
+  const tunnel = connectionMode === "devtunnel";
+  const vnet = tunnel || node.vnetOnly === true || connectionMode === "vnet";
   const directUrl = new URL(url);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -45,7 +50,9 @@ export async function fetchNodeJson(node, url, {
       signal: controller.signal,
     };
     if (vnet) {
-      if (node.proxyEndpoint !== `/api/node-data/${node.id}/usage` || isLoopback(directUrl)) {
+      if ((tunnel && node.networkMode !== "devtunnel") ||
+          node.proxyEndpoint !== `/api/node-data/${node.id}/usage` || isLoopback(directUrl)) {
+        if (tunnel) throw new Error("此节点尚未配置私有 DevTunnel，请在“账号与节点”中重新接入");
         throw new Error("此节点未配置 VNet 连接，请切换浏览器直连");
       }
       target = `/api/node-data/${node.id}${directUrl.pathname}${directUrl.search}`;

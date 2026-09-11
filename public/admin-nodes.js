@@ -47,7 +47,7 @@ function notice(text, error = false) {
 function empty(text) {
   const row = element("tr");
   const cell = element("td", text, "inventory-empty");
-  cell.setAttribute("colspan", "5");
+  cell.setAttribute("colspan", "4");
   row.append(cell);
   rows.replaceChildren(row);
 }
@@ -91,7 +91,8 @@ function renderOwners() {
 function versionCell(component, node) {
   const cell = element("td");
   if (!component) {
-    cell.append(element("span", "未上报", "muted"));
+    cell.append(element("span", "未上报 Codey 版本", "muted"));
+    cell.title = "尚未收到 Codey npm 包的实际版本；旧组件版本不能代替。";
     return cell;
   }
   cell.append(element("strong", component.version, "inventory-version"));
@@ -126,8 +127,7 @@ function renderRow(node) {
   } else {
     state.append(element("span", node.lastSeen ? date(node.lastSeen) : "尚无心跳记录", "muted"));
   }
-  row.append(identity, owner, state,
-    versionCell(node.components.cloudcli, node), versionCell(node.components.copilotApi, node));
+  row.append(identity, owner, state, versionCell(node.components?.codey, node));
   return row;
 }
 
@@ -141,7 +141,7 @@ function render() {
     if (ownerFilter.value && node.owner.id !== ownerFilter.value) return false;
     if (statusFilter.value && statusGroup(node.status) !== statusFilter.value) return false;
     const terms = [node.name, node.id, node.region, node.owner.username, node.releaseId,
-      ...Object.values(node.components).flatMap((component) => [component?.version, component?.commit])];
+      node.components?.codey?.version, node.components?.codey?.commit];
     return !query || terms.filter(Boolean).join(" ").toLowerCase().includes(query);
   }).sort((a, b) => (a.owner.username || a.owner.id).localeCompare(b.owner.username || b.owner.id)
     || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));

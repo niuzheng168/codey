@@ -4,7 +4,7 @@ import {
   fetchClientHistoryList,
 } from "./client-history.js";
 import { nodesForConnection, readConnectionMode, saveConnectionMode } from "./node-transport.js";
-import { PORTAL_VIEWS, resolvePortalView } from "./portal-features.js";
+import { LEGACY_NODE_CONNECTIONS_ENABLED, PORTAL_CONNECTION_MODE, PORTAL_VIEWS, resolvePortalView } from "./portal-features.js";
 
 const PERIOD_LABELS = Object.freeze({
   day: "今日",
@@ -114,13 +114,15 @@ const elements = {
 const params = new URLSearchParams(window.location.search);
 const requestedView = params.get("view");
 let preferenceStorage;
-try { preferenceStorage = window.localStorage; } catch { /* Direct is the default without storage. */ }
+try {
+  if (LEGACY_NODE_CONNECTIONS_ENABLED) preferenceStorage = window.localStorage;
+} catch { /* Legacy browser preferences are optional. */ }
 const state = {
   activeView: resolvePortalView(requestedView),
   clientConfig: null,
   clientTicketExpiresAt: 0,
-  // Routing is an explicit, browser-local preference. Never auto-fallback.
-  connectionMode: readConnectionMode(preferenceStorage),
+  // The shipped UI uses only private tunnels, regardless of old browser preferences.
+  connectionMode: LEGACY_NODE_CONNECTIONS_ENABLED ? readConnectionMode(preferenceStorage) : PORTAL_CONNECTION_MODE,
   cloudCli: {
     loading: false,
     nodes: null,
@@ -194,6 +196,7 @@ const state = {
 };
 
 function connectionModeSuffix() {
+  if (!LEGACY_NODE_CONNECTIONS_ENABLED) return " · DevTunnel";
   if (state.activeView === "workspace") return " · ACA → 节点";
   return state.directMode
     ? state.connectionMode === "vnet" ? " · ACA → VNet" : " · 浏览器直连"
@@ -205,7 +208,7 @@ function connectionNodes() {
 }
 
 function renderConnectionOptions() {
-  const available = state.directMode && state.clientConfig?.connectionModes?.includes("vnet");
+  const available = LEGACY_NODE_CONNECTIONS_ENABLED && state.directMode && state.clientConfig?.connectionModes?.includes("vnet");
   for (const option of elements.connectionOptions) {
     option.hidden = !available;
     option.classList.toggle("is-active", state.connectionMode === "vnet");
@@ -230,10 +233,16 @@ async function refreshClientNodes(force = false) {
   }
   const config = await fetchJson("/api/client-nodes");
   state.clientConfig = config;
-  state.directMode = Boolean(config.directMode);
-  if (!config.connectionModes?.includes("vnet")) state.connectionMode = "direct";
-  else if (!config.connectionModes.includes("direct")) state.connectionMode = "vnet";
-  state.nodes = config.nodes ?? [];
+  // This legacy flag selects browser-side aggregation, not a direct network route.
+  state.directMode = !LEGACY_NODE_CONNECTIONS_ENABLED || Boolean(config.directMode);
+  if (LEGACY_NODE_CONNECTIONS_ENABLED) {
+    if (!config.connectionModes?.includes("vnet")) state.connectionMode = "direct";
+    else if (!config.connectionModes.includes("direct")) state.connectionMode = "vnet";
+  } else {
+    state.connectionMode = PORTAL_CONNECTION_MODE;
+  }
+  state.nodes = LEGACY_NODE_CONNECTIONS_ENABLED
+    ? config.nodes ?? [] : nodesForConnection(config.nodes ?? [], PORTAL_CONNECTION_MODE);
   state.refreshSeconds = config.refreshSeconds ?? 60;
   state.clientTicketExpiresAt = state.nodes.length
     ? Math.min(...state.nodes.map((node) => Number(node.ticketExpiresAt || 0)))
@@ -364,7 +373,7 @@ function renderActiveView() {
     );
   }
   if (state.activeView === "workspace") {
-    setConnectionLabel("CloudCLI");
+    setConnectionLabel("Codey Workspace");
     loadCloudCliNodes();
   } else if (state.activeView === "sessions") {
     setConnectionLabel(
@@ -401,7 +410,7 @@ function renderCloudCliNode() {
   if (!node) {
     elements.cloudCliFrame.hidden = true;
     elements.cloudCliEmpty.hidden = false;
-    elements.cloudCliEmpty.textContent = "当前账号没有可用的 CloudCLI 节点。";
+    elements.cloudCliEmpty.textContent = "当前账号没有可用的 DevTunnel Workspace 节点。";
     elements.workspaceConnection.textContent = "无可用节点";
   }
 }
@@ -424,10 +433,11 @@ async function loadCloudCliNodes(force = false) {
   if (state.cloudCli.loading || (!force && state.cloudCli.nodes)) return;
   state.cloudCli.loading = true;
   elements.workspaceStatus.innerHTML =
-    '<div class="notice">正在通过 Codey 读取 CloudCLI 节点…</div>';
+    '<div class="notice">正在读取 Codey Workspace 节点…</div>';
   try {
     const data = await fetchJson("/api/cloudcli/nodes");
-    state.cloudCli.nodes = Array.isArray(data.nodes) ? data.nodes : [];
+    state.cloudCli.nodes = (Array.isArray(data.nodes) ? data.nodes : [])
+      .filter((node) => LEGACY_NODE_CONNECTIONS_ENABLED || node.networkMode === PORTAL_CONNECTION_MODE);
     if (
       !state.cloudCli.selectedId ||
       !state.cloudCli.nodes.some((node) => node.id === state.cloudCli.selectedId)
@@ -441,7 +451,7 @@ async function loadCloudCliNodes(force = false) {
   } catch (error) {
     state.cloudCli.nodes = [];
     renderCloudCliNode();
-    elements.workspaceStatus.innerHTML = `<div class="notice notice-error">CloudCLI 节点读取失败：${escapeHtml(error.message)}</div>`;
+    elements.workspaceStatus.innerHTML = `<div class="notice notice-error">Workspace 节点读取失败：${escapeHtml(error.message)}</div>`;
   } finally {
     state.cloudCli.loading = false;
   }
@@ -476,7 +486,7 @@ function renderControls() {
           class="node-filter ${nodeColorClass(node.id)}"
           data-node-id="${escapeHtml(node.id)}"
           aria-pressed="${state.selectedNodes.has(node.id)}"
-          title="${escapeHtml(node.endpoint)}"
+          title="${escapeHtml(LEGACY_NODE_CONNECTIONS_ENABLED ? node.endpoint : "私有 DevTunnel")}"
         >
           <span class="node-dot" aria-hidden="true"></span>
           <span>${escapeHtml(node.name)}</span>
@@ -525,7 +535,7 @@ function renderKpis(data) {
     <section class="kpi-grid" aria-label="汇总指标">
       ${renderMetricCard("Token 总量", formatCompact(totals.total_tokens), `${formatExact(totals.total_tokens)} tokens`)}
       ${renderMetricCard("请求数", formatCompact(totals.request_count), `${formatExact(totals.request_count)} 次请求`)}
-      ${renderMetricCard("估算成本", formatCosts(totals.costs), "由 copilot-api AIU 记录估算")}
+      ${renderMetricCard("估算成本", formatCosts(totals.costs), "由 Codey 网关 AIU 记录估算")}
       ${renderMetricCard("缓存读取占比", formatPercent(cacheShare), `${formatExact(totals.cache_read_input_tokens)} cache-read tokens`)}
       ${renderMetricCard("可响应节点", `${responding} / ${data.nodes.length}`, `${data.status.online} 正常 · ${data.status.partial} 部分可用`)}
     </section>
@@ -711,7 +721,7 @@ function renderNodeCard(node, aggregateTotal) {
   const managedNode = state.management?.nodes?.find(
     (item) => item.id === node.id,
   );
-  const canStart = Boolean(managedNode?.copilotApi?.canStart);
+  const canStart = LEGACY_NODE_CONNECTIONS_ENABLED && Boolean(managedNode?.copilotApi?.canStart);
   const serviceActive = managedNode?.copilotApi?.service === "active";
   const starting =
     state.starting.has(node.id) || Boolean(state.deployingArtifact);
@@ -737,7 +747,7 @@ function renderNodeCard(node, aggregateTotal) {
         <div>
           <div class="node-name">${escapeHtml(node.name)}</div>
           <span class="node-region">${escapeHtml(node.region)}</span>
-          <span class="node-endpoint">${escapeHtml(node.endpoint)}</span>
+          <span class="node-endpoint">${escapeHtml(LEGACY_NODE_CONNECTIONS_ENABLED ? node.endpoint : "私有 DevTunnel")}</span>
         </div>
         <span class="status-pill ${escapeHtml(node.status)}">${escapeHtml(node.id === "local" && node.status === "offline" ? "未连接" : statusLabel(node.status))}</span>
       </div>
@@ -765,17 +775,17 @@ function renderNodes(data) {
         <div class="section-header">
           <div>
             <h2 class="section-heading">节点分布</h2>
-            <p class="section-subtitle">每个 copilot-api 实例独立记录本机经过的请求</p>
+            <p class="section-subtitle">每个 Codey 节点的模型网关独立记录经过的请求</p>
           </div>
           <div class="section-actions node-onboarding-actions">
             <span class="section-badge">${data.nodes.length} 个已选节点</span>
-            <button
+            ${LEGACY_NODE_CONNECTIONS_ENABLED ? `<button
               type="button"
               class="secondary-button"
               data-open-provision
               ${state.provisioning ? "disabled" : ""}
-            >${state.provisioning ? "部署中…" : "添加机器"}</button>
-            <a class="node-skill-download" href="/settings#add-node" title="下载包含依赖和本人机器身份的完整 Skill，配置服务与 VNet 后再添加">↓ 完整机器配置 Skill</a>
+            >${state.provisioning ? "部署中…" : "添加机器"}</button>` : ""}
+            <a class="node-skill-download" href="/settings#add-node" title="安装 Codey npm 包并配置私有 DevTunnel，上传本机注册文件后添加">＋ 添加 Codey 节点</a>
           </div>
         </div>
         <div class="node-grid">
@@ -1100,11 +1110,13 @@ function renderStatus(data) {
   const affected = data.nodes.filter((node) => node.status !== "online");
   const notices = [];
   const localNode = data.nodes.find((node) => node.id === "local");
-  const localUnavailable =
+  const localUnavailable = LEGACY_NODE_CONNECTIONS_ENABLED &&
     state.directMode && state.connectionMode !== "vnet" && localNode && localNode.status !== "online";
-  elements.localConnectButton.hidden = !localUnavailable;
-  elements.localConnectButton.disabled = false;
-  elements.localConnectButton.textContent = "重试本机节点";
+  if (elements.localConnectButton) {
+    elements.localConnectButton.hidden = !localUnavailable;
+    elements.localConnectButton.disabled = false;
+    elements.localConnectButton.textContent = "重试本机节点";
+  }
   if (localUnavailable) {
     notices.push(
       '<div class="notice">“本机”是当前打开浏览器的电脑，不是其他电脑。需在这台电脑运行 copilot-api HTTPS :8443、信任证书并允许 Local network access。“重试”不会安装或启动服务。非 corpnet 访问远程节点，请勾选刷新按钮旁的 VNet。</div>',
@@ -2104,7 +2116,7 @@ function provisionTemplateNodes() {
 }
 
 function openProvisionDialog({ preserveValues = false, errorMessage = "" } = {}) {
-  if (state.clientConfig?.managedAccounts) {
+  if (!LEGACY_NODE_CONNECTIONS_ENABLED || state.clientConfig?.managedAccounts) {
     window.location.assign("/settings#add-node");
     return;
   }
@@ -2230,7 +2242,7 @@ async function fetchOverview(forceRefresh, { interactiveLocal = false, connectio
     setLoading(false);
     elements.loadingState.hidden = true;
     elements.dashboard.hidden = false;
-    elements.dashboard.innerHTML = '<section class="empty-state">你还没有可访问的节点。<a href="/settings#add-node">下载完整机器配置 Skill → 配置机器与 VNet → 验通后添加</a></section>';
+    elements.dashboard.innerHTML = '<section class="empty-state">你还没有可访问的 DevTunnel 节点。<a href="/settings#add-node">安装 Codey → 配置私有 DevTunnel → 验通后添加</a></section>';
     setConnectionLabel("暂无节点");
     return;
   }
@@ -2283,6 +2295,7 @@ async function initialize() {
     try {
       config = await refreshClientNodes(true);
     } catch (error) {
+      if (!LEGACY_NODE_CONNECTIONS_ENABLED) throw error;
       config = await fetchJson("/api/nodes");
       state.nodes = config.nodes;
       state.refreshSeconds = config.refreshSeconds;
@@ -2298,7 +2311,7 @@ async function initialize() {
     const availableIds = new Set(connectionNodes().map((node) => node.id));
     const validRequested = [...requestedNodes].filter((id) => availableIds.has(id));
     if (
-      state.directMode &&
+      LEGACY_NODE_CONNECTIONS_ENABLED && state.directMode &&
       state.connectionMode === "direct" &&
       availableIds.has("local") &&
       !requestedNodes.has("local")
@@ -2329,6 +2342,7 @@ async function initialize() {
 }
 
 async function onConnectionModeChange(event) {
+  if (!LEGACY_NODE_CONNECTIONS_ENABLED) return;
   const selectedAll = connectionNodes().every((node) => state.selectedNodes.has(node.id));
   state.connectionMode = event.currentTarget.checked ? "vnet" : "direct";
   saveConnectionMode(preferenceStorage, state.connectionMode);
@@ -2362,7 +2376,7 @@ async function onConnectionModeChange(event) {
   clearHistorySelection();
   state.data = null;
   setLoading(false);
-  elements.localConnectButton.hidden = true;
+  if (elements.localConnectButton) elements.localConnectButton.hidden = true;
   renderConnectionOptions();
   renderControls();
   updateUrl();
@@ -2420,7 +2434,8 @@ elements.periodSwitcher.addEventListener("click", (event) => {
 });
 
 elements.refreshButton.addEventListener("click", () => fetchOverview(true));
-elements.localConnectButton.addEventListener("click", async () => {
+elements.localConnectButton?.addEventListener("click", async () => {
+  if (!LEGACY_NODE_CONNECTIONS_ENABLED) return;
   elements.localConnectButton.disabled = true;
   elements.localConnectButton.textContent = "正在连接本机…";
   await fetchOverview(true, { interactiveLocal: true });

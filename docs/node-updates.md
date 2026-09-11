@@ -5,6 +5,18 @@ The Portal brokers **desired package versions**, not remote shell commands. An i
 master, model credential, release signing private key, or new inbound management port is
 distributed to nodes. Windows local copilot-api is excluded.
 
+## Current Portal UI
+
+Settings presents only the single **Codey npm package**. The node overview reads
+`components.codey` from the owner-bound updater heartbeat, never from a desired
+release or a standalone Workspace version. Missing reports remain explicitly unknown.
+
+The release picker and confirmation dialog offer only whole-Codey releases.
+Legacy component releases remain supported by the backend, but are not selectable
+in the UI. Older node layouts are shown as needing migration; they are not silently
+treated as Codey installations or submitted for a cross-layout update. Selection,
+batch canaries, owner checks, offline waiting and confirmation still apply.
+
 ## Release once, update many
 
 1. For npm-layout nodes, build/test one Codey npm package with `npm run codey:build`.

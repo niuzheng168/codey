@@ -95,3 +95,69 @@ test("VNet cannot silently fall back to direct or forward cookies to an arbitrar
   }
   assert.equal(requests, 0);
 });
+
+test("DevTunnel usage excludes direct/VNet/local entries and only sends authenticated same-origin requests", async () => {
+  const tunnel = { ...remote, id: "tunnel", networkMode: "devtunnel", proxyEndpoint: "/api/node-data/tunnel/usage" };
+  const invalidLocal = { ...local, networkMode: "devtunnel", proxyEndpoint: "/api/node-data/local/usage" };
+  const seen = [];
+  const result = await collectClientOverview([local, remote, invalidLocal, tunnel], config, "day", {
+    connectionMode: "devtunnel",
+    fetchImpl: async (url, options) => {
+      seen.push({ url: String(url), options });
+      return Response.json({ totals: { total_tokens: 42 }, days: [], items: [] });
+    },
+  });
+  assert.deepEqual(result.selectedNodeIds, ["tunnel"]);
+  assert.equal(result.aggregate.totals.total_tokens, 42);
+  assert.equal(seen.length, 4);
+  for (const { url, options } of seen) {
+    assert.ok(url.startsWith("/api/node-data/tunnel/"));
+    assert.equal(options.mode, "same-origin");
+    assert.equal(options.credentials, "same-origin");
+    assert.equal(options.headers.authorization, undefined);
+    assert.equal(options.targetAddressSpace, undefined);
+  }
+});
+
+test("DevTunnel failures cannot fall back to VNet/direct or request browser-local access", async () => {
+  let requests = 0;
+  const fetchImpl = async () => { requests++; throw new Error("Unexpected direct request"); };
+  for (const node of [
+    local, remote, { ...remote, networkMode: "vnet" },
+    { ...remote, networkMode: "devtunnel", proxyEndpoint: null },
+    { ...remote, networkMode: "devtunnel", proxyEndpoint: "https://evil.example/usage" },
+    { ...local, networkMode: "devtunnel", proxyEndpoint: "/api/node-data/local/usage" },
+  ]) {
+    await assert.rejects(fetchNodeJson(node, node.endpoint, { connectionMode: "devtunnel", fetchImpl }), /DevTunnel/);
+  }
+  assert.equal(requests, 0);
+  const tunnel = { ...remote, networkMode: "devtunnel" };
+  const result = await collectClientOverview([tunnel], config, "day", {
+    connectionMode: "devtunnel", fetchImpl: async () => Response.json({ error: "denied" }, { status: 401 }),
+  });
+  assert.equal(result.status.offline, 1);
+  assert.match(JSON.stringify(result.nodes[0].errors), /门户登录已失效/);
+  assert.doesNotMatch(JSON.stringify(result.nodes[0].errors), /直连|VNet/);
+});
+
+test("the retained history client uses DevTunnel routes without exposing legacy sources", async () => {
+  const tunnel = { ...remote, networkMode: "devtunnel" };
+  const seen = [];
+  const fetchImpl = async (url, options) => {
+    seen.push({ url, options });
+    return Response.json({ items: [], total: 0, session: { session_name: "test-session" } });
+  };
+  const result = await fetchClientHistoryList({
+    nodes: [local, { ...remote, id: "old" }, tunnel], source: "all", state: "all", query: "",
+    limit: 20, offset: 0, range: "all", connectionMode: "devtunnel", fetchImpl,
+    serverFetch: async () => ({ items: [], total: 0, has_more: false }),
+  });
+  assert.deepEqual(result.sources.map(source => source.id), ["all", "shared", "jpe2"]);
+  await fetchClientHistoryDetail({
+    nodes: [local, tunnel], sourceId: "jpe2", state: "active", sessionName: "test-session",
+    connectionMode: "devtunnel", fetchImpl,
+  });
+  assert.equal(seen.length, 2);
+  assert.ok(seen.every(request => request.url.startsWith("/api/node-data/jpe2/") &&
+    request.options.credentials === "same-origin" && !request.options.headers.authorization));
+});

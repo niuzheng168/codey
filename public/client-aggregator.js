@@ -148,16 +148,18 @@ function endpointWithQuery(endpoint, searchParams) {
 }
 
 function errorMessage(error, connectionMode = "direct") {
+  const portal = connectionMode === "vnet" || connectionMode === "devtunnel";
   if (error?.name === "AbortError" || error?.name === "TimeoutError") {
     return "请求超时";
   }
   if (Number.isInteger(error?.status)) {
     if (error.status === 401 || error.status === 403) {
-      return connectionMode === "vnet" ? "门户登录已失效" : `直连票据无效（HTTP ${error.status}）`;
+      return portal ? "门户登录已失效" : `直连票据无效（HTTP ${error.status}）`;
     }
     if (error.status === 404) return "节点不支持此接口（HTTP 404）";
-    return `${connectionMode === "vnet" ? "ACA" : "节点"}返回 HTTP ${error.status}`;
+    return `${portal ? "门户" : "节点"}返回 HTTP ${error.status}`;
   }
+  if (connectionMode === "devtunnel") return "无法通过私有 DevTunnel 连接节点";
   return connectionMode === "vnet" ? "无法通过 ACA 连接节点" : "浏览器无法直连节点";
 }
 

@@ -3,16 +3,18 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 import { settingsDom } from "./helpers/settings-dom.mjs";
+import { LEGACY_NODE_CONNECTIONS_ENABLED } from "../public/portal-features.js";
 
-const source = await readFile(new URL("../public/settings.js", import.meta.url), "utf8");
+const source = (await readFile(new URL("../public/settings.js", import.meta.url), "utf8")).replace(/^import .*;\r?\n/gm, "");
 const tick = () => new Promise(setImmediate);
 const ownedNode = {
   id: "alpha", name: "Alpha", region: "Japan East", endpoint: "https://alpha.example.test:8443/usage",
-  accent: "#60a5fa", vnetAvailable: true, workspaceAvailable: true, managedLegacy: false,
+  accent: "#60a5fa", networkMode: "devtunnel", vnetOnly: true, vnetAvailable: true, workspaceAvailable: true, managedLegacy: false,
 };
 const machineId = `n-${"a".repeat(24)}`;
 
-async function page({ role = "user", hash = "", nodes = [ownedNode], pending = [], respond, waitForSettings } = {}) {
+async function page({ role = "user", hash = "", nodes = [ownedNode], pending = [], respond, waitForSettings,
+  legacyConnections = LEGACY_NODE_CONNECTIONS_ENABLED } = {}) {
   const dom = settingsDom();
   const requests = [];
   const redirects = [];
@@ -23,7 +25,7 @@ async function page({ role = "user", hash = "", nodes = [ownedNode], pending = [
   const state = {
     user: { role }, nodes: structuredClone(nodes), pendingMachines: pending,
     machineSetup: { enabled: true, npmAvailable: true, npmFile: "codey-0.1.0.tgz",
-      bytes: 4194304, node: "24.20.0", cloudcli: "1.37.2", copilotApi: "2.5.1" },
+      bytes: 4194304, node: "24.20.0", codey: "0.1.0", cloudcli: "1.37.2", copilotApi: "2.5.1" },
   };
   const users = [{ id: "owner", username: "demo", role: "admin", enabled: true },
     { id: "member", username: "alice", role: "user", enabled: true }];
@@ -38,6 +40,7 @@ async function page({ role = "user", hash = "", nodes = [ownedNode], pending = [
   };
   runInNewContext(source, {
     document: dom.document, window, FormData: dom.FormData, CustomEvent, URL,
+    LEGACY_NODE_CONNECTIONS_ENABLED: legacyConnections,
     BroadcastChannel: class {
       constructor(name) { this.name = name; }
       postMessage(value) { broadcasts.push([this.name, value]); }
@@ -202,8 +205,9 @@ test("legacy pending identities are ignored because static Skill downloads do no
   assert.match(p.get("add-node").textContent, /无需解压 ZIP/);
 });
 
-test("collapsed nodes preserve all editable fields, VNet address restrictions and text-only rendering", async () => {
-  const p = await page({ nodes: [{ ...ownedNode, name: "<img src=x onerror=evil()>", vnetOnly: true }] });
+test("the retained legacy editor still preserves its address restrictions behind the disabled UI flag", async () => {
+  const p = await page({ legacyConnections: true,
+    nodes: [{ ...ownedNode, name: "<img src=x onerror=evil()>", networkMode: "vnet", vnetOnly: true }] });
   const row = p.get("my-nodes").children[0];
   assert.match(row.querySelector("summary").textContent, /<img src=x onerror=evil\(\)>/);
   assert.match(row.querySelector("summary").textContent, /VNet 专用.*Workspace 已配置/);
@@ -215,6 +219,18 @@ test("collapsed nodes preserve all editable fields, VNet address restrictions an
   assert.equal(row.querySelectorAll("button").some((button) => button.textContent === "移除节点"), true);
 });
 
+test("the shipped node editor exposes only DevTunnel, display settings and the single Codey package", async () => {
+  const p = await page({ nodes: [{ ...ownedNode, name: "<img src=x onerror=evil()>" }] });
+  const row = p.get("my-nodes").children[0];
+  assert.match(row.querySelector("summary").textContent, /DevTunnel.*Workspace 已配置/);
+  assert.deepEqual(row.querySelectorAll("input").map(input => input.name), ["name", "region", "accent"]);
+  assert.equal(row.querySelectorAll("img").length, 0);
+  assert.equal(row.querySelector(".node-endpoint-field"), null);
+  assert.doesNotMatch(row.textContent, /VNet|浏览器直连|接入资料|https:\/\//);
+  assert.match(p.get("machine-package-status").textContent, /Codey 0\.1\.0（统一 npm 包）/);
+  assert.doesNotMatch(p.get("add-node").textContent, /CloudCLI|copilot-api|VNet|直连/i);
+});
+
 test("saving a node uses the original owner-scoped API, keeps its editor open and restores keyboard focus", async () => {
   const p = await page();
   const row = p.get("my-nodes").children[0];
@@ -223,13 +239,14 @@ test("saving a node uses the original owner-scoped API, keeps its editor open an
   await p.submit(row.querySelector("form"));
   const save = p.requests.find((request) => request.method === "PUT");
   assert.equal(save.url, "/api/settings/nodes/alpha");
-  assert.deepEqual(save.data, { name: "Renamed", region: ownedNode.region, accent: ownedNode.accent, endpoint: "https://alpha.example.test:8443" });
+  assert.deepEqual(save.data, { name: "Renamed", region: ownedNode.region, accent: ownedNode.accent });
+  assert.equal(p.state.nodes[0].endpoint, ownedNode.endpoint, "Display edits preserve the saved connection configuration");
   assert.equal(p.get("my-nodes").children[0].open, true);
   assert.equal(p.document.activeElement, p.get("my-nodes").children[0].querySelector("summary"));
   assert.match(p.get("settings-message").textContent, /已保存/);
 });
 
-test("node summaries, hover text and editors show the service origin rather than an API path", async () => {
+test("legacy node summaries and editors retain service origins when their compatibility UI is explicitly enabled", async () => {
   for (const [endpoint, origin] of [
     ["https://alpha.example.test:8443/usage", "https://alpha.example.test:8443"],
     ["https://alpha.example.test:8443/", "https://alpha.example.test:8443"],
@@ -237,7 +254,7 @@ test("node summaries, hover text and editors show the service origin rather than
     ["https://alpha.example.test:8443/v1/models", "https://alpha.example.test:8443"],
     ["https://[::1]:8443/usage", "https://[::1]:8443"],
   ]) {
-    const p = await page({ nodes: [{ ...ownedNode, endpoint }] });
+    const p = await page({ legacyConnections: true, nodes: [{ ...ownedNode, endpoint }] });
     const row = p.get("my-nodes").children[0];
     assert.equal(row.querySelector(".node-endpoint").textContent, origin);
     assert.equal(row.querySelector(".node-endpoint").title, origin);
@@ -248,10 +265,22 @@ test("node summaries, hover text and editors show the service origin rather than
 });
 
 test("one malformed legacy address remains editable without hiding the rest of the node list", async () => {
-  const p = await page({ nodes: [{ ...ownedNode, endpoint: "invalid-address" }, { ...ownedNode, id: "beta" }] });
+  const p = await page({ legacyConnections: true, nodes: [{ ...ownedNode, endpoint: "invalid-address" }, { ...ownedNode, id: "beta" }] });
   assert.equal(p.get("my-nodes").children.length, 2);
   assert.equal(p.get("my-nodes").children[0].querySelector('[name="endpoint"]').value, "invalid-address");
   assert.equal(p.get("my-nodes").children[1].querySelector(".node-endpoint").textContent, "https://alpha.example.test:8443");
+});
+
+test("old connection records remain manageable but never expose a direct or VNet entry in the shipped UI", async () => {
+  const p = await page({ nodes: [
+    { ...ownedNode, networkMode: "vnet", endpoint: "https://10.0.0.7:8443/usage" },
+    { ...ownedNode, id: "local", networkMode: "direct", endpoint: "https://127.0.0.1:8443/usage" },
+  ] });
+  assert.equal(p.get("my-nodes").children.length, 2);
+  assert.match(p.get("my-nodes").textContent, /待接入 DevTunnel/);
+  assert.doesNotMatch(p.get("my-nodes").textContent, /VNet|直连|浏览器设备|127\.0\.0\.1|10\.0\.0\.7/);
+  assert.equal(p.get("my-nodes").querySelector('[name="endpoint"]'), null);
+  assert.ok(p.requests.every(request => request.method === "GET"));
 });
 
 test("node removal still requires confirmation and never sends a service lifecycle request", async () => {
@@ -270,7 +299,7 @@ test("node removal still requires confirmation and never sends a service lifecyc
 });
 
 test("enrollment credentials are fetched only on demand and are erased for every dialog close path", async () => {
-  const p = await page();
+  const p = await page({ legacyConnections: true });
   assert.equal(p.requests.some((request) => request.url.endsWith("/enrollment")), false);
   const credentials = p.get("my-nodes").children[0].querySelectorAll("button").find((button) => button.textContent === "查看本节点接入资料");
   await credentials.click();

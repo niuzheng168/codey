@@ -149,6 +149,11 @@ export class NodeDataGateway {
       : null;
   }
 
+  networkMode(nodeId, allowedIds) {
+    if (!this.endpoint(nodeId, allowedIds)) return null;
+    return this.nodes.get(nodeId).devTunnel ? "devtunnel" : "vnet";
+  }
+
   async handle(req, res, allowedIds) {
     const url = new URL(req.url, "http://portal.local");
     if (!url.pathname.startsWith("/api/node-data/")) return false;

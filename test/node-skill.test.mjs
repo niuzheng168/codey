@@ -246,7 +246,7 @@ test("add-machine and empty-node entry points only expose the verified automatic
   assert.doesNotMatch(styles, /manual-node-setup|node-skill-tools|\.skill-download|\.skill-checksum|\.skill-install/);
   assert.ok(app.includes('window.location.assign("/settings#add-node")'));
   assert.ok(app.match(/node-onboarding-actions[\s\S]*?<\/div>/)?.[0].includes('href="/settings#add-node"'));
-  assert.ok(app.match(/elements\.dashboard\.innerHTML = '<section class="empty-state">[^\n]+/)?.[0].includes("完整机器配置 Skill"));
+  assert.ok(app.match(/elements\.dashboard\.innerHTML = '<section class="empty-state">[^\n]+/)?.[0].includes("安装 Codey"));
   assert.ok(settings.includes('action="/api/settings/machines/npm" method="post"'));
   assert.ok(settings.includes('action="/api/settings/machines/installer" method="post"'));
   assert.match(settings, /无需解压 ZIP/);
@@ -254,7 +254,7 @@ test("add-machine and empty-node entry points only expose the verified automatic
 });
 
 test("add-node navigation waits for async node rendering and does not open on ordinary settings visits", async () => {
-  const source = await readFile(path.resolve("public/settings.js"), "utf8");
+  const source = (await readFile(path.resolve("public/settings.js"), "utf8")).replace(/^import .*;\r?\n/gm, "");
   for (const hash of ["#add-node", "#nodes", ""]) {
     const events = [];
     const nodes = new Map();
@@ -279,7 +279,7 @@ test("add-node navigation waits for async node rendering and does not open on or
     let releaseResponse;
     const gate = new Promise((resolve) => { releaseResponse = resolve; });
     runInNewContext(source, {
-      window, document,
+      window, document, LEGACY_NODE_CONNECTIONS_ENABLED: false,
       fetch: async () => {
         await gate;
         events.push("response");

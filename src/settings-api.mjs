@@ -55,6 +55,8 @@ export class SettingsApi {
         releaseId: metadata?.releaseId ?? null,
         ...(health ? { workspaceHealth: health, updaterStatus } : {}),
         components: {
+          // A standalone Workspace health version is not a Codey package version.
+          codey: metadata?.components.codey ?? null,
           cloudcli: health?.reachable && health.version
             ? { version: health.version, commit: null, nodeMajor: null, source: "workspace_health" }
             : metadata?.components.cloudcli ?? null,
@@ -97,6 +99,7 @@ export class SettingsApi {
           user: publicAccount(account),
           nodes: nodes.map((node) => ({
             ...node, vnetAvailable: Boolean(this.nodeDataGateway?.endpoint(node.id, ids)),
+            networkMode: this.nodeDataGateway?.networkMode?.(node.id, ids) ?? node.networkMode ?? "direct",
             workspaceAvailable: workspaces.has(node.id),
           })),
           machineSetup: this.machineSetup ? await this.machineSetup.availability(undefined, principal.id) : { enabled: false },

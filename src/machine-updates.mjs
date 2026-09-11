@@ -190,7 +190,7 @@ export class MachineUpdates {
           : age === null ? "unreported" : age < 0 ? "unknown"
             : age < HEARTBEAT_TIMEOUT_MS ? "online" : "stale";
         // Explicit, narrower allowlist than the owner's updater report.
-        const components = Object.fromEntries(["cloudcli", "copilotApi"].map((name) => {
+        const components = Object.fromEntries(["codey", "cloudcli", "copilotApi"].map((name) => {
           const component = device?.report?.components?.[name];
           return [name, component ? {
             version: component.version, commit: component.commit || null, nodeMajor: component.nodeMajor,

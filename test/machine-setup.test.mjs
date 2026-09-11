@@ -244,6 +244,12 @@ test("the independently published Linux Skill streams unchanged and activates on
   assert.equal(node.platform, "linux-x64");
   assert.equal(f.workspace.match(`/cloudcli/${node.id}/`).devTunnel.port, 3001);
   assert.equal(f.data.nodes.get(node.id).devTunnel.port, 8443);
+  const clientNodes = (await (await f.request("/api/client-nodes")).json()).nodes;
+  assert.equal(clientNodes.find(item => item.id === node.id).networkMode, "devtunnel");
+  const settingsNodes = (await (await f.request("/api/settings")).json()).nodes;
+  assert.equal(settingsNodes.find(item => item.id === node.id).networkMode, "devtunnel");
+  const workspaceNodes = (await (await f.request("/api/cloudcli/nodes")).json()).nodes;
+  assert.equal(workspaceNodes.find(item => item.id === node.id).networkMode, "devtunnel");
   assert.equal(await f.policy.keyFor(f.member.id, node.id), credentials.clientSigningKey);
   assert.deepEqual(await f.policy.workspaceBindingFor(f.member.id, node.id), {
     key: credentials.workspaceSsoKey,

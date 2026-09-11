@@ -35,7 +35,7 @@
         <div class="panel-heading">
           <div>
             <h2 id="nodes-heading">我的节点</h2>
-            <p class="muted">查看节点服务入口，展开节点以编辑设置。</p>
+            <p class="muted">通过私有 DevTunnel 连接 Codey 节点，展开以编辑名称与显示设置。</p>
           </div>
           <button id="open-add-node" class="primary" type="button" aria-haspopup="dialog" aria-controls="add-node">＋ 添加节点</button>
         </div>
@@ -46,13 +46,13 @@
       <section id="machine-updates" class="settings-panel" role="tabpanel" aria-labelledby="updates-tab" tabindex="0" hidden>
         <div class="panel-heading">
           <div>
-            <h2 id="machine-updates-heading">机器软件更新</h2>
-            <p class="muted">先预览，再确认。仅更新你拥有的机器，受保护节点不参与。</p>
+            <h2 id="machine-updates-heading">Codey 软件更新</h2>
+            <p class="muted">统一更新 Codey npm 包，Workspace 与模型网关一起切换。先预览，再确认；仅更新你拥有的机器。</p>
           </div>
           <button id="node-update-refresh" class="quiet" type="button">刷新状态</button>
         </div>
         <div class="update-controls update-toolbar">
-          <label class="release-picker">目标发行版<select id="node-update-release" disabled aria-label="目标节点发行版"></select></label>
+          <label class="release-picker">目标 Codey 发行版<select id="node-update-release" disabled aria-label="目标 Codey 发行版"></select></label>
           <button id="node-update-selected" class="primary" type="button" disabled>更新选中机器</button>
           <button id="node-update-all" type="button" disabled>更新全部可升级机器</button>
         </div>
@@ -115,10 +115,10 @@
           <p class="inventory-scroll-hint muted" aria-hidden="true">左右滑动查看状态与版本 →</p>
           <div class="inventory-scroll" tabindex="0" role="region" aria-label="全局节点版本表，可横向滚动" aria-describedby="admin-node-help">
             <table class="inventory-table">
-              <caption>所属用户、节点在线依据与实际观测的软件版本</caption>
+              <caption>所属用户、节点在线依据与实际观测的 Codey npm 包版本</caption>
               <thead><tr>
                 <th scope="col">节点</th><th scope="col">所属用户</th><th scope="col">节点状态</th>
-                <th scope="col">CloudCLI <span class="muted">节点端</span></th><th scope="col">copilot-api</th>
+                <th scope="col">Codey <span class="muted">npm 包</span></th>
               </tr></thead>
               <tbody id="admin-node-list"></tbody>
             </table>
@@ -131,7 +131,7 @@
               <button id="admin-node-next" class="quiet" type="button" aria-label="下一页节点" disabled>下一页</button>
             </div>
           </div>
-          <p id="admin-node-help" class="panel-footnote">心跳仅代表升级器近期上报，不代表模型或服务健康。未接入升级器的受信任节点另用 Workspace 健康检查判断可达性，不伪造心跳；检查成功也不代表模型已登录。版本只来自节点上报或健康接口，不使用目标发行版填充。共享 Workspace UI 独立发布。此总览不提供连接、会话、密钥或跨用户更新权限。</p>
+          <p id="admin-node-help" class="panel-footnote">心跳仅代表升级器近期上报，不代表模型或服务健康。未接入升级器的受信任节点另用 Workspace 健康检查判断可达性，不伪造心跳；检查成功也不代表模型已登录。Codey 版本只使用节点实际的包版本上报，不以旧组件版本或目标发行版代替。此总览不提供连接、会话、密钥或跨用户更新权限。</p>
         </section>
 
         <section id="admin-users-panel" role="tabpanel" aria-labelledby="admin-users-tab" tabindex="0" hidden>
@@ -223,13 +223,13 @@
 
       <dialog id="enrollment" aria-labelledby="enrollment-title">
         <h2 id="enrollment-title">本节点接入资料</h2>
-        <p class="muted">只复制到你自己的节点，不要分享这些密钥。既有 zhn 节点无需改动；新节点的 Workspace 还需部署 CloudCLI 并由运维配置可信私网网关。</p>
+        <p class="muted">只复制到你自己的节点，不要分享这些密钥。新节点请使用 Codey 一键安装器配置私有 DevTunnel 并导入注册文件。</p>
         <pre id="enrollment-value"></pre>
         <button id="hide-enrollment" type="button" autofocus>隐藏接入资料</button>
       </dialog>
 
       <dialog id="node-update-confirm" aria-labelledby="node-update-confirm-title" aria-describedby="node-update-confirm-help">
-        <h2 id="node-update-confirm-title">确认机器升级计划</h2>
+        <h2 id="node-update-confirm-title">确认 Codey 整包升级计划</h2>
         <p id="node-update-plan-note"></p>
         <div id="node-update-plan-targets"></div>
         <p id="node-update-confirm-help" class="muted">升级会短暂停止受影响的服务，并验证 Codey/Codex 模型调用（可能产生少量用量）。请先结束原生 Codex 任务。离线/忙碌机器会等待；未知迁移不会被强行执行。</p>

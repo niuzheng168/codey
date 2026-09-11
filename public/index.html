@@ -7,7 +7,7 @@
     <meta name="theme-color" content="#080b12" />
     <meta
       name="description"
-      content="聚合本机与远程 copilot-api 节点的 Codex token 用量。"
+      content="通过私有 DevTunnel 聚合 Codey 节点的 Codex token 用量。"
     />
     <title>Codey</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -47,7 +47,6 @@
         <div class="topbar-status">
           <span class="pulse-dot" aria-hidden="true"></span>
           <span id="connection-label">正在连接节点</span>
-          <button id="local-connect-button" type="button" hidden>重试本机节点</button>
           <span id="portal-account-name"></span>
           <a id="portal-settings" href="/settings" hidden>账号与节点</a>
           <button id="portal-logout" type="button" hidden>退出登录</button>
@@ -56,14 +55,13 @@
     </header>
 
     <main class="page-shell">
-      <span id="node-connection-help" class="sr-only">默认浏览器直连。勾选后 Usage 通过 ACA / VNet 连接远程节点，不访问本机；Workspace 始终走云端网关，使用 VNet 或私有 DevTunnel。</span>
       <div id="usage-view">
         <section class="hero" aria-labelledby="page-heading">
           <div>
             <p class="eyebrow">UNIFIED OBSERVABILITY</p>
             <h1 id="page-heading">一处掌握所有 Codex 用量</h1>
             <p class="hero-copy">
-              聚合本机与远程 copilot-api 节点，按机器、日期和模型追踪 token、请求与估算成本。
+              通过私有 DevTunnel 汇总 Codey 节点，按机器、日期和模型追踪 token、请求与估算成本。
             </p>
           </div>
 
@@ -96,10 +94,6 @@
               </svg>
               <span>刷新</span>
             </button>
-            <label id="node-connection-options" class="node-connection-choice" data-node-connection-option title="默认浏览器直连；勾选后经 ACA / VNet 连接远程节点（不含本机）。Workspace 不受影响。" hidden>
-              <input id="vnet-connection-toggle" type="checkbox" data-vnet-connection-toggle aria-label="通过 ACA / VNet 连接远程节点" aria-describedby="node-connection-help" />
-              <span>VNet</span>
-            </label>
           </div>
         </section>
 
@@ -184,10 +178,6 @@
               <button id="history-refresh" class="secondary-button" type="button">
                 刷新
               </button>
-              <label id="history-node-connection-options" class="node-connection-choice" data-node-connection-option title="默认浏览器直连；勾选后经 ACA / VNet 连接远程节点（不含本机）。Workspace 不受影响。" hidden>
-                <input id="history-vnet-connection-toggle" type="checkbox" data-vnet-connection-toggle aria-label="通过 ACA / VNet 连接远程节点" aria-describedby="node-connection-help" />
-                <span>VNet</span>
-              </label>
             </div>
           </form>
         </section>
@@ -219,11 +209,11 @@
       <section id="workspace-view" class="workspace-view" hidden>
         <div class="workspace-hero">
           <div>
-            <p class="eyebrow">CODEY CLOUDCLI WORKSPACE</p>
-            <h1>CloudCLI</h1>
+            <p class="eyebrow">CODEY WORKSPACE</p>
+            <h1>Codey Workspace</h1>
             <p class="hero-copy">
-            Codey 完成登录和节点授权，然后通过 Azure VNet 或私有 DevTunnel 打开节点上运行的
-              CloudCLI。使用当前 Codey 会话，无需再次登录节点。
+              Codey 完成登录和节点授权，通过私有 DevTunnel 打开节点上的 Workspace。
+              使用当前 Codey 会话，无需再次登录节点。
             </p>
           </div>
           <span id="workspace-connection" class="section-badge">尚未连接</span>
@@ -231,7 +221,7 @@
 
         <div id="workspace-status" class="status-region" aria-live="polite"></div>
 
-        <section class="cloudcli-launcher" aria-label="CloudCLI 节点">
+        <section class="cloudcli-launcher" aria-label="Codey Workspace 节点">
           <label>
             <span>节点</span>
             <select id="cloudcli-node">
@@ -259,11 +249,11 @@
 
         <div class="cloudcli-frame-shell">
           <div id="cloudcli-empty" class="cloudcli-empty">
-            正在准备 CloudCLI…
+            正在准备 Codey Workspace…
           </div>
           <iframe
             id="cloudcli-frame"
-            title="CloudCLI node workspace"
+            title="Codey node workspace"
             allow="clipboard-read; clipboard-write; microphone 'self'"
             referrerpolicy="no-referrer"
             hidden
@@ -387,7 +377,7 @@
 
     <footer class="footer">
       <span>Codey</span>
-      <span>数据由各 copilot-api 节点实时汇总</span>
+      <span>数据由各 Codey 节点实时汇总</span>
     </footer>
   </body>
 </html>

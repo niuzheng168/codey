@@ -207,11 +207,11 @@ dialog > h2 { margin-bottom: 12px; }
 #admin-node-message.error { color: #fda4af; }
 .inventory-scroll { overflow-x: auto; overscroll-behavior-x: contain; }
 .inventory-scroll-hint { display: none; font-size: 12px; margin-bottom: 8px; }
-.inventory-table { width: 100%; min-width: 700px; border-collapse: collapse; table-layout: fixed; text-align: left; font-size: 13px; }
+.inventory-table { width: 100%; min-width: 640px; border-collapse: collapse; table-layout: fixed; text-align: left; font-size: 13px; }
 .inventory-table caption { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .inventory-table th { padding: 8px; color: var(--muted); font-size: 12px; font-weight: 500; background: #0c1422; }
-.inventory-table th:first-child { width: 26%; }
-.inventory-table th:nth-child(2) { width: 14%; }
+.inventory-table th:first-child { width: 30%; }
+.inventory-table th:nth-child(2) { width: 18%; }
 .inventory-table td { padding: 12px 8px; vertical-align: top; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
 .inventory-table td > strong, .inventory-table td > span, .inventory-table td > code { display: block; }
 .inventory-table td > strong { font-weight: 500; }

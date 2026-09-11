@@ -5,7 +5,7 @@ import { runInNewContext } from "node:vm";
 import { once } from "node:events";
 import { createPortalServer } from "../src/server.mjs";
 import { validateConfig } from "../src/config.mjs";
-import { PORTAL_VIEWS, SESSION_HISTORY_ENABLED, resolvePortalView } from "../public/portal-features.js";
+import { LEGACY_NODE_CONNECTIONS_ENABLED, PORTAL_CONNECTION_MODE, PORTAL_VIEWS, SESSION_HISTORY_ENABLED, resolvePortalView } from "../public/portal-features.js";
 
 test("shipped Portal exposes Usage and Workspace, while old history links fall back to Usage", () => {
   assert.equal(SESSION_HISTORY_ENABLED, false);
@@ -65,7 +65,7 @@ test("history deep links and synthetic clicks cannot activate the retained view 
   const tabs = ["usage", "sessions", "workspace"].map((portalView) => element({ portalView }));
   let historyRequests = 0;
   const context = {
-    PORTAL_VIEWS, resolvePortalView, URL, URLSearchParams, console,
+    LEGACY_NODE_CONNECTIONS_ENABLED, PORTAL_CONNECTION_MODE, PORTAL_VIEWS, resolvePortalView, URL, URLSearchParams, console,
     readConnectionMode: () => "direct", saveConnectionMode() {}, nodesForConnection: (value) => value,
     document: {
       documentElement: { dataset: {} },

@@ -3,8 +3,9 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 import { settingsDom } from "./helpers/settings-dom.mjs";
+import { LEGACY_NODE_CONNECTIONS_ENABLED } from "../public/portal-features.js";
 
-const source = await readFile(new URL("../public/settings.js", import.meta.url), "utf8");
+const source = (await readFile(new URL("../public/settings.js", import.meta.url), "utf8")).replace(/^import .*;\r?\n/gm, "");
 const nodeId = `n-${"a".repeat(24)}`;
 const filename = "codey-0.1.0.tgz";
 const endpoint = "/api/settings/machines/npm";
@@ -47,7 +48,7 @@ async function page({ download = async () => archiveResponse(), pending = [], ma
   const button = document.querySelector("#download-machine-skill");
   let settingsRequests = 0;
   runInNewContext(source, {
-    document,
+    document, LEGACY_NODE_CONNECTIONS_ENABLED,
     CustomEvent: class {
       constructor(type, options) { this.type = type; this.detail = options?.detail; }
     },

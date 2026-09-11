@@ -671,7 +671,7 @@ export function createPortalServer(options) {
 
       if (url.pathname === "/api/client-nodes") {
         if (!clientRelaySigningKey || clientRelaySigningKey.length < 32) {
-          sendJson(res, 503, { error: "Direct node access is not configured" });
+          sendJson(res, 503, { error: "Node data access is not configured" });
           return;
         }
         const nodes = await Promise.all(activeConfig.clientNodes.map(async (node) => {
@@ -684,6 +684,7 @@ export function createPortalServer(options) {
           return {
             ...browserDataNode(node),
             proxyEndpoint: nodeDataGateway?.endpoint(node.id, dataNodeIds) ?? null,
+            networkMode: nodeDataGateway?.networkMode?.(node.id, dataNodeIds) ?? node.networkMode ?? "direct",
             ticket: ticket.token,
             ticketExpiresAt: ticket.expiresAt,
           };

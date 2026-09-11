@@ -309,6 +309,7 @@ export class CloudCliGateway {
         name: node.name,
         path: `${node.basePath}/`,
         region: node.region,
+        networkMode: node.devTunnel ? "devtunnel" : "vnet",
       }));
   }
 

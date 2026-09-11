@@ -66,7 +66,7 @@ npm test
 - [Codey 当前架构](./docs/codey-current-architecture.md)
 - [Codey VNet + CloudCLI 目标架构](./docs/codey-vnet-cloudcli-design.md)
 - [用户名密码与 Workspace SSO](./docs/codey-password-sso-design.md)
-- [浏览器直连 / ACA VNet 连接选项](./docs/codey-node-connection-modes.md)
+- [DevTunnel 默认连接与历史连接方式](./docs/codey-node-connection-modes.md)
 - [多用户与节点隔离](./docs/codey-multiuser-design.md)
 - [手动语音润色、撤销与恢复](./docs/codey-voice-rewrite.md)
 - [Workspace 前端统一发布（已上线）](./docs/codey-shared-workspace-ui.md)
@@ -75,11 +75,13 @@ npm test
 为管理员，在“账号与节点 → 用户管理”创建账号。节点设置按不可变 owner ID
 保存，新账号不继承任何节点；知道别人的节点名称也不能获得 Usage、未共享的
 Session History 或 Workspace 访问权。Shared 为所有登录用户可读的公共区。
-进入自己的 Workspace 无需二次登录。Usage / 节点 Session History 默认浏览器直连，
-可在刷新按钮旁勾选 **VNet**，供非 CorpNet 机器访问。
-选择只影响当前浏览器，不自动切换；本机节点仅在直连模式显示。
+进入自己的 Workspace 无需二次登录。当前源码 UI 统一使用私有 **DevTunnel**：
+Usage 与 Workspace 不再提供 VNet 或浏览器本地直连入口，也不沿用旧连接偏好。
+“账号与节点”的节点总览与软件更新只展示 **Codey npm 包**，按整包预览和确认更新；
+未收到 Codey 版本上报的节点明确显示未知，不用旧组件版本冒充。
 Workspace 前端已统一托管：纯 UI 更新构建、发布一次即可，API、终端及用户数据仍按节点隔离。
-下文部分 AAD / 独立 CloudCLI 登录步骤为早期或本地部署记录，以设计文档为准。
+下文 AAD、直连、VNet、独立组件安装与登录步骤保留为早期/本地兼容实现记录，
+不是当前 UI 的入口；本次界面调整不删除这些后端能力或已有节点配置。
 
 把本机和多台远程机器上的 `copilot-api` 用量汇总到一个页面。本地部署模式由
 Portal 后端并发读取每个节点；ACA 托管的 Codey 使用浏览器直连模式，由页面

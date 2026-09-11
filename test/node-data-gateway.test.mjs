@@ -83,11 +83,27 @@ test("VNet metadata is opt-in and reveals no private target or credentials; per-
   assert.deepEqual(body.connectionModes, ["direct", "vnet"]);
   assert.equal(body.nodes[0].proxyEndpoint, null);
   assert.equal(body.nodes[1].proxyEndpoint, "/api/node-data/node-a/usage");
+  assert.equal(body.nodes[0].networkMode, "direct");
+  assert.equal(body.nodes[1].networkMode, "vnet");
   assert.ok(!JSON.stringify(body).includes("10.0.0.7"));
   assert.ok(!JSON.stringify(body).includes(signingKey));
   const denied = await fetch(`${url}/api/node-data/node-a/usage`, { headers: { cookie: "owner-b" } });
   assert.equal(denied.status, 404);
   assert.equal(seen.length, 0);
+});
+
+test("client metadata identifies configured DevTunnel routes without exposing tunnel coordinates or changing legacy routing", async t => {
+  const { url, gateway, seen } = await start(t);
+  gateway.nodes.set("node-a", { ...gateway.nodes.get("node-a"),
+    devTunnel: { tunnelId: "private-tunnel-do-not-export", clusterId: "jpe1", port: 8443 } });
+  assert.equal(gateway.networkMode("node-a", []), null);
+  assert.equal(gateway.networkMode("missing", ["missing"]), null);
+  const body = await (await fetch(`${url}/api/client-nodes`, { headers: { cookie: "owner-a" } })).json();
+  assert.equal(body.nodes[1].networkMode, "devtunnel");
+  assert.equal(body.nodes[1].proxyEndpoint, "/api/node-data/node-a/usage");
+  assert.equal(body.nodes[0].networkMode, "direct");
+  assert.doesNotMatch(JSON.stringify(body), /private-tunnel-do-not-export|clusterId|10\.0\.0\.7/);
+  assert.equal(seen.length, 0, "Reading UI route metadata must not connect to any node");
 });
 
 test("VNet data authenticates with scoped tickets over verified TLS without forwarding portal credentials", async (t) => {

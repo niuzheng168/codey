@@ -10,13 +10,12 @@ const tick = () => new Promise(setImmediate);
 function data() {
   const target = { id: "release-one", sequence: 1, platform: "linux-x64", migrations: ["gateway-api-key-v1"],
     notes: "<img src=x onerror=evil()>", components: {
-      cloudcli: { version: "1.37.2", commit: "b".repeat(40), entrySha256: "b".repeat(64), nodeMajors: [24] },
-      copilotApi: { version: "2.5.1", commit: "b".repeat(40), entrySha256: "b".repeat(64), nodeMajors: [24] },
+      codey: { version: "0.2.0", commit: "b".repeat(40), entrySha256: "b".repeat(64), nodeMajors: [24] },
     } };
-  const report = { platform: "linux-x64", layout: "legacy", highestSequence: 0, readyMigrations: ["gateway-api-key-v1"],
-    components: Object.fromEntries(["cloudcli", "copilotApi"].map((name) => [name, {
-      version: "1.0.0", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24,
-    }])) };
+  const report = { platform: "linux-x64", layout: "npm", highestSequence: 0, readyMigrations: ["gateway-api-key-v1"],
+    components: { codey: {
+      version: "0.1.0", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24,
+    } } };
   return { enabled: true, reason: null, releases: [target], jobs: [], nodes: [
     { id: "alpha", name: "Alpha", enrolled: true, connected: true, report, eligible: true },
     { id: "beta", name: "Beta", enrolled: true, connected: false, report, eligible: true },
@@ -25,7 +24,7 @@ function data() {
   ] };
 }
 
-async function page({ failPlan = false, pendingPlan = null, initialData } = {}) {
+async function page({ failPlan = false, pendingPlan = null, initialData, planComponents } = {}) {
   const { document, elements } = settingsDom();
   const requests = [];
   const timers = [];
@@ -43,9 +42,11 @@ async function page({ failPlan = false, pendingPlan = null, initialData } = {}) 
       if (url.endsWith("/plans")) {
         if (pendingPlan) await pendingPlan;
         if (failPlan) return { ok: false, status: 403, json: async () => ({ error: "Owner mismatch" }) };
+        const release = status.releases.find(item => item.id === body.releaseId);
         return { ok: true, status: 200, json: async () => ({
-          id: "plan-one", releaseId: "release-one", notes: status.releases[0].notes, warning: "Review this plan",
-          targets: body.nodeIds.map((id) => ({ nodeId: id, name: id, eligible: true, changed: ["cloudcli"], deferred: id === "beta" })),
+          id: "plan-one", releaseId: body.releaseId, notes: release.notes, warning: "Review this plan",
+          components: planComponents ?? release.components,
+          targets: body.nodeIds.map((id) => ({ nodeId: id, name: id, eligible: true, changed: ["codey"], deferred: id === "beta" })),
         }) };
       }
       if (url.endsWith("/jobs")) {
@@ -76,19 +77,57 @@ test("machine update controls include single-node, selected/all batch, setup and
 
 test("npm node controls never offer split component updates and show the Codey package version", async () => {
   const status = data();
-  status.nodes[0].report = { ...status.nodes[0].report, layout: "npm", components: {
-    ...status.nodes[0].report.components,
-    codey: { version: "0.1.0", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24 },
+  const unifiedRelease = structuredClone(status.releases[0]);
+  status.releases[0].components = { cloudcli: {
+    version: "1.37.2", commit: "b".repeat(40), entrySha256: "b".repeat(64), nodeMajors: [24],
   } };
   const split = await page({ initialData: status });
   assert.equal(split.get("list").children[0].children[0].children[0].disabled, true);
-  assert.equal(split.get("list").children[1].children[0].children[0].disabled, false);
-  status.releases[0].components = { codey: {
-    version: "0.2.0", commit: "b".repeat(40), entrySha256: "b".repeat(64), nodeMajors: [24],
-  } };
+  assert.equal(split.get("release").disabled, true);
+  assert.doesNotMatch(split.get("release").textContent, /cloudcli|1\.37\.2/i);
+  assert.match(split.get("message").textContent, /尚未发布 Codey npm 整包/);
+  status.releases = [{ ...status.releases[0], id: "legacy-release" }, unifiedRelease];
+  status.nodes[1].report = { ...status.nodes[1].report, layout: "legacy", components: { cloudcli: {
+    version: "1.37.2", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24,
+  } } };
+  // The server's generic latest-release reason may refer to a legacy release.
+  status.nodes[0].reason = "runtime_incompatible";
   const unified = await page({ initialData: status });
   assert.equal(unified.get("list").children[0].children[0].children[0].disabled, false);
   assert.equal(unified.get("list").children[1].children[0].children[0].disabled, true);
+  assert.equal(unified.get("release").children.length, 1);
+  assert.equal(unified.get("release").value, unifiedRelease.id);
+  assert.match(unified.get("release").textContent, /Codey 0\.2\.0/);
+  assert.match(unified.get("list").children[0].textContent, /Codey 0\.1\.0/);
+  assert.doesNotMatch(unified.get("list").children[0].textContent, /运行时不兼容/);
+  assert.match(unified.get("list").children[1].textContent, /Codey 版本未上报.*需先迁移到 Codey npm 包/);
+  assert.doesNotMatch(unified.get("list").textContent, /cloudcli|copilot-api|1\.37\.2/i);
+});
+
+test("a split-component preview response cannot be confirmed as a Codey update", async () => {
+  const p = await page({ planComponents: { cloudcli: {
+    version: "1.37.2", commit: "b".repeat(40), entrySha256: "b".repeat(64), nodeMajors: [24],
+  } } });
+  await p.get("all").click();
+  assert.equal(p.get("confirm").open, false);
+  assert.equal(p.get("apply").disabled, true);
+  assert.match(p.get("message").textContent, /Codey 整包发行版不一致/);
+  assert.ok(!p.requests.some(request => request.url.endsWith("/jobs")));
+});
+
+test("changing the selected Codey release recomputes eligibility and status from the installed package", async () => {
+  const status = data();
+  status.releases.push({ ...status.releases[0], id: "release-two", sequence: 2 });
+  status.nodes[0].report = { ...status.nodes[0].report, highestSequence: 1, currentRelease: "release-one", components: {
+    codey: { ...status.releases[0].components.codey, nodeMajor: 24 },
+  } };
+  const p = await page({ initialData: status });
+  assert.match(p.get("list").children[0].textContent, /已是目标版本/);
+  assert.equal(p.get("list").children[0].querySelector("input").disabled, true);
+  p.get("release").value = "release-two";
+  p.get("release").dispatch("change");
+  assert.equal(p.get("list").children[0].querySelector("input").disabled, false);
+  assert.doesNotMatch(p.get("list").children[0].textContent, /已是目标版本/);
 });
 
 test("single-machine action only previews its node; no job is sent until explicit confirmation", async () => {
@@ -98,6 +137,9 @@ test("single-machine action only previews its node; no job is sent until explici
   assert.deepEqual(p.requests.filter((row) => row.url.endsWith("/plans"))[0].body.nodeIds, ["alpha"]);
   assert.equal(p.requests.filter((row) => row.url.endsWith("/jobs")).length, 0);
   assert.ok(p.get("plan-note").textContent.includes("<img src=x onerror=evil()>"));
+  assert.match(p.get("plan-note").textContent, /Codey 0\.2\.0/);
+  assert.match(p.get("plan-targets").textContent, /更新 Codey 整包/);
+  assert.doesNotMatch(p.get("plan-targets").textContent, /cloudcli|copilotApi/);
   await p.get("apply").click();
   const jobs = p.requests.filter((row) => row.url.endsWith("/jobs"));
   assert.equal(jobs.length, 1);
@@ -189,7 +231,7 @@ test("disabled updating and an empty release catalog cannot leave actionable sel
   p.status.releases = [];
   await p.get("refresh").click();
   assert.equal(p.get("release").disabled, true);
-  assert.equal(p.get("release").children[0].textContent, "暂无可用发行版");
+  assert.equal(p.get("release").children[0].textContent, "暂无 Codey 发行版");
 });
 
 test("switching into the update panel refreshes node membership without submitting an operation", async () => {

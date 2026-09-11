@@ -6,12 +6,14 @@ const element = (tag, text, className) => {
   return item;
 };
 const terminal = new Set(["succeeded", "failed", "rolled_back", "needs_action", "needs_migration", "cancelled"]);
+const codeyRelease = (release) => Boolean(release?.components?.codey) && Object.keys(release.components).length === 1;
 const labels = {
   queued: "已排队", claimed: "已领取", downloading: "下载校验中", staging: "准备候选版本",
   waiting_idle: "等待任务空闲", applying: "切换中", verifying: "验收中", succeeded: "升级成功",
   failed: "升级失败", rolled_back: "已恢复旧版本", needs_action: "需要人工处理",
   needs_migration: "需要配置迁移", cancelled: "已取消",
-  needs_setup: "尚未接入升级器", protected_local: "受保护节点", no_release: "暂无发行版",
+  needs_setup: "尚未接入升级器", protected_local: "受保护节点", no_release: "暂无 Codey 发行版",
+  needs_codey_migration: "需先迁移到 Codey npm 包", updater_unavailable: "升级服务尚未配置",
   up_to_date: "已是目标版本", unsupported_platform: "平台不支持", runtime_incompatible: "Node 运行时不兼容",
   model_auth_migration_required: "需先迁移模型 API key/调用方", migration_unsupported: "升级器尚不支持此迁移",
   model_login_required: "需先完成本人模型登录", configuration_changed: "节点配置已改变，请检查",
@@ -46,18 +48,27 @@ if (root) {
     return result;
   }
   const target = () => current?.releases.find((release) => release.id === $("release").value);
-  function eligibility(node) {
+  function eligibilityReason(node) {
     const release = target();
-    if (!current?.enabled || node.protected || !node.enrolled || !node.report || node.activeJob || !release) return false;
-    if (node.report.platform !== release.platform || node.report.highestSequence > release.sequence || node.report.blockedReason) return false;
-    if ((node.report.layout === "npm") !== Object.hasOwn(release.components, "codey")) return false;
-    if (release.migrations.some((id) => !node.report.readyMigrations.includes(id))) return false;
-    if (Object.entries(release.components).some(([name, item]) => !item.nodeMajors.includes(node.report.components[name]?.nodeMajor))) return false;
+    if (node.protected) return "protected_local";
+    if (node.updaterSupported === false || node.report?.layout === "unsupported") return "unsupported_platform";
+    if (!node.enrolled || !node.report) return "needs_setup";
+    if (node.activeJob) return "job_active";
+    if (node.report.layout !== "npm" || !node.report.components?.codey) return "needs_codey_migration";
+    if (!current?.enabled) return "updater_unavailable";
+    if (!release) return "no_release";
+    if (node.report.platform !== release.platform) return "unsupported_platform";
+    if (node.report.highestSequence > release.sequence) return "downgrade_blocked";
+    if (node.report.blockedReason) return node.report.blockedReason;
+    if (release.migrations.some((id) => !node.report.readyMigrations.includes(id))) return "model_auth_migration_required";
+    if (!release.components.codey.nodeMajors.includes(node.report.components.codey.nodeMajor)) return "runtime_incompatible";
+    const installed = node.report.components.codey;
+    const wanted = release.components.codey;
     return node.report.highestSequence < release.sequence || node.report.currentRelease !== release.id ||
-      Object.entries(release.components).some(([name, item]) =>
-        node.report.components[name]?.entrySha256 !== item.entrySha256 || node.report.components[name]?.commit !== item.commit ||
-        node.report.components[name]?.version !== item.version);
+      installed.entrySha256 !== wanted.entrySha256 || installed.commit !== wanted.commit || installed.version !== wanted.version
+      ? null : "up_to_date";
   }
+  const eligibility = (node) => eligibilityReason(node) === null;
   function controls() {
     const eligible = current?.nodes.filter(eligibility) || [];
     for (const id of selected) if (!eligible.some((node) => node.id === id)) selected.delete(id);
@@ -125,12 +136,12 @@ if (root) {
       label.append(check, element("strong", node.name));
       const components = node.report?.components;
       const info = element("div", null, "node-update-info");
-      info.append(element("span", components?.codey
-        ? `Codey ${components.codey.version}`
-        : `CloudCLI ${components?.cloudcli?.version || "未知"} · copilot-api ${components?.copilotApi?.version || "未知"}`, "muted"));
+      info.append(element("span", components?.codey?.version
+        ? `Codey ${components.codey.version}` : "Codey 版本未上报", "muted"));
       const status = element("span", null, "update-status");
       status.append(element("span", node.connected ? "升级器在线" : node.enrolled ? "离线/等待首次连接" : "未接入", "muted"));
-      if (node.reason) status.append(element("span", labels[node.reason] || node.reason, "muted"));
+      const reason = eligibilityReason(node);
+      if (reason) status.append(element("span", labels[reason] || reason, "muted"));
       if (node.activeJob) status.append(element("span", labels[node.activeJob.state] || node.activeJob.state, "update-badge"));
       info.append(status);
       row.append(label, info);
@@ -187,19 +198,23 @@ if (root) {
     clearTimeout(timer);
     try {
       const value = $("release").value;
-      current = await api("/api/settings/updates");
+      const snapshot = await api("/api/settings/updates");
+      // Legacy releases remain in the service catalog, but are not UI update targets.
+      current = { ...snapshot, releases: snapshot.releases.filter(codeyRelease) };
       $("release").replaceChildren();
       for (const release of current.releases) {
-        const option = element("option", `${release.id} · ${Object.entries(release.components).map(([name, item]) => `${name} ${item.version}`).join(" / ")}`);
+        const option = element("option", `Codey ${release.components.codey.version} · ${release.id}`);
         option.value = release.id; $("release").append(option);
       }
       if (!current.releases.length) {
-        const option = element("option", "暂无可用发行版");
+        const option = element("option", "暂无 Codey 发行版");
         option.value = ""; $("release").append(option);
       }
       if (current.releases.some((release) => release.id === value)) $("release").value = value;
       render();
-      if (showMessage) notice(current.reason || "先预览版本与目标机器，再确认升级。已接入的离线节点可以等待上线。");
+      if (showMessage) notice(current.reason || (current.releases.length
+        ? "仅更新 Codey 整包。先预览版本与目标机器，再确认升级；离线节点可以等待上线。"
+        : "尚未发布 Codey npm 整包发行版；旧版组件发行版不会作为更新目标。"));
     } catch (error) { notice(error.message, true); }
     finally {
       if (current?.jobs.some((job) => !terminal.has(job.state))) timer = window.setTimeout(() => refresh(false), 5000);
@@ -207,13 +222,17 @@ if (root) {
   }
   async function preview(nodeIds) {
     if (working || !target()) return;
+    const release = target();
+    plan = null;
     working = true; controls();
     try {
-      plan = await api("/api/settings/updates/plans", { nodeIds, releaseId: target().id });
-      $("plan-note").textContent = `${plan.releaseId}：${plan.notes || ""}\n${plan.warning}`;
+      const result = await api("/api/settings/updates/plans", { nodeIds, releaseId: release.id });
+      if (!codeyRelease(result) || result.releaseId !== release.id) throw new Error("更新计划与 Codey 整包发行版不一致，请刷新后重新预览");
+      plan = result;
+      $("plan-note").textContent = `Codey ${plan.components.codey.version} · ${plan.releaseId}：${plan.notes || ""}\n${plan.warning}`;
       $("plan-targets").replaceChildren();
       for (const node of plan.targets) $("plan-targets").append(element("p",
-        `${node.name}：${node.eligible ? `${node.verificationOnly ? "包未变化，仅验收模型，不重启" : "更新 " + node.changed.join("、")}${node.deferred ? "（等待上线）" : ""}` : labels[node.reason] || node.reason}`));
+        `${node.name}：${node.eligible ? `${node.verificationOnly ? "Codey 包未变化，仅验收模型，不重启" : "更新 Codey 整包"}${node.deferred ? "（等待上线）" : ""}` : labels[node.reason] || node.reason}`));
       $("plan-error").textContent = "";
       $("confirm").showModal();
     } catch (error) { notice(error.message, true); }

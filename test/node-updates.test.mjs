@@ -256,6 +256,26 @@ test("admin inventory joins owner-bound heartbeats and reports installed version
   assert.equal(orphan.status, "unknown", "A missing owner record must not imply either an enabled or a merely disabled account");
 });
 
+test("admin inventory exposes the installed Codey package through the same restricted heartbeat metadata", async t => {
+  const f = await fixture(t);
+  const alpha = await f.enroll();
+  const installed = { version: "0.1.0", commit: "d".repeat(40), entrySha256: "e".repeat(64), nodeMajor: 24 };
+  await f.heartbeat(alpha, report({ layout: "npm", currentRelease: "installed-codey", components: { codey: installed } }));
+  await f.updates.store.mutate(data => {
+    data.devices.alpha.report.components.codey.futurePrivateField = "not-for-the-directory";
+  });
+  f.updates.catalog.list = async () => { throw new Error("An inventory must not substitute a target release"); };
+  const response = await f.request("/api/admin/nodes");
+  assert.equal(response.status, 200);
+  const text = await response.text();
+  const row = JSON.parse(text).nodes.find(node => node.id === "alpha");
+  assert.deepEqual(row.components.codey, { version: "0.1.0", commit: "d".repeat(40), nodeMajor: 24 });
+  assert.equal(row.components.cloudcli, null);
+  assert.equal(row.components.copilotApi, null);
+  assert.equal(row.releaseId, "installed-codey");
+  assert.doesNotMatch(text, /futurePrivateField|not-for-the-directory|entrySha256/);
+});
+
 test("admin inventory counts activated nodes across disabled owners, excluding pending, removed and empty-user records", async (t) => {
   const f = await fixture(t);
   const bob = await f.enroll(f.bobNode.id, f.cookieB);
@@ -311,7 +331,7 @@ test("inventory distinguishes fresh, expired, revoked, re-enrolled and mismatche
     assert.equal(row.status, "not_enrolled");
     assert.equal(row.lastSeen, null);
     assert.equal(row.releaseId, null);
-    assert.deepEqual(row.components, { cloudcli: null, copilotApi: null }, "A report is bound to both owner and node");
+    assert.deepEqual(row.components, { codey: null, cloudcli: null, copilotApi: null }, "A report is bound to both owner and node");
   }
   await writeFile(f.updates.store.file, "corrupt signed heartbeat state");
   const failure = await f.request("/api/admin/nodes");
