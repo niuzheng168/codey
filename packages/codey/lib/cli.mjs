@@ -14,6 +14,8 @@ Usage:
   codey auth [arguments...]
   codey mcp [arguments...]
   codey doctor [--package-only] [--json]
+  codey update PACKAGE.tgz [--check] [--sha256 HASH]
+  codey update --recover
   codey setup [--config FILE] [--check]
   codey --version
 
@@ -21,6 +23,7 @@ start runs both services in the foreground; Ctrl+C stops both.
 Defaults: loopback only, workspace :3001, gateway :4141.
 Responses WebSocket defaults to off; explicit gateway config takes precedence.
 doctor checks the shared Linux/Windows runtime; managed setup is Linux-only.
+update replaces only Codey using existing runtimes; it never runs setup.
 Use "codey gateway --help" for gateway options.
 Install the official Codex CLI separately and authenticate the gateway with
 "codey auth login --provider copilot". Existing configuration is preserved.
@@ -66,6 +69,7 @@ export function commandPlan(args, env = process.env) {
   }
   if (["auth", "mcp"].includes(command)) return { kind: "gateway", args: [command, ...rest] };
   if (command === "doctor") return { kind: "doctor", args: rest };
+  if (command === "update") return { kind: "update", args: rest };
   if (command === "setup") return { kind: "setup", args: rest };
   if (command === "gateway") return {
     kind: "gateway",
@@ -173,6 +177,11 @@ export async function runCli(args = process.argv.slice(2)) {
   if (plan.kind === "setup") {
     const { runSetup } = await import("./setup.mjs");
     await runSetup(ROOT, plan.args);
+    return;
+  }
+  if (plan.kind === "update") {
+    const { runUpdate } = await import("./update.mjs");
+    await runUpdate(ROOT, plan.args);
     return;
   }
   if (plan.kind === "doctor") {

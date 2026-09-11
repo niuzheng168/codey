@@ -1,5 +1,11 @@
 # Owner-confirmed node updates
 
+For a trusted local npm tarball, `codey update /absolute/path/codey-new.tgz`
+updates only the application on the current node without publishing a Portal
+release. See [local package updates](codey-local-update.md), including native
+Windows handling, one-time bootstrap, concurrency and recovery. The feed
+workflow below remains the centrally signed, owner-confirmed fleet mechanism.
+
 The Portal brokers **desired package versions**, not remote shell commands. An independent
 `codey-node-updater.service` on each Linux x64 node polls outbound HTTPS. No SSH key, Portal
 master, model credential, release signing private key, or new inbound management port is

@@ -106,6 +106,56 @@ Actual setup requires Python 3.12+, sudo and the owner's interactive provider lo
 It replaces service/model settings and stops old Codex processes, retaining auth
 and session files. Merely installing the npm package never invokes setup.
 
+## Update only Codey from a local npm package
+
+Run from an external terminal as the original OS owner:
+
+```sh
+codey update /absolute/path/codey-new.tgz --check
+codey update /absolute/path/codey-new.tgz
+```
+
+`--check` validates the shared artifact, installed layout and existing Node
+compatibility without installing dependencies, writing an update job or changing
+services. An optional `--sha256 HASH` checks an independently obtained checksum.
+Only trusted, tested local `.tgz` files are accepted, never public npm names,
+tags or URLs.
+
+The update stages a fresh private npm installation with the **existing** Node/npm,
+validates packed files before enabling native dependency hooks, and runs
+`codey doctor`. It then checks for concurrent deployment/active work and switches
+only the application. It never invokes `setup`, installs Codex/Node/Python/
+DevTunnel, rotates model keys, changes provider configuration or calls a model.
+
+- **Managed Linux x64:** reuse the existing updater's package-pointer transaction
+  and restart only Workspace/gateway. Briefly pause/resume the existing pull
+  updater without replacing it; pending Portal jobs block local maintenance.
+  Preserve its signed-release high-water mark and label the install as local,
+  not a signed Portal release.
+- **Recognized Windows x64 node tasks:** change only the package fields in the
+  existing native runtime descriptor and restart its Codey task.
+  Keep the existing Node, Codex, DevTunnel, service helpers, tunnel/renew tasks,
+  credentials and registration. No whole-machine installation is performed;
+  unknown external Windows service arrangements are not taken over.
+- **Unmanaged user-owned npm installation:** stop foreground Codey yourself.
+  The package and CLI keep their existing path; no service is installed or
+  started. Unknown/partial/legacy managed layouts are refused.
+
+Finish native Codex tasks first. There is a short interruption, not a
+zero-downtime guarantee. Failed activation restores this transaction's package
+pointer/descriptor and version metadata, never stale databases or credentials.
+Concurrent changes are not overwritten. Old packages, staged dependencies and
+private journals are retained; use `codey update --recover` for an interrupted
+local transaction instead of reinstalling or manually clearing its lock.
+
+An older CLI without `update` needs a one-time bootstrap: use the new release's
+`install-codey.mjs --check` to install/verify a separate runtime without changing
+PATH or services, then invoke that new CLI with
+`update /absolute/path/codey-new.tgz --installed-root /absolute/path/old/codey`.
+The target must still be the actual owner-managed service package (or an existing
+user npm installation); the bootstrap does not bypass compatibility/idle checks.
+See `docs/codey-local-update.md` in the source repository for recovery and validation.
+
 ## Commands
 
 - `codey start`: run both services in the foreground; stop both on Ctrl+C or
@@ -115,6 +165,8 @@ and session files. Merely installing the npm package never invokes setup.
 - `codey auth …`, `codey mcp …`, `codey gateway debug --json`: gateway tools
   through the same executable.
 - `codey doctor [--package-only] [--json]`: verify the common package and local native modules without services or models.
+- `codey update PACKAGE.tgz [--check] [--sha256 HASH]`: update this application's package only.
+- `codey update --recover`: recover an interrupted local package update.
 - `codey setup [--config FILE] [--check]`: configure an installed Linux node.
 
 Existing environment configuration, gateway data and Codex sessions remain in
