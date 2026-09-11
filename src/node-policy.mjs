@@ -46,6 +46,16 @@ function publicNode(record) {
     ? { vnetOnly: true, platform: record.machine.platform ?? "linux-x64", networkMode: record.machine.networkMode } : {}) };
 }
 
+function sameImportedMachineIdentity(previous, machine, restoring) {
+  // Display labels are not identity. Only a removed node may adopt a new TLS
+  // leaf, after MachineSetup has verified it using the original client keys.
+  const fields = ["id", "platform", "networkMode", "tlsServerName",
+    ...(restoring ? [] : ["ca", "fingerprint"])];
+  return previous && fields.every((field) => previous[field] === machine[field]) &&
+    previous.devTunnel?.tunnelId === machine.devTunnel.tunnelId &&
+    previous.devTunnel?.clusterId === machine.devTunnel.clusterId;
+}
+
 export class NodePolicy {
   constructor({ root, master, ticketMaster, seedPrincipalId, legacyConfigStore, defaults }) {
     if (String(ticketMaster ?? "").length < 32 || !/^[a-z0-9-]{1,80}$/.test(seedPrincipalId ?? "")) {
@@ -275,9 +285,13 @@ export class NodePolicy {
     return this.store.mutate((data) => {
       const current = data.nodes.find((node) => node.id === machine.id);
       if (current) {
+        const activated = current.enabled && current.setup?.status === "activated";
+        const importing = !current.enabled && current.setup?.status === "importing";
+        const restoring = !current.enabled && typeof current.removedAt === "string" &&
+          ["activated", "importing"].includes(current.setup?.status);
         if (current.ownerId !== principalId || current.keyMode !== "client" ||
-            !["importing", "activated"].includes(current.setup?.status) ||
-            JSON.stringify(current.machine) !== JSON.stringify(machine) ||
+            !(activated || importing || restoring) ||
+            !sameImportedMachineIdentity(current.machine, machine, restoring) ||
             !sameMachineCredentials(
               openMachineCredentials(this.master, current.id, current.credentialSeal), credentials,
             ) ||
@@ -291,12 +305,20 @@ export class NodePolicy {
           };
         }
         if (!current.enabled) {
+          if (data.nodes.filter((node) => node.id !== current.id && node.ownerId === principalId &&
+              (node.enabled || (node.setup?.status === "importing" && node.setup.expiresAt > now))).length >= 32) {
+            throw requestError("节点数量已达上限", 409);
+          }
           if (data.nodes.some((node) => node.id !== current.id &&
               (node.enabled || (["reserved", "importing"].includes(node.setup?.status) && node.setup.expiresAt > now)) &&
               node.tunnel?.tunnelId === current.tunnel.tunnelId &&
               node.tunnel?.clusterId === current.tunnel.clusterId)) {
             throw requestError("此 DevTunnel 已绑定到另一台机器", 409);
           }
+          // Reuse the owner-bound record and its saved display settings, but
+          // keep access disabled until updater enrollment/activation completes.
+          current.machine = machine;
+          current.setup.status = "importing";
           current.setup.expiresAt = now + 15 * 60000;
         }
         return { node: publicNode(current), created: false, activated: current.enabled };
@@ -350,7 +372,7 @@ export class NodePolicy {
     return this.store.mutate((data) => {
       const node = data.nodes.find((item) =>
         item.id === nodeId && item.ownerId === principalId && item.keyMode === "client" &&
-        ["importing", "activated"].includes(item.setup?.status));
+        (item.setup?.status === "importing" || (item.enabled && item.setup?.status === "activated")));
       if (!node) throw requestError("客户端机器注册不存在或无权访问", 409);
       if (node.enabled && node.setup.status === "activated") return publicNode(node);
       if (node.setup.expiresAt <= now) throw requestError("客户端机器注册已超时，请重新上传", 410);
@@ -369,6 +391,7 @@ export class NodePolicy {
         verifiedAt: new Date(now).toISOString(),
       };
       delete node.setup.expiresAt;
+      delete node.removedAt;
       return publicNode(node);
     });
   }
@@ -397,7 +420,8 @@ export class NodePolicy {
     return this.store.mutate((data) => {
       const node = data.nodes.find((item) => item.id === nodeId && item.ownerId === principalId && item.enabled);
       if (!node) throw requestError("节点不存在或无权访问", 404);
-      // Never recycle an ID/key for another user, including after removal.
+      // Retain ownership and keys: only the original owner may restore a
+      // client-generated node through a freshly verified registration.
       node.enabled = false;
       node.removedAt = new Date().toISOString();
     });

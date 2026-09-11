@@ -704,6 +704,166 @@ test("client activation is recoverable and idempotent across partial or concurre
     device.credentialHash, "An active updater credential is not replaced by a registration replay");
 });
 
+for (const platform of ["linux-x64", "windows-x64"]) {
+  test(`removed ${platform} registrations restore the original node after setup regenerates TLS`, async t => {
+    const f = await fixture(t);
+    const id = `n-${randomBytes(12).toString("hex")}`;
+    const { privateIp, vmResourceId, ...fields } = await machineFile(f.root, id);
+    const original = registration({ ...f.manifest, platform }, {
+      ...fields, platform, networkMode: "devtunnel",
+      devTunnel: { tunnelId: "codey-restored-registration", clusterId: "jpe1" },
+    });
+    const post = value => f.request("/api/settings/machines/activate", { method: "POST", value });
+    assert.equal((await post(original)).status, 201);
+    await f.policy.update(f.member.id, id, { name: "My saved name", region: "My saved region", accent: "#aabbcc" });
+    const before = await f.policy.owned(f.member.id, id);
+    const device = (await f.machineSetup.machineUpdates.store.read()).data.devices[id];
+    assert.equal((await post({
+      ...original, machine: { ...original.machine, name: "Another label", region: "Another region" },
+    })).status, 201, "Display labels do not change the machine identity or overwrite saved settings");
+    const renewed = {
+      ...original,
+      machine: {
+        ...original.machine, name: "New hostname", region: "New installer label",
+        tlsCertificate: (await machineFile(f.root, id)).tlsCertificate,
+      },
+      devTunnelConnectToken: connectToken(original.machine.devTunnel, Date.now() + 60000),
+    };
+    assert.notEqual(renewed.machine.tlsCertificate, original.machine.tlsCertificate);
+    assert.equal((await post(renewed)).status, 409, "An active node's TLS pin cannot be silently replaced");
+
+    // Restore once with changed TLS, then again using the exact same file.
+    for (const value of [renewed, renewed]) {
+      assert.equal((await f.request(`/api/settings/nodes/${id}`, { method: "DELETE" })).status, 200);
+      assert.deepEqual(await f.policy.list(f.member.id), []);
+      assert.equal(await f.policy.canAccess(f.member.id, id), false);
+      await assert.rejects(f.policy.machineTunnelToken(id), { status: 401 });
+      await f.machineSetup.refreshGateways();
+      assert.equal(f.data.endpoint(id, [id]), null);
+      assert.equal(f.workspace.match(`/cloudcli/${id}/`), null);
+
+      const response = await post(value);
+      assert.equal(response.status, 201, await response.clone().text());
+      const node = (await response.json()).node;
+      assert.equal(node.id, id);
+      assert.equal(node.name, "My saved name");
+      assert.equal(node.region, "My saved region");
+      assert.equal(node.accent, "#aabbcc");
+      const restored = await f.policy.owned(f.member.id, id);
+      assert.equal(restored.ownerId, before.ownerId);
+      assert.equal(restored.createdAt, before.createdAt);
+      assert.equal(restored.setup.status, "activated");
+      assert.equal(restored.setup.expiresAt, undefined);
+      assert.equal(restored.removedAt, undefined);
+      assert.deepEqual(restored.machine, machineIdentity(value.machine, id));
+      assert.equal(f.probes.at(-1).machine.fingerprint, restored.machine.fingerprint);
+      assert.equal(f.data.nodes.get(id).fingerprint, restored.machine.fingerprint);
+      assert.equal(f.workspace.match(`/cloudcli/${id}/`).fingerprint, restored.machine.fingerprint);
+      assert.equal(await f.policy.machineTunnelToken(id), renewed.devTunnelConnectToken);
+      assert.equal(await f.policy.keyFor(f.member.id, id), original.credentials.clientSigningKey);
+      assert.deepEqual((await f.machineSetup.machineUpdates.store.read()).data.devices[id], device,
+        "Restoration preserves updater credentials and history, and never enrolls Windows in the Linux updater");
+      assert.equal((await post(value)).status, 201, "Restoration remains idempotent");
+      assert.equal((await f.policy.records()).data.nodes.length, 1);
+      assert.deepEqual(await f.policy.list(f.credential.principalId), []);
+    }
+  });
+}
+
+test("removed registrations retain owner, key, platform, tunnel and capacity boundaries during restoration", async t => {
+  const f = await fixture(t);
+  const id = `n-${randomBytes(12).toString("hex")}`;
+  const { privateIp, vmResourceId, ...fields } = await machineFile(f.root, id);
+  const original = registration(f.manifest, {
+    ...fields, platform: "linux-x64", networkMode: "devtunnel",
+    devTunnel: { tunnelId: "codey-restore-boundaries", clusterId: "jpe1" },
+  });
+  const post = (value, user = f.cookie) => f.request("/api/settings/machines/activate", { method: "POST", value, user });
+  assert.equal((await post(original)).status, 201);
+  await f.policy.remove(f.member.id, id);
+  await assert.rejects(f.policy.activateImportedMachine(f.member.id, id), { status: 409 },
+    "Removal cannot be undone without a fresh verified staging step");
+  const removed = await f.policy.records();
+  const updates = await f.machineSetup.machineUpdates.store.read();
+  const renewed = {
+    ...original,
+    machine: { ...original.machine, tlsCertificate: (await machineFile(f.root, id)).tlsCertificate },
+  };
+  const rebound = coordinates => ({
+    ...renewed, machine: { ...renewed.machine, devTunnel: coordinates },
+    devTunnelConnectToken: connectToken(coordinates),
+  });
+  const invalid = [
+    ...["clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey"].map(key => ({
+      ...renewed, credentials: { ...renewed.credentials, [key]: randomBytes(32).toString("base64url") },
+    })),
+    { ...renewed, credentials: { ...renewed.credentials, workspaceSubject: `m-${randomBytes(12).toString("hex")}` } },
+    { ...renewed, credentials: { ...renewed.credentials, workspaceUsername: "anotherowner" } },
+    { ...renewed, package: { ...renewed.package, platform: "windows-x64" },
+      machine: { ...renewed.machine, platform: "windows-x64" } },
+    rebound({ ...renewed.machine.devTunnel, tunnelId: "another-restore-tunnel" }),
+    rebound({ ...renewed.machine.devTunnel, clusterId: "euw1" }),
+  ];
+  assert.equal((await post(renewed, f.admin)).status, 409, "Even an administrator cannot reclaim another owner's removed ID");
+  for (const value of invalid) assert.equal((await post(value)).status, 409);
+  assert.deepEqual(await f.policy.records(), removed, "Rejected imports do not change the tombstone or TLS pin");
+  assert.deepEqual(await f.machineSetup.machineUpdates.store.read(), updates);
+
+  const verify = f.machineSetup.verify;
+  f.machineSetup.verify = async () => { throw Object.assign(new Error("Restored TLS/SSO verification failed"), { status: 502 }); };
+  assert.equal((await post(renewed)).status, 502);
+  f.machineSetup.verify = verify;
+  const verifyTunnel = f.machineSetup.verifyTunnel;
+  f.machineSetup.verifyTunnel = async () => { throw new Error("Restored tunnel proof failed"); };
+  assert.equal((await post(renewed)).status, 503);
+  f.machineSetup.verifyTunnel = verifyTunnel;
+  assert.deepEqual(await f.policy.records(), removed, "Restoration requires fresh tunnel and service proof");
+
+  const full = [];
+  for (let index = 0; index < 32; index++) {
+    full.push(await f.policy.create(f.member.id, { name: `Capacity ${index}`, endpoint: "https://capacity.example.test" }));
+  }
+  const atCapacity = await f.policy.records();
+  assert.equal((await post(renewed)).status, 409);
+  assert.deepEqual(await f.policy.records(), atCapacity, "Restoration cannot bypass the active-node limit");
+  for (const node of full) await f.policy.remove(f.member.id, node.id);
+
+  const reserved = await f.policy.reserveMachine(f.credential.principalId);
+  await f.policy.updateMachineTunnel(reserved.id, {
+    ...renewed.machine.devTunnel, connectToken: renewed.devTunnelConnectToken,
+  });
+  const conflicting = await f.policy.records();
+  assert.equal((await post(renewed)).status, 409);
+  assert.deepEqual(await f.policy.records(), conflicting, "A removed node cannot reclaim another live reservation's tunnel");
+  await f.policy.cancelMachine(f.credential.principalId, reserved.id);
+
+  const register = f.machineSetup.machineUpdates.registerClientMachine.bind(f.machineSetup.machineUpdates);
+  f.machineSetup.machineUpdates.registerClientMachine = async () => { throw new Error("Updater persistence interrupted"); };
+  assert.equal((await post(renewed)).status, 503);
+  const staged = (await f.policy.records()).data.nodes.find(node => node.id === id);
+  assert.equal(staged.enabled, false);
+  assert.equal(staged.setup.status, "importing");
+  assert.equal(staged.removedAt, removed.data.nodes[0].removedAt);
+  assert.deepEqual(await f.policy.list(f.member.id), []);
+  await assert.rejects(f.policy.keyFor(f.member.id, id), { status: 404 });
+  await assert.rejects(f.policy.activateImportedMachine(f.member.id, id, staged.setup.expiresAt), { status: 410 });
+  await f.machineSetup.refreshGateways();
+  assert.equal(f.data.endpoint(id, [id]), null);
+  assert.equal(f.workspace.match(`/cloudcli/${id}/`), null);
+
+  f.machineSetup.machineUpdates.registerClientMachine = register;
+  // A further setup run after the interruption may regenerate TLS again.
+  const retry = {
+    ...renewed, machine: { ...renewed.machine, tlsCertificate: (await machineFile(f.root, id)).tlsCertificate },
+  };
+  const responses = await Promise.all([post(retry), post(retry)]);
+  assert.deepEqual(responses.map(response => response.status), [201, 201]);
+  assert.equal((await f.policy.list(f.member.id)).length, 1);
+  assert.equal((await f.policy.owned(f.member.id, id)).removedAt, undefined);
+  assert.deepEqual((await f.policy.owned(f.member.id, id)).machine, machineIdentity(retry.machine, id));
+  assert.deepEqual((await f.machineSetup.machineUpdates.store.read()).data, updates.data);
+});
+
 test("only the invitation owner can activate, and activation verifies before exposing a private gateway", async (t) => {
   const f = await fixture(t);
   const reserved = await f.policy.reserveMachine(f.member.id);
