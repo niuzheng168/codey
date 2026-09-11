@@ -1,6 +1,6 @@
 import { machineCredentials } from "./machine-credentials.mjs";
 import { machineIdentity } from "./machine-identity.mjs";
-import { machinePlatform } from "./machine-platforms.mjs";
+import { machineRegistrationPlatform } from "./machine-platforms.mjs";
 import { requestError } from "./signed-store.mjs";
 import { validateDevTunnelConnectToken } from "./devtunnel-transport.mjs";
 
@@ -31,7 +31,7 @@ export function machineRegistration(input, expected, now = Date.now()) {
       !RELEASE.test(descriptor.releaseId ?? "")) {
     throw requestError("注册文件缺少有效的固定 Skill 版本");
   }
-  const platform = machinePlatform(descriptor.platform).id;
+  const platform = machineRegistrationPlatform(descriptor.platform).id;
   const portalOrigin = exactOrigin(descriptor.portalOrigin);
   if (expected?.portalOrigin !== portalOrigin ||
       (expected?.releaseId && expected.releaseId !== descriptor.releaseId) ||

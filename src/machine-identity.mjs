@@ -2,7 +2,7 @@ import { X509Certificate } from "node:crypto";
 import { isIP } from "node:net";
 import { checkServerIdentity } from "node:tls";
 import { requestError } from "./signed-store.mjs";
-import { machinePlatform } from "./machine-platforms.mjs";
+import { machineRegistrationPlatform } from "./machine-platforms.mjs";
 import { validDevTunnelCoordinates } from "./devtunnel-transport.mjs";
 
 export const MACHINE_ID = /^n-[a-f0-9]{24}$/;
@@ -24,7 +24,7 @@ export function machineIdentity(input, expectedId, now = Date.now()) {
       !MACHINE_ID.test(expectedId) || input.nodeId !== expectedId) {
     throw requestError("请选择此账号下载的 Skill 生成的 codey-machine.json");
   }
-  const definition = machinePlatform(input.platform ?? "linux-x64");
+  const definition = machineRegistrationPlatform(input.platform ?? "linux-x64");
   const platform = definition.id;
   const name = typeof input.name === "string" ? input.name.trim() : "";
   const region = typeof input.region === "string" ? input.region.trim() : "";
@@ -104,7 +104,7 @@ export function preparedGateways(node, { getTunnelToken, getWorkspaceBinding } =
       id: node.id, name: node.name, region: node.region, basePath: `/cloudcli/${node.id}`,
       upstream: new URL(`https://${host}:3001`),
       tlsServerName: machine.tlsServerName, ca: machine.ca, fingerprint: machine.fingerprint,
-      healthMonitoring: !machinePlatform(machine.platform ?? "linux-x64").updater,
+      healthMonitoring: !machineRegistrationPlatform(machine.platform ?? "linux-x64").updater,
       ...(getWorkspaceBinding ? { getWorkspaceBinding } : {}),
       ...tunnel(3001),
     },
