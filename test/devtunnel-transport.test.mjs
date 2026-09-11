@@ -13,6 +13,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { CancellationTokenSource } from "@microsoft/dev-tunnels-ssh";
 import { CloudCliGateway, resolveCloudCliGatewayConfig } from "../src/cloudcli-gateway.mjs";
+import { NodeDataGateway } from "../src/node-data-gateway.mjs";
 import { DevTunnelTransport, normalizeDevTunnel, readDevTunnelConnectToken } from "../src/devtunnel-transport.mjs";
 import { nodeTlsOptions } from "../src/machine-identity.mjs";
 import { workspaceNodeKey } from "../src/workspace-sso.mjs";
@@ -71,7 +72,7 @@ test("only a live connect-only token for the exact tunnel is accepted, without l
   }
 });
 
-function sdkFixture(port, { metadataError, neverConnect = false, deferRemoteEof = false } = {}) {
+function sdkFixture(port, { metadataError, neverConnect = false, deferRemoteEof = false, forwardedPort = 3001 } = {}) {
   const observed = { clients: [], metadata: [], forwarded: [], connections: 0, sockets: new Set() };
   class Management {
     async getTunnel(reference, options) {
@@ -79,7 +80,7 @@ function sdkFixture(port, { metadataError, neverConnect = false, deferRemoteEof 
       if (metadataError) throw new Error(metadataError);
       return {
         ...reference, endpoints: [{ connectionMode: "TunnelRelay" }],
-        ports: [{ portNumber: 3001, protocol: "https" }, { portNumber: 4141, protocol: "https" }],
+        ports: [{ portNumber: forwardedPort, protocol: "https" }, { portNumber: 4141, protocol: "https" }],
       };
     }
     async dispose() { observed.managementDisposed = true; }
@@ -94,16 +95,16 @@ function sdkFixture(port, { metadataError, neverConnect = false, deferRemoteEof 
       this.options = options;
       if (neverConnect) return new Promise((_, reject) =>
         cancellation.onCancellationRequested(() => reject(new Error("cancelled"))));
-      for (const portNumber of [3001, 4141]) {
+      for (const portNumber of [forwardedPort, 4141]) {
         const event = { portNumber };
         this.forwarding(event);
         observed.forwarded.push(event);
       }
       this.connectionStatus = "connected";
     }
-    async waitForForwardedPort(portNumber) { assert.equal(portNumber, 3001); }
+    async waitForForwardedPort(portNumber) { assert.equal(portNumber, forwardedPort); }
     async connectToForwardedPort(portNumber) {
-      assert.equal(portNumber, 3001);
+      assert.equal(portNumber, forwardedPort);
       observed.connections++;
       const socket = net.connect(port, "127.0.0.1");
       observed.sockets.add(socket);
@@ -312,6 +313,54 @@ test("a bad node TLS name or pinned certificate rejects the tunnel before any HT
   }
   assert.equal(requests, 0);
 });
+
+for (const [kind, Gateway, forwardedPort] of [
+  ["data", NodeDataGateway, 8443], ["workspace", CloudCliGateway, 3001],
+]) {
+  test(`${kind} requests survive a real TLS leaf rotation without restarting the Portal`, async t => {
+    const original = await tlsFixture(t);
+    const renewed = await tlsFixture(t);
+    const received = [];
+    const upstream = https.createServer(original, (req, res) => {
+      received.push(req.url);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"ok":true}');
+    });
+    const port = await listen(t, upstream);
+    const transports = [];
+    const gateway = new Gateway({ nodes: [], ca: "unused" }, {
+      tunnelTransportFactory(node, ca) {
+        const sdk = sdkFixture(port, { forwardedPort });
+        const transport = new DevTunnelTransport(node.devTunnel, nodeTlsOptions(node, ca), {
+          getToken: node.getTunnelToken, sdkFactory: sdk.sdkFactory, timeoutMs: 2000,
+        });
+        transports.push(transport);
+        return transport;
+      },
+    });
+    t.after(() => gateway.close());
+    const node = { id: "n-" + "a".repeat(24), upstream: new URL(`https://localhost:${forwardedPort}`),
+      tlsServerName: "localhost", ca: original.cert, fingerprint: original.fingerprint,
+      devTunnel: { ...tunnelConfig, port: forwardedPort }, getTunnelToken: async () => token() };
+    const get = (target, pathname) => new Promise((resolve, reject) => {
+      const req = https.get(new URL(pathname, target.upstream), gateway.upstreamOptions(target), res => {
+        res.resume();
+        res.once("end", () => resolve(res.statusCode));
+      });
+      req.once("error", reject);
+    });
+    gateway.setMachineNodes([node]);
+    assert.equal(await get(node, "/usage"), 200);
+    upstream.setSecureContext(renewed);
+    const restored = { ...node, ca: renewed.cert, fingerprint: renewed.fingerprint };
+    gateway.setMachineNodes([restored]);
+    const paths = ["/usage", "/token-usage", "/token-usage/daily", "/token-usage/events"];
+    assert.deepEqual(await Promise.all(paths.map(pathname => get(restored, pathname))), [200, 200, 200, 200]);
+    assert.equal(transports.length, 2);
+    assert.deepEqual(received.slice(1).sort(), paths.toSorted());
+    await assert.rejects(transports[0].openTlsSocket(), { code: "ERR_CODEY_DEV_TUNNEL" });
+  });
+}
 
 test("HTTP requests do not reuse idle relay-backed TLS sockets while retaining one tunnel client", async t => {
   const fixture = await tlsFixture(t);

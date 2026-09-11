@@ -674,7 +674,7 @@ function renderOverviewPanels(data) {
 }
 
 function statusLabel(status) {
-  return { online: "正常", partial: "部分可用", offline: "离线" }[status] || status;
+  return { online: "正常", partial: "部分可用", offline: "数据链路异常" }[status] || status;
 }
 
 function groupedNodeErrors(errors) {
@@ -749,7 +749,7 @@ function renderNodeCard(node, aggregateTotal) {
           <span class="node-region">${escapeHtml(node.region)}</span>
           <span class="node-endpoint">${escapeHtml(LEGACY_NODE_CONNECTIONS_ENABLED ? node.endpoint : "私有 DevTunnel")}</span>
         </div>
-        <span class="status-pill ${escapeHtml(node.status)}">${escapeHtml(node.id === "local" && node.status === "offline" ? "未连接" : statusLabel(node.status))}</span>
+        <span class="status-pill ${escapeHtml(node.status)}" title="用量接口的读取状态，不代表机器或升级器心跳状态">${escapeHtml(node.id === "local" && node.status === "offline" ? "未连接" : statusLabel(node.status))}</span>
       </div>
       <strong class="node-token-value">${node.tokenUsageAvailable ? escapeHtml(formatCompact(node.totals.total_tokens)) : "—"}</strong>
       <span class="node-token-label">tokens · ${escapeHtml(PERIOD_LABELS[state.period])}</span>

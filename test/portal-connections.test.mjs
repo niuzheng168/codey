@@ -9,7 +9,7 @@ const source = (await readFile(new URL("../public/app.js", import.meta.url), "ut
   .replace(/^import[\s\S]*?;\r?\n/gm, "")
   .replace(/\binitialize\(\);\s*$/, `globalThis.probe = {
     state, initialize, refreshClientNodes, onConnectionModeChange, loadCloudCliNodes,
-    renderStatus, openProvisionDialog, renderControls,
+    renderStatus, openProvisionDialog, renderControls, renderNodeCard,
   };`);
 const tunnel = { id: "tunnel", name: "Tunnel", networkMode: "devtunnel",
   endpoint: "https://tunnel.nodes.example:8443/usage", proxyEndpoint: "/api/node-data/tunnel/usage" };
@@ -117,4 +117,17 @@ test("Workspace selection discards a saved legacy node without exposing its conn
   assert.deepEqual(Array.from(p.state.cloudCli.nodes, node => node.id), ["tunnel"]);
   assert.equal(p.elements.get("#cloudcli-frame").src, "https://codey.example/cloudcli/tunnel/");
   assert.deepEqual(p.requests.map(request => request.url), ["/api/cloudcli/nodes"]);
+});
+
+test("failed data requests are not presented as proof that the entire machine is offline", () => {
+  const p = page();
+  const html = p.renderNodeCard({
+    ...tunnel, status: "offline", tokenUsageAvailable: false, latencyMs: 100,
+    totals: { total_tokens: 0, request_count: 0, costs: [] },
+    errors: ["quota", "summary", "daily", "events"].map(scope => ({ scope, message: "门户返回 HTTP 502" })),
+  }, 0);
+  assert.match(html, /status-pill offline[^>]*>数据链路异常</);
+  assert.match(html, /title="[^"]*不代表机器[^"]*心跳/);
+  assert.match(html, /HTTP 502（4 个接口）/);
+  assert.doesNotMatch(html, />离线</);
 });

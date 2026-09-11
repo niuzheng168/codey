@@ -120,7 +120,9 @@ function renderRow(node) {
   if (!node.owner.username) owner.append(element("span", "归属账号不可用", "muted"));
   else if (!node.owner.enabled) owner.append(element("span", "账号已停用", "muted"));
   const state = element("td");
-  state.append(element("span", statusLabels[node.status] || statusLabels.unknown, `inventory-status ${statusGroup(node.status)}`));
+  const status = element("span", statusLabels[node.status] || statusLabels.unknown, `inventory-status ${statusGroup(node.status)}`);
+  if (node.status === "online") status.title = "仅表示升级器能向门户报到，不代表数据接口、Workspace 或模型可用。";
+  state.append(status);
   if (node.workspaceHealth) {
     state.append(element("span", `健康检查 ${date(node.workspaceHealth.checkedAt)}`, "muted"));
     state.append(element("span", statusLabels[node.updaterStatus] || "升级器状态未知", "muted"));

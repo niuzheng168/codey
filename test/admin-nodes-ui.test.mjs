@@ -105,6 +105,7 @@ test("inventory renders all-owner counts, node versions and explicit unknown sta
   assert.equal(p.rows().length, 4);
   const known = p.rows().find((row) => row.dataset.nodeId === "zhn-a100");
   assert.match(known.textContent, /zhn.*心跳在线.*0\.1\.0.*aaaaaaaa · Node 24/s);
+  assert.match(known.children[2].querySelector("span").title, /仅表示升级器.*不代表数据接口/);
   assert.equal(known.children.length, 4);
   assert.doesNotMatch(known.textContent, /1\.37\.2|2\.5\.1/);
   assert.match(known.children[3].title, new RegExp("Commit: " + "a".repeat(40)));

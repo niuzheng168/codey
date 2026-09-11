@@ -5,6 +5,7 @@ import path from "node:path";
 import { issueClientTicket } from "./client-ticket.mjs";
 import { nodeTlsOptions } from "./machine-identity.mjs";
 import { DevTunnelTransport } from "./devtunnel-transport.mjs";
+import { GatewayTransportCache } from "./gateway-transport-cache.mjs";
 
 const NODE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const USAGE_PATHS = new Set([
@@ -114,7 +115,9 @@ export class NodeDataGateway {
     this.activeRequests = 0;
     this.nodePolicy = nodePolicy;
     this.tunnelTransportFactory = tunnelTransportFactory;
-    this.tunnelTransports = new Map();
+    this.tunnelTransports = new GatewayTransportCache(
+      node => this.tunnelTransportFactory(node, this.config.ca), this.config.ca,
+    );
   }
 
   setMachineNodes(nodes) {
@@ -124,23 +127,20 @@ export class NodeDataGateway {
       result.set(node.id, node);
     }
     this.nodes = result;
+    this.tunnelTransports.reconcile(result.values());
   }
 
   upstreamOptions(node) {
     const options = nodeTlsOptions(node, this.config.ca);
     if (node.devTunnel) {
       if (typeof node.getTunnelToken !== "function") throw new Error("Missing node-scoped tunnel credential provider");
-      if (!this.tunnelTransports.has(node.id)) {
-        this.tunnelTransports.set(node.id, this.tunnelTransportFactory(node, this.config.ca));
-      }
-      options.agent = this.tunnelTransports.get(node.id).agent;
+      options.agent = this.tunnelTransports.get(node).agent;
     }
     return options;
   }
 
   async close() {
-    await Promise.allSettled([...this.tunnelTransports.values()].map(transport => transport.dispose()));
-    this.tunnelTransports.clear();
+    await this.tunnelTransports.close();
   }
 
   endpoint(nodeId, allowedIds) {
