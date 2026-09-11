@@ -1,9 +1,9 @@
 ---
 name: config-new-codey-machine
-description: "在 Linux x64 上一键覆盖安装 Codey 节点：安装唯一 codey npm 包，从官方源安装 DevTunnel、Node 和最新版 Codex，并创建 systemd 守护。"
+description: "安装 Linux/Windows x64 共用的 Codey npm 运行包并自检；Linux 另支持 DevTunnel 和 systemd 一键节点部署，Windows 运行包安装不替代其服务托管配置。"
 ---
 
-# Linux 一键安装 Codey 节点
+# 安装共享 Codey 运行包与 Linux 节点
 
 交付物是完整的 `config-new-codey-machine.zip` Skill，包含本文件、
 `agents/openai.yaml`、安装脚本和 `assets/codey-<version>.tgz`。
@@ -15,6 +15,29 @@ description: "在 Linux x64 上一键覆盖安装 Codey 节点：安装唯一 co
 - Workspace 和网关的编译产物直接进入包，共用一棵 npm 运行依赖树。
 - 更新器和 `codey setup` 部署入口也在包内；两个后端可独立运行，但只能整包更新。
 
+## 先区分运行包安装和托管部署
+
+两种系统使用同一份 `assets/codey-<version>.tgz` 和 SHA-256，不生成另一个
+`codey-win` 包，也不在 Windows 重新生成依赖锁。Node.js 22.13+（含 npm）已安装时，
+Windows PowerShell 从 Skill 根目录执行：
+
+```powershell
+$package = @(Get-Item .\assets\codey-*.tgz)
+if ($package.Count -ne 1) { throw "Skill must contain exactly one Codey npm artifact." }
+node .\scripts\install-runtime.mjs --package ($package[0].FullName)
+```
+
+这条入口只安装运行包、准备本机原生依赖、自检并注册用户 PATH。不修改现有
+Windows 服务、DevTunnel、模型凭据或 Codex 配置；不要在 Windows 调用 Linux
+的 `codey setup` / systemd 升级器，也不要把运行包安装成功报告为托管节点部署成功。
+仅验证时追加 `--check`（仍会安装 npm 依赖，但不修改 PATH）。后续可执行
+`codey doctor --json` 检查原生模块，再按用户要求登录或手动启动服务。
+
+Linux 也可使用 `node scripts/install-runtime.mjs --package <包路径>` 只安装运行包。
+用户要求完整 Linux 节点部署时，使用下文的一键入口，而不是停在运行包安装。
+
+## Linux 托管部署
+
 安装器校验后，在私有 release 目录中执行一次 npm 安装，准备目标平台的原生依赖，
 并在停止旧服务前检查整个包。Node、Codex、DevTunnel runtime 不进入包；
 Codex SDK 的纯 JS 模块随包构建，不通过 npm 再安装第二份 Codex native runtime。
@@ -22,7 +45,7 @@ Codex SDK 的纯 JS 模块随包构建，不通过 npm 再安装第二份 Codex 
 公共 npm 的 `codey` 名称被其他项目占用；使用下载的 `.tgz`、明确的 HTTPS npm
 包 URL，或固定版本配合显式私有 registry。不要从公共 registry 安装同名项目。
 使用本 Skill 时，先定位包含本文件的 Skill 根目录，确认 `assets/` 中只有一个
-`codey-*.tgz`。在目标普通用户下，从 Skill 根目录执行：
+`codey-*.tgz`。在目标 Linux 普通用户下，从 Skill 根目录执行：
 
 ```bash
 bash scripts/install-npm.sh --package assets/codey-*.tgz
@@ -39,7 +62,8 @@ npm 先安装并准备原生依赖，再调用包内 `codey setup`。已有 npm 
 使用当前用户 HOME 下的 prefix，例如 `npm install --global --prefix "$HOME/.local" ./codey-版本.tgz`。
 不要用 root 所有的系统级 prefix，或带空白和 systemd 特殊字符的安装路径。
 
-机器构建内置 `onboarding/setup.json`，只含公开 Portal 配置；通用构建需要
+机器构建内置 `onboarding/setup.json`，只含公开 Portal 配置并使用 `platform: auto`；
+Linux 托管部署按本机解析为 `linux-x64`。通用构建需要
 `codey setup --config <公开配置.json>`。禁止加入节点凭据或 owner。
 `codey setup --check` 不部署、不停止进程、不做模型请求；一键脚本的 `--check`
 会安装并验证 npm 包，但不执行配置。仅 npm 安装绝不自动运行六步部署。

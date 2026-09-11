@@ -10,10 +10,60 @@ import subprocess
 import tarfile
 import tempfile
 import urllib.request
+from urllib.parse import urlsplit
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "packages/codey"
+RUNTIME_PLATFORMS = ["linux-x64", "windows-x64"]
+TEXT_SUFFIXES = {".js", ".mjs", ".cjs", ".json", ".map", ".md", ".html", ".css", ".svg", ".txt", ".sh", ".ps1"}
+
+
+def validate_runtime_lock(package, lock):
+    if (lock.get("name") != "codey" or lock.get("version") != package["version"]
+            or lock.get("lockfileVersion") != 3 or "os" in package or "cpu" in package):
+        raise RuntimeError("Use the one platform-neutral Codey manifest and lock")
+    root = lock.get("packages", {}).get("", {})
+    if root.get("name") != "codey" or root.get("version") != package["version"]:
+        raise RuntimeError("Codey lock root does not match the package")
+    for group in ("dependencies", "optionalDependencies"):
+        if package.get(group, {}) != root.get(group, {}):
+            raise RuntimeError("Codey manifest and dependency lock differ")
+    for name, item in lock.get("packages", {}).items():
+        if not name:
+            continue
+        url = urlsplit(item.get("resolved", ""))
+        if (item.get("link") or url.scheme != "https" or url.hostname != "registry.npmjs.org"
+                or url.port not in (None, 443) or url.username or url.password or url.query or url.fragment
+                or not re.match(r"sha(?:1|256|384|512)-[A-Za-z0-9+/]+={0,2}(?:\s|$)", item.get("integrity", ""))):
+            raise RuntimeError("Use the shared public npm lock; private feed or local dependency found")
+
+
+def normalize_runtime_text(runtime):
+    """The release's bytes must not depend on checkout CRLF conventions."""
+    for file in runtime.rglob("*"):
+        if not file.is_file() or "node_modules" in file.relative_to(runtime).parts:
+            continue
+        if file.suffix in TEXT_SUFFIXES or "LICENSE" in file.name:
+            body = file.read_bytes()
+            if b"\r\n" in body:
+                file.write_bytes(body.replace(b"\r\n", b"\n"))
+
+
+def write_runtime_installer(output, artifact):
+    source = (ROOT / "scripts/install-codey-runtime.mjs").read_text()
+    for marker, value in [
+        ('const DEFAULT_PACKAGE_FILE = "";', artifact["file"]),
+        ('const DEFAULT_PACKAGE_SHA256 = "";', artifact["sha256"]),
+    ]:
+        if source.count(marker) != 1:
+            raise RuntimeError("Invalid shared runtime installer template")
+        source = source.replace(marker, marker.split(" = ")[0] + " = " + json.dumps(value) + ";")
+    installer = output / "install-codey.mjs"
+    installer.write_text(source, newline="\n")
+    (output / (artifact["file"] + ".sha256")).write_text(
+        f"{artifact['sha256']}  {artifact['file']}\n", newline="\n")
+    return metadata(installer)
 
 
 def run(args, *, cwd=None, env=None, capture=False):
@@ -152,6 +202,7 @@ def inspect_npm_package(file):
     required = {
         "package/package.json", "package/npm-shrinkwrap.json", "package/bin/codey.mjs",
         "package/lib/cli.mjs", "package/codey-build.json", "package/dist-server/server/index.js",
+        "package/lib/doctor.mjs", "package/lib/package-info.mjs",
         "package/lib/codex-sdk/index.js",
         "package/dist/index.html", "package/gateway/main.js", "package/pages/index.html",
         "package/updater/install.py", "package/updater/engine.py", "package/updater/updater.py",
@@ -168,6 +219,11 @@ def inspect_npm_package(file):
                     or expanded > 512 * 1024 * 1024 or len(files) >= 100000):
                 raise RuntimeError("Unsafe Codey npm package")
             files.add(name.as_posix())
+            if item.isfile():
+                prefix = archive.extractfile(item).read(4)
+                if (name.suffix.lower() in {".node", ".exe", ".dll", ".so", ".dylib"}
+                        or prefix == b"\x7fELF" or prefix[:2] == b"MZ"):
+                    raise RuntimeError("Shared Codey packages must not bundle platform-native binaries")
         if not required.issubset(files) or any(
             "/node_modules/" in name or name.endswith((".tgz", ".tar.gz"))
             or (name.endswith("/package.json") and name != "package/package.json") for name in files
@@ -194,6 +250,9 @@ def inspect_npm_package(file):
                 or build.get("schema") != 1 or build.get("name") != "codey" or build.get("version") != package["version"]
                 or build.get("lockSha256") != hashlib.sha256(lock_raw).hexdigest()):
             raise RuntimeError("Invalid Codey npm metadata")
+        validate_runtime_lock(package, lock)
+        if build.get("runtimePlatforms") != RUNTIME_PLATFORMS or "platform" in build:
+            raise RuntimeError("Codey must declare one shared Linux/Windows runtime, not a build-host platform")
         for group in ("dependencies", "optionalDependencies"):
             deps = package.get(group, {})
             if (deps != lock.get("packages", {}).get("", {}).get(group, {})
@@ -244,12 +303,15 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     cloud_info["repository"] = "https://github.com/niuzheng168/claudecodeui.git"
     copilot_info["repository"] = "https://github.com/niuzheng168/copilot-api.git"
     package = json.loads((PACKAGE / "package.json").read_text())
+    locked_bytes = (PACKAGE / "package-lock.json").read_bytes().replace(b"\r\n", b"\n")
+    validate_runtime_lock(package, json.loads(locked_bytes))
     validate_dependencies(package, json.loads((cloud / "package.json").read_text()),
                           json.loads((copilot / "package.json").read_text()))
     runtime = work / "codey"
     copy_required(PACKAGE, runtime, [
-        "package.json", "package-lock.json", "bin", "lib", "README.md", "scripts",
+        "package.json", "bin", "lib", "README.md", "scripts",
     ])
+    (runtime / "npm-shrinkwrap.json").write_bytes(locked_bytes)
     sdk_info = compile_sources(cloud, copilot, runtime, node, work, package["version"], env)
     copy_required(ROOT / "node-updater", runtime / "updater", [
         "install.py", "updater.py", "engine.py", "probe.mjs", "UPGRADE.md",
@@ -264,16 +326,21 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     shutil.copy2(cloud / "LICENSE", runtime / "licenses/cloudcli-LICENSE")
     shutil.copy2(copilot / "LICENSE", runtime / "licenses/copilot-api-LICENSE")
     shutil.copy2(cloud / "node_modules/@openai/codex-sdk/LICENSE", runtime / "licenses/codex-sdk-LICENSE")
-    run([node / "bin/npm", "ci", "--omit=dev", "--no-audit", "--no-fund"], cwd=runtime, env=env)
-    run([node / "bin/npm", "shrinkwrap", "--ignore-scripts"], cwd=runtime, env=env)
+    normalize_runtime_text(runtime)
+    run([node / "bin/npm", "ci", "--omit=dev", "--no-audit", "--no-fund",
+         "--registry=https://registry.npmjs.org"], cwd=runtime, env=env)
+    if (runtime / "npm-shrinkwrap.json").read_bytes() != locked_bytes:
+        raise RuntimeError("npm changed the canonical shared dependency lock")
     source_commit = run(["git", "-C", ROOT, "rev-parse", "HEAD"], capture=True).stdout.strip()
     source_dirty = bool(run([
         "git", "-C", ROOT, "status", "--porcelain", "--",
-        "packages/codey", "scripts/codey_package.py", "node-updater", "skills/config-new-codey-machine",
+        "packages/codey", "scripts/codey_package.py", "scripts/build-machine-bundle.py",
+        "scripts/install-codey-runtime.mjs", "node-updater", "skills/config-new-codey-machine",
     ], capture=True).stdout.strip())
     provenance = {
         "schema": 1, "name": "codey", "version": package["version"], "sourceCommit": source_commit,
         "sourceDirty": source_dirty,
+        "runtimePlatforms": RUNTIME_PLATFORMS,
         "cloudcli": cloud_info, "copilotApi": copilot_info, "codexSdk": sdk_info,
         "lockSha256": metadata(runtime / "npm-shrinkwrap.json")["sha256"],
         "workspaceEntrySha256": metadata(runtime / "dist-server/server/index.js")["sha256"],
@@ -284,7 +351,8 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     home = work / "smoke-home"
     home.mkdir()
     smoke_env = {**env, "HOME": str(home), "COPILOT_API_HOME": str(home / "copilot-api")}
-    for args in (["--version"], ["--help"], ["gateway", "--help"], ["workspace", "--help"], ["setup", "--help"]):
+    for args in (["--version"], ["--help"], ["gateway", "--help"], ["workspace", "--help"],
+                 ["setup", "--help"], ["doctor", "--json"]):
         run([node / "bin/node", runtime / "bin/codey.mjs", *args], cwd=runtime, env=smoke_env)
     if setup_config is not None:
         # A build tree is deliberately not an installed HOME prefix. Validate
@@ -305,6 +373,7 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     artifact = pack_runtime(runtime, output, node, env)
     result = {
         "schema": 1, "name": "codey", "node": node_version, "nodeDistribution": distribution,
+        "runtimePlatforms": RUNTIME_PLATFORMS,
         "bunBuildTool": "1.4.2", "cloudcli": cloud_info, "copilotApi": copilot_info,
         "codey": {
             "version": package["version"], "commit": source_commit,
@@ -312,6 +381,7 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
             "lockSha256": provenance["lockSha256"],
         },
         "artifact": artifact,
+        "runtimeInstaller": write_runtime_installer(output, artifact),
     }
     (output / "codey-package.json").write_text(json.dumps(result, indent=2) + "\n")
     if not keep_work:

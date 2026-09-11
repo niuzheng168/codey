@@ -7,9 +7,12 @@ import { LEGACY_NODE_CONNECTIONS_ENABLED } from "../public/portal-features.js";
 
 const source = (await readFile(new URL("../public/settings.js", import.meta.url), "utf8")).replace(/^import .*;\r?\n/gm, "");
 const nodeId = `n-${"a".repeat(24)}`;
-const filename = "codey-0.1.0.tgz";
-const endpoint = "/api/settings/machines/npm";
-const npmSetup = { npmAvailable: true, npmFile: filename };
+const filename = "config-new-codey-machine.zip";
+const endpoint = "/api/settings/machines/shared-skill";
+const sharedSetup = {
+  sharedSkillAvailable: true, sharedSkillBytes: 4194304, codey: "0.1.1",
+  runtimePlatforms: ["linux-x64", "windows-x64"],
+};
 const privateToken = "private-connect-token-must-not-appear-in-notices";
 
 function registration(platform = "linux-x64") {
@@ -22,7 +25,7 @@ function registration(platform = "linux-x64") {
   };
 }
 
-function archiveResponse({ type = "application/gzip", body = "npm tarball fixture", length, name = filename } = {}) {
+function archiveResponse({ type = "application/zip", body = "shared Skill ZIP fixture", length, name = filename } = {}) {
   return new Response(body, {
     headers: {
       "content-type": type,
@@ -40,11 +43,7 @@ async function page({ download = async () => archiveResponse(), pending = [], ma
   const timers = [];
   const redirects = [];
   const form = document.querySelector("#machine-skill-form");
-  form.action = endpoint;
-  form.dataset.machineKind = "npm";
-  const installerForm = document.querySelector("#machine-npm-installer-form");
-  installerForm.action = "/api/settings/machines/installer";
-  installerForm.dataset.machineKind = "installer";
+  assert.equal(form.action, endpoint, "The actual form must use the shared download endpoint");
   const button = document.querySelector("#download-machine-skill");
   let settingsRequests = 0;
   runInNewContext(source, {
@@ -66,7 +65,7 @@ async function page({ download = async () => archiveResponse(), pending = [], ma
         settingsRequests++;
         return { status: 200, ok: true, json: async () => ({
           nodes: [], user: { role: "user" },
-          machineSetup: machineSetup ?? { ...npmSetup, enabled: true, bytes: 4194304, node: "24.20.0", cloudcli: "1.37.2", copilotApi: "2.5.1" },
+          machineSetup: machineSetup ?? { ...sharedSetup, enabled: true, node: "24.20.0" },
           pendingMachines: pending,
         }) };
       }
@@ -86,7 +85,7 @@ async function page({ download = async () => archiveResponse(), pending = [], ma
   };
 }
 
-test("Linux downloads the npm package by authenticated same-origin POST without navigating away or extracting a ZIP", async () => {
+test("one shared Skill downloads by authenticated same-origin POST without selecting a platform or navigating away", async () => {
   const p = await page();
   const submission = p.submit();
   assert.equal(submission.event.defaultPrevented, true, "Native POST navigation must be prevented");
@@ -101,12 +100,13 @@ test("Linux downloads the npm package by authenticated same-origin POST without 
   assert.equal(options.cache, "no-store");
   assert.equal(options.redirect, "error");
   assert.equal(options.referrerPolicy, "same-origin", "Retain a verifiable Origin under the page's no-referrer policy");
+  assert.equal(options.headers.accept, "application/zip");
   assert.equal(options.body, undefined, "Never send caller-supplied owner, node ID or credentials");
   assert.deepEqual(p.downloads, [{ href: "blob:test-download", download: filename }]);
-  assert.equal(await p.objectUrls[0].text(), "npm tarball fixture");
+  assert.equal(await p.objectUrls[0].text(), "shared Skill ZIP fixture");
   assert.equal(p.button.disabled, false);
   assert.equal(p.settingsRequests, 1, "A static download must not create or refresh pending identities");
-  assert.match(p.elements.get("#machine-download-message").textContent, /无需解压/);
+  assert.match(p.elements.get("#machine-download-message").textContent, /Linux x64 \/ Windows x64.*同一份 npm 包/);
   assert.equal(p.revoked.length, 0, "Do not revoke before the browser consumes the download");
   assert.equal(p.timers.length, 1);
   assert.ok(p.timers[0].delay >= 1000);
@@ -114,8 +114,8 @@ test("Linux downloads the npm package by authenticated same-origin POST without 
   assert.deepEqual(p.revoked, ["blob:test-download"]);
 });
 
-test("only Linux download is enabled while Windows and macOS native launchers are pending", async () => {
-  const entry = { ...npmSetup, enabled: true, bytes: 4194304, node: "24.20.0", cloudcli: "1.37.2", copilotApi: "2.5.1" };
+test("the shared download replaces all platform-specific buttons without enabling unsupported managed installers", async () => {
+  const entry = { ...sharedSetup, enabled: true, node: "24.20.0" };
   const machineSetup = { ...entry, platforms: [
     { platform: "windows-x64", enabled: false, planned: true }, { ...entry, platform: "linux-x64" },
     { platform: "macos-arm64", enabled: false, planned: true },
@@ -123,22 +123,26 @@ test("only Linux download is enabled while Windows and macOS native launchers ar
   ] };
   const p = await page({ machineSetup });
   assert.equal(p.elements.get("#download-machine-skill").disabled, false);
-  assert.equal(p.elements.get("#download-machine-windows-skill").disabled, true);
-  assert.equal(p.elements.get("#download-machine-macos-skill").disabled, true);
-  assert.equal(p.elements.get("#download-machine-macos-intel-skill").disabled, true);
+  for (const id of ["#machine-windows-skill-form", "#machine-macos-skill-form", "#machine-macos-intel-skill-form",
+    "#machine-npm-installer-form", "#download-machine-npm-installer"]) {
+    assert.equal(p.elements.has(id), false);
+  }
+  assert.deepEqual(p.form.dataset, {});
+  assert.match(p.elements.get("#add-node").textContent, /Windows 安装保留现有服务与 DevTunnel 配置/);
 });
 
 test("the package status presents one Codey npm version rather than two installable apps", async () => {
   const p = await page({ machineSetup: {
-    ...npmSetup, enabled: true, bytes: 7 * 1024 * 1024, node: "24.20.0",
-    codey: "0.1.0", cloudcli: "1.37.2", copilotApi: "2.5.3",
+    ...sharedSetup, enabled: true, sharedSkillBytes: 7 * 1024 * 1024, bytes: 5 * 1024 * 1024,
+    node: "24.20.0", cloudcli: "1.37.2", copilotApi: "2.5.3",
   } });
   const status = p.elements.get("#machine-package-status").textContent;
-  assert.match(status, /Codey 0\.1\.0（统一 npm 包）/);
+  assert.match(status, /Codey 0\.1\.1（统一 npm 包）/);
+  assert.match(status, /Skill 约 7 MB/, "Show the size of the actual Skill download, not just the inner npm package");
   assert.doesNotMatch(status, /CloudCLI|copilot-api/);
 });
 
-test("static downloads ignore legacy pending identities and disable all download buttons in flight", async () => {
+test("static downloads ignore legacy pending identities and disable the single download button in flight", async () => {
   let finish;
   const gate = new Promise((resolve) => { finish = resolve; });
   const p = await page({ pending: [{ id: nodeId, expired: false }], download: () => gate });
@@ -146,9 +150,6 @@ test("static downloads ignore legacy pending identities and disable all download
   const retry = p.submit();
   assert.equal(retry.event.defaultPrevented, true);
   assert.equal(p.button.disabled, true);
-  assert.equal(p.elements.get("#download-machine-windows-skill").disabled, true);
-  assert.equal(p.elements.get("#download-machine-macos-skill").disabled, true);
-  assert.equal(p.elements.get("#download-machine-macos-intel-skill").disabled, true);
   const duplicate = p.submit();
   assert.equal(duplicate.event.defaultPrevented, true);
   assert.equal(p.requests.length, 1, "Double-clicking must not start another transfer");
@@ -175,9 +176,9 @@ test("download failures stay on the settings page, show the error and permit ret
     ["capacity", async () => new Response(JSON.stringify({ error: "待配置身份已达上限" }), { status: 409 }), /待配置身份已达上限/],
     ["unavailable", async () => new Response("<h1>Unavailable</h1>", { status: 503 }), /503/],
     ["network", async () => { throw new Error("Network interrupted"); }, /Network interrupted/],
-    ["wrong type", async () => archiveResponse({ type: "text/html", body: "<html>login</html>" }), /安装文件|配置包/],
-    ["wrong version", async () => archiveResponse({ name: "codey-99.0.0.tgz" }), /文件名/],
-    ["legacy ZIP", async () => archiveResponse({ type: "application/zip", name: "config-new-codey-machine.zip" }), /安装文件/],
+    ["wrong type", async () => archiveResponse({ type: "text/html", body: "<html>login</html>" }), /安装 Skill/],
+    ["platform-specific filename", async () => archiveResponse({ name: "config-new-codey-machine-windows.zip" }), /文件名/],
+    ["bare npm package", async () => archiveResponse({ type: "application/gzip", name: "codey-0.1.1.tgz" }), /安装 Skill/],
     ["empty", async () => archiveResponse({ body: "" }), /不完整|空/],
     ["truncated", async () => archiveResponse({ length: 1000 }), /不完整/],
   ]) {
@@ -193,7 +194,7 @@ test("download failures stay on the settings page, show the error and permit ret
   }
 });
 
-test("expired login redirects to login rather than downloading an error as an npm package", async () => {
+test("expired login redirects to login rather than downloading an error as a shared Skill", async () => {
   const p = await page({ download: async () => new Response('{"error":"请先登录 Codey"}', { status: 401 }) });
   await p.submit().finished;
   assert.deepEqual(p.redirects, ["/portal-auth/login"]);
@@ -207,28 +208,29 @@ test("the settings page has a visible, accessible download status next to the en
   assert.match(html, /id="machine-download-message"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.ok(html.indexOf('id="machine-download-message"') > html.indexOf('id="machine-skill-form"'));
   assert.ok(html.indexOf('id="machine-download-message"') < html.indexOf('id="add-prepared-machine-form"'));
-  assert.match(html, /无需解压 ZIP/);
+  assert.match(html, /应用始终通过 npm 安装，不要手工解压 .tgz/);
   assert.match(html, /不含 token 或机器身份[^<]*分发/);
-  assert.match(html, /action="\/api\/settings\/machines\/npm"/);
-  assert.match(html, /机器注册 JSON（最多 32 KB；传输后文件名允许改变）/);
+  assert.match(html, /action="\/api\/settings\/machines\/shared-skill"/);
+  assert.doesNotMatch(html, /data-machine-platform|选择目标系统|同平台机器|版本待迁移/);
+  assert.equal((html.match(/id="download-machine-[^"]*"/g) || []).length, 1);
+  assert.match(html, /机器的注册 JSON（最多 32 KB；传输后文件名允许改变）/);
+  assert.match(html, /系统类型由注册文件识别/);
   assert.match(html, /含私密凭据[^<]*HTTPS Portal[^<]*立即删除/);
 });
 
-test("the companion launcher downloads as a shell script, never a ZIP or npm tarball", async () => {
-  const p = await page({ download: async () => archiveResponse({
-    type: "text/x-shellscript; charset=utf-8", name: "install-codey-linux.sh", body: "#!/usr/bin/env bash\n",
-  }) });
-  await p.submit(p.elements.get("#machine-npm-installer-form")).finished;
-  assert.equal(p.requests[0].url, "/api/settings/machines/installer");
-  assert.equal(p.requests[0].options.headers.accept, "text/x-shellscript");
-  assert.equal(p.downloads[0].download, "install-codey-linux.sh");
-});
-
-test("legacy ZIP-only releases do not silently enable the new npm installation buttons", async () => {
-  const p = await page({ machineSetup: { enabled: true, node: "24.20.0", bytes: 1000 } });
-  assert.equal(p.button.disabled, true);
-  assert.equal(p.elements.get("#download-machine-npm-installer").disabled, true);
-  assert.match(p.elements.get("#machine-package-status").textContent, /不会退回 ZIP/);
+test("old or incomplete releases cannot enable the shared entry or send a hidden Linux fallback request", async () => {
+  for (const machineSetup of [
+    { enabled: true, node: "24.20.0", bytes: 1000 },
+    { enabled: true, npmAvailable: true, npmFile: "codey-0.1.0.tgz" },
+    { ...sharedSetup, enabled: true, runtimePlatforms: ["linux-x64"] },
+    { ...sharedSetup, enabled: true, sharedSkillAvailable: false },
+  ]) {
+    const p = await page({ machineSetup });
+    assert.equal(p.button.disabled, true);
+    assert.match(p.elements.get("#machine-package-status").textContent, /不会以旧的 Linux 专用包代替/);
+    await p.submit().finished;
+    assert.equal(p.requests.length, 0);
+  }
 });
 
 test("adding a node with unavailable quota shows the warning and never claims model inference was verified", async () => {
@@ -236,7 +238,7 @@ test("adding a node with unavailable quota shows the warning and never claims mo
     const p = await page({ download: async () => new Response(JSON.stringify({
       node: { name: "Windows Dev Box" }, verification: { usage, tokenUsage: true },
     }), { status: 201, headers: { "content-type": "application/json" } }) });
-    const payload = registration();
+    const payload = registration(usage ? "linux-x64" : "windows-x64");
     p.elements.get("#prepared-machine-file").files = [{
       name: "codey-machine-registration.json", size: 500, text: async () => JSON.stringify(payload),
     }];

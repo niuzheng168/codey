@@ -82,6 +82,19 @@ test("npm setup uses the installed root and derives stable metadata without a ta
   await assert.rejects(installedSetup(f.pkg), /fingerprint mismatch/);
 });
 
+test("the shared package's auto configuration resolves only at Linux managed setup time", async t => {
+  const f = await fixture(t);
+  const shared = { ...config, platform: "auto" };
+  assert.equal(validateSetupConfig(shared), shared);
+  const file = path.join(f.pkg, "onboarding/setup.json");
+  const bytes = JSON.stringify(shared);
+  await writeFile(file, bytes);
+  const prepared = await installedSetup(f.pkg);
+  assert.equal(prepared.manifest.platform, "linux-x64");
+  assert.equal(prepared.setup.platform, "linux-x64");
+  assert.equal(await readFile(file, "utf8"), bytes, "Setup must not rewrite the shared npm artifact");
+});
+
 test("missing baked setup can use an explicit public config; missing or changed locks fail", async t => {
   const f = await fixture(t);
   await rm(path.join(f.pkg, "onboarding/setup.json"));

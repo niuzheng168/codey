@@ -159,7 +159,7 @@
         <div class="dialog-heading">
           <div>
             <h2 id="add-node-title">添加自己的节点</h2>
-            <p id="add-node-description" class="muted">选择目标系统，使用本人 GitHub 登录配置私有 DevTunnel，再验通添加。Windows / macOS / Linux 均无需开放入站端口。</p>
+            <p id="add-node-description" class="muted">下载同一份 Codey 安装 Skill，在目标机器配置私有 DevTunnel，再上传注册文件。无需在这里选择系统。</p>
           </div>
           <button id="close-add-node" class="icon-button quiet" type="button" aria-label="关闭添加节点" autofocus>×</button>
         </div>
@@ -167,40 +167,25 @@
           <li>
             <span class="step-number" aria-hidden="true">1</span>
             <div class="step-content">
-              <h3>下载 Codey npm 包和一键安装脚本</h3>
-              <p class="muted">Linux 直接使用 npm 安装，无需解压 ZIP。一个 codey 包包含 Workspace、网关、更新器和部署入口，不含 token 或机器身份，可分发到多台机器。</p>
-              <form id="machine-windows-skill-form" action="/api/settings/machines/skill?platform=windows-x64" method="post" data-machine-platform="windows-x64">
-                <button id="download-machine-windows-skill" type="submit" disabled>Windows · PowerShell 版本待迁移</button>
+              <h3>下载 Codey 安装 Skill</h3>
+              <p class="muted">Linux x64 / Windows x64 共用一个 codey npm 包，包含 Workspace 与网关。Skill 内附安装脚本，不含 token 或机器身份，可分发到多台机器。</p>
+              <form id="machine-skill-form" action="/api/settings/machines/shared-skill" method="post">
+                <button id="download-machine-skill" class="primary" type="submit" disabled>↓ 下载 Codey 安装 Skill</button>
               </form>
-              <p id="machine-windows-package-status" class="muted">正在检查 Windows 配置包…</p>
-              <form id="machine-skill-form" action="/api/settings/machines/npm" method="post" data-machine-platform="linux-x64" data-machine-kind="npm">
-                <button id="download-machine-skill" type="submit" disabled>↓ Linux · Codey npm 包</button>
-              </form>
-              <form id="machine-npm-installer-form" action="/api/settings/machines/installer" method="post" data-machine-platform="linux-x64" data-machine-kind="installer">
-                <button id="download-machine-npm-installer" type="submit" disabled>↓ Linux · 一键安装脚本</button>
-              </form>
-              <p id="machine-package-status" class="muted">正在检查 Linux 配置包…</p>
-              <form id="machine-macos-skill-form" action="/api/settings/machines/skill?platform=macos-arm64" method="post" data-machine-platform="macos-arm64">
-                <button id="download-machine-macos-skill" type="submit" disabled>macOS · 版本待迁移</button>
-              </form>
-              <p id="machine-macos-status" class="muted">正在检查 macOS Apple Silicon 配置包…</p>
-              <form id="machine-macos-intel-skill-form" action="/api/settings/machines/skill?platform=macos-x64" method="post" data-machine-platform="macos-x64">
-                <button id="download-machine-macos-intel-skill" type="submit" disabled>macOS Intel · 版本待迁移</button>
-              </form>
-              <p id="machine-macos-intel-status" class="muted">正在检查 macOS Intel 配置包…</p>
+              <p id="machine-package-status" class="muted">正在检查 Codey 共用安装 Skill…</p>
               <p id="machine-download-message" role="status" aria-live="polite"></p>
             </div>
           </li>
           <li>
             <span class="step-number" aria-hidden="true">2</span>
             <div class="step-content">
-              <h3>通过 npm 安装并配置目标机器</h3>
-              <p class="muted">将下载的 .tgz 和脚本放在同一目录，执行 <code>bash install-codey-linux.sh</code>。脚本直接用 npm 安装，再运行包内的 <code>codey setup</code> 完成六步部署，无需手工解压。</p>
-              <p class="muted">也可先用 <code>npm install --global --prefix "$HOME/.local" ./codey-版本.tgz</code> 安装，再执行 <code>"$HOME/.local/bin/codey" setup</code>。仅 npm 安装不会修改系统服务。</p>
+              <h3>在目标机器执行 Skill</h3>
+              <p class="muted">解压 Skill 后，让目标机器的安装助手按 <code>SKILL.md</code> 执行，识别系统并选择安装步骤。应用始终通过 npm 安装，不要手工解压 .tgz。</p>
+              <p class="muted">仅安装运行包不等于节点已接入；还需完成私有 DevTunnel、模型登录和机器注册。</p>
               <details class="setup-help">
                 <summary>支持范围与安全说明</summary>
-                <p class="muted">当前发布 Linux x64。Windows PowerShell 与 macOS 原生入口将在同一六步流程稳定后迁移；不得在这些系统回退执行 Bash 安装器。</p>
-                <p class="muted">Linux 通过本人 GitHub 登录的私有 DevTunnel 主动连接，不需要节点的云资源管理权限。客户端会独立随机生成每台机器的私密凭据，模型登录另行完成。</p>
+                <p class="muted">共用运行包支持 Linux x64 / Windows x64。Linux 包含完整托管部署；Windows 安装保留现有服务与 DevTunnel 配置，不运行 Linux 的 codey setup。</p>
+                <p class="muted">使用本人 GitHub 登录的私有 DevTunnel 主动连接，无需开放入站端口。每台机器独立生成私密凭据，模型登录另行完成。</p>
                 <p class="muted">下载不会创建或刷新待配置身份。同一个固定 Skill 包可以复用分发，每台机器最终生成各自的私密注册文件。</p>
               </details>
             </div>
@@ -209,7 +194,7 @@
             <span class="step-number" aria-hidden="true">3</span>
             <div class="step-content">
               <h3>上传私密注册文件并添加机器</h3>
-              <p class="muted">上传 Skill 生成的机器注册 JSON（最多 32 KB；传输后文件名允许改变）。此文件含私密凭据，只能上传到当前 HTTPS Portal；不要通过聊天、邮件或日志传递，添加成功后立即删除。</p>
+              <p class="muted">上传已配置机器的注册 JSON（最多 32 KB；传输后文件名允许改变），系统类型由注册文件识别。此文件含私密凭据，只能上传到当前 HTTPS Portal；不要通过聊天、邮件或日志传递，添加成功后立即删除。</p>
               <form id="add-prepared-machine-form" class="import-form">
                 <label>私密机器注册文件<input id="prepared-machine-file" type="file" accept=".json,application/json" required /></label>
                 <button class="primary" type="submit">验通并添加机器</button>

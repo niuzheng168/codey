@@ -43,18 +43,22 @@ async function temporary(t) {
   return root;
 }
 
-async function bundle(root, platform = "linux-x64") {
+async function bundle(root, platform = "linux-x64", { shared = false } = {}) {
   assert.equal(platform, "linux-x64");
   await mkdir(root, { recursive: true });
   const npmBytes = gzipSync("fixture npm application");
   const installerBytes = Buffer.from("#!/usr/bin/env bash\n# fixture npm launcher\n");
   const metadata = (file, body) => ({ file, size: body.length, sha256: createHash("sha256").update(body).digest("hex") });
+  const version = shared ? "0.1.1" : "0.1.0";
+  const npmMetadata = metadata(`codey-${version}.tgz`, npmBytes);
+  const runtimeInstallerBytes = Buffer.from(`#!/usr/bin/env node\nconst DEFAULT_PACKAGE_FILE = "${npmMetadata.file}";\nconst DEFAULT_PACKAGE_SHA256 = "${npmMetadata.sha256}";\n`);
   const entries = [
     ["SKILL.md", "---\nname: config-new-codey-machine\ndescription: fixture\n---\n"],
     ["dependencies.json", "{}\n"], ["agents/openai.yaml", "interface: {}\n"],
     ["scripts/install.sh", "#!/usr/bin/env bash\n"], ["templates/a100-models.json", '{"models":[]}\n'],
     ["scripts/install-npm.sh", installerBytes],
-    ["assets/codey-0.1.0.tgz", npmBytes], ["assets/manifest.json", '{"schema":2,"name":"codey"}\n'],
+    ...(shared ? [["scripts/install-runtime.mjs", runtimeInstallerBytes]] : []),
+    [`assets/${npmMetadata.file}`, npmBytes], ["assets/manifest.json", '{"schema":2,"name":"codey"}\n'],
     ["assets/setup.json", '{"schema":1}\n'], ["assets/SHA256SUMS", "fixture\n"],
   ].map(([name, data]) => ({ name: `config-new-codey-machine/${name}`, data }));
   const stream = zipStream(entries);
@@ -66,8 +70,9 @@ async function bundle(root, platform = "linux-x64") {
     schema: 2, kind: "codey-machine-skill", platform, registrationSchema: 2,
     releaseId: `machine-${packageSha256.slice(0, 16)}`, installerReleaseId: "machine-" + "a".repeat(16),
     node: "24.20.0", cloudcli: { version: "test-cloudcli" }, copilotApi: { version: "test-copilot" },
-    runtimePackage: { name: "codey", ...metadata("codey-0.1.0.tgz", npmBytes) }, codey: { version: "0.1.0" },
+    runtimePackage: { name: "codey", ...npmMetadata }, codey: { version },
     npmSetup: 1, installer: metadata("install-codey-linux.sh", installerBytes),
+    ...(shared ? { runtimeInstaller: metadata("install-codey.mjs", runtimeInstallerBytes) } : {}),
     bundledRuntimes: ["cloudcli", "copilot-api", "updater"],
     downloadedOfficialRuntimes: ["node", "codex", "devtunnel"],
     package: {
@@ -81,13 +86,14 @@ async function bundle(root, platform = "linux-x64") {
   await writeFile(path.join(release, manifest.package.file), packageBytes);
   await writeFile(path.join(release, manifest.runtimePackage.file), npmBytes);
   await writeFile(path.join(release, manifest.installer.file), installerBytes);
+  if (shared) await writeFile(path.join(release, manifest.runtimeInstaller.file), runtimeInstallerBytes);
   const raw = JSON.stringify(manifest);
   await writeFile(path.join(release, "manifest.json"), raw);
   await writeFile(path.join(store, "active.json"), JSON.stringify({
     schema: 1, releaseId: manifest.releaseId,
     manifestSha256: createHash("sha256").update(raw).digest("hex"),
   }));
-  return { ...manifest, packageBytes, npmBytes, installerBytes };
+  return { ...manifest, packageBytes, npmBytes, installerBytes, runtimeInstallerBytes };
 }
 
 function unzip(archive) {
@@ -156,7 +162,7 @@ async function machineFile(root, nodeId, options = {}) {
   };
 }
 
-async function fixture(t) {
+async function fixture(t, { shared = false } = {}) {
   const root = await temporary(t);
   const master = randomBytes(32).toString("base64url");
   const ticketMaster = randomBytes(32).toString("base64url");
@@ -175,7 +181,7 @@ async function fixture(t) {
   const admin = (await auth.login("admin", password)).cookie.split(";")[0];
   const cookie = (await auth.login("member", password)).cookie.split(";")[0];
   const bundleRoot = path.join(root, "bundle");
-  const manifest = await bundle(bundleRoot);
+  const manifest = await bundle(bundleRoot, "linux-x64", { shared });
   const data = new NodeDataGateway({ nodes: [], signingKey: ticketMaster, ca: "legacy-test-ca" }, { nodePolicy: policy });
   const workspace = new CloudCliGateway({ nodes: [], ssoMaster: master, ca: "legacy-test-ca" }, { sessionAuthenticator: auth, nodePolicy: policy });
   const probes = [];
@@ -320,10 +326,86 @@ test("Linux downloads a standalone npm tarball and launcher with the existing au
   }
   const availability = await f.machineSetup.availability("linux-x64", f.member.id);
   assert.equal(availability.npmAvailable, true);
+  assert.equal(availability.sharedSkillAvailable, false, "Old Linux npm releases are not shared Skills");
   assert.equal(availability.npmFile, "codey-0.1.0.tgz");
   assert.equal(availability.entrypoint, "codey setup");
   assert.equal(availability.bytes, f.manifest.npmBytes.length);
   assert.deepEqual(await f.policy.list(f.member.id), []);
+});
+
+test("one authenticated shared Skill endpoint returns identical bytes without a platform selection or identity side effects", async t => {
+  const f = await fixture(t, { shared: true });
+  const availability = (await (await f.request("/api/settings")).json()).machineSetup;
+  assert.equal(availability.sharedSkillAvailable, true);
+  assert.deepEqual(availability.runtimePlatforms, ["linux-x64", "windows-x64"]);
+  assert.equal(availability.sharedSkillBytes, f.manifest.packageBytes.length);
+  assert.equal(availability.codey, "0.1.1");
+  assert.equal(availability.platforms.find(item => item.platform === "windows-x64").enabled, false,
+    "A common runtime package must not pretend to implement Windows managed deployment");
+  const endpoint = "/api/settings/machines/shared-skill";
+  for (const [user, agent] of [[f.cookie, "Windows NT 10.0; Win64; x64"], [f.admin, "X11; Linux x86_64"]]) {
+    const response = await f.request(endpoint, { method: "POST", user, headers: { "user-agent": agent } });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "application/zip");
+    assert.equal(response.headers.get("content-disposition"), 'attachment; filename="config-new-codey-machine.zip"');
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    assert.equal(response.headers.get("vary"), "Cookie");
+    const bytes = Buffer.from(await response.arrayBuffer());
+    assert.deepEqual(bytes, f.manifest.packageBytes);
+    const files = unzip(bytes);
+    assert.deepEqual(files.get("config-new-codey-machine/scripts/install-runtime.mjs"), f.manifest.runtimeInstallerBytes);
+    assert.equal([...files.keys()].filter(name => name.endsWith(".tgz")).length, 1);
+  }
+  for (const query of ["?platform=linux-x64", "?platform=windows-x64", "?platform=macos-arm64", "?ownerId=other"]) {
+    assert.equal((await f.request(endpoint + query, { method: "POST" })).status, 400);
+  }
+  assert.equal((await f.request(endpoint, { method: "POST", user: "" })).status, 401);
+  assert.equal((await f.request(endpoint, { method: "POST", headers: { origin: "https://evil.example" } })).status, 403);
+  assert.equal((await f.request(endpoint, { method: "POST", value: { ownerId: "other" } })).status, 400);
+  assert.equal((await f.request(endpoint, { method: "GET" })).status, 405);
+  assert.deepEqual(await f.policy.list(f.member.id), []);
+  assert.equal((await f.policy.pendingMachines(f.member.id)).length, 0);
+  assert.equal(f.probes.length, 0);
+  assert.equal(f.tunnelProbes.length, 0);
+});
+
+test("the shared endpoint never silently downloads an older Linux-only Skill", async t => {
+  const f = await fixture(t);
+  const response = await f.request("/api/settings/machines/shared-skill", { method: "POST" });
+  assert.equal(response.status, 503);
+  assert.match((await response.json()).error, /不会以旧的 Linux 专用包代替/);
+  assert.equal((await f.request("/api/settings/machines/skill", { method: "POST" })).status, 200,
+    "Legacy download APIs remain available to their existing clients");
+  assert.equal((await f.policy.pendingMachines(f.member.id)).length, 0);
+});
+
+test("shared availability validates the portable installer, its artifact binding and complete publication", async t => {
+  const f = await fixture(t, { shared: true });
+  const selected = await loadMachineBundle(f.bundleRoot);
+  const corrupt = Buffer.from(f.manifest.runtimeInstallerBytes);
+  corrupt[corrupt.length - 1] ^= 1;
+  await writeFile(selected.runtimeInstaller.path, corrupt);
+  await assert.rejects(loadMachineBundle(f.bundleRoot), /checksum/);
+  assert.equal((await f.request("/api/settings/machines/shared-skill", { method: "POST" })).status, 503);
+  await rm(selected.runtimeInstaller.path);
+  assert.equal((await f.machineSetup.availability(undefined, f.member.id)).enabled, false);
+  await writeFile(selected.runtimeInstaller.path, f.manifest.runtimeInstallerBytes);
+  assert.equal((await f.machineSetup.availability(undefined, f.member.id)).sharedSkillAvailable, true);
+
+  const wrongBinding = Buffer.from(f.manifest.runtimeInstallerBytes.toString()
+    .replace(f.manifest.runtimePackage.sha256, "a".repeat(64)));
+  await writeFile(selected.runtimeInstaller.path, wrongBinding);
+  const store = path.join(f.bundleRoot, "packages-v2");
+  const manifestFile = path.join(store, "releases", f.manifest.releaseId, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestFile, "utf8"));
+  manifest.runtimeInstaller.sha256 = createHash("sha256").update(wrongBinding).digest("hex");
+  const raw = JSON.stringify(manifest);
+  await writeFile(manifestFile, raw);
+  await writeFile(path.join(store, "active.json"), JSON.stringify({
+    schema: 1, releaseId: manifest.releaseId, manifestSha256: createHash("sha256").update(raw).digest("hex"),
+  }));
+  await assert.rejects(loadMachineBundle(f.bundleRoot), /does not match the npm artifact/);
+  assert.equal((await f.request("/api/settings/machines/shared-skill", { method: "POST" })).status, 503);
 });
 
 test("direct npm downloads reject corrupt artifacts and old releases never fall back to a ZIP", async t => {

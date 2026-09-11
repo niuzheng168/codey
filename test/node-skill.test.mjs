@@ -247,9 +247,9 @@ test("add-machine and empty-node entry points only expose the verified automatic
   assert.ok(app.includes('window.location.assign("/settings#add-node")'));
   assert.ok(app.match(/node-onboarding-actions[\s\S]*?<\/div>/)?.[0].includes('href="/settings#add-node"'));
   assert.ok(app.match(/elements\.dashboard\.innerHTML = '<section class="empty-state">[^\n]+/)?.[0].includes("安装 Codey"));
-  assert.ok(settings.includes('action="/api/settings/machines/npm" method="post"'));
-  assert.ok(settings.includes('action="/api/settings/machines/installer" method="post"'));
-  assert.match(settings, /无需解压 ZIP/);
+  assert.ok(settings.includes('action="/api/settings/machines/shared-skill" method="post"'));
+  assert.doesNotMatch(settings, /data-machine-platform|machine-npm-installer-form/);
+  assert.match(settings, /应用始终通过 npm 安装，不要手工解压 .tgz/);
   assert.ok(settings.indexOf('id="machine-skill-form"') < settings.indexOf('id="add-prepared-machine-form"'));
 });
 

@@ -36,7 +36,7 @@ export function validateSetupConfig(config) {
   const fields = ["schema", "portalOrigin", "platform", "network", "tunnelAuthProvider", "updater"];
   if (!config || typeof config !== "object" || Array.isArray(config) ||
       Object.keys(config).some(key => !fields.includes(key)) ||
-      config.schema !== 1 || config.platform !== "linux-x64" ||
+      config.schema !== 1 || !["auto", "linux-x64"].includes(config.platform) ||
       JSON.stringify(config.network) !== '{"mode":"devtunnel"}' ||
       config.tunnelAuthProvider !== "github" || config.updater?.protocol !== 1 ||
       Object.keys(config.updater).some(key => !["protocol", "releasePublicKey"].includes(key))) {
@@ -104,13 +104,15 @@ export async function installedSetup(root, configFile, nodeVersion = process.ver
     bundledRuntimes: ["cloudcli", "copilot-api", "updater"],
     downloadedOfficialRuntimes: ["node", "codex", "devtunnel"],
   };
-  return { root, manifest, setup: { ...config, releaseId } };
+  return { root, manifest, setup: { ...config, platform: manifest.platform, releaseId } };
 }
 
 export async function runSetup(root, args, { spawnProcess = spawn, home = os.homedir() } = {}) {
   const options = setupOptions(args);
   if (options.help) return console.log(SETUP_HELP);
-  if (process.platform !== "linux" || process.arch !== "x64") throw new Error("Managed setup supports Linux x64 only");
+  if (process.platform !== "linux" || process.arch !== "x64") {
+    throw new Error("Managed service setup supports Linux x64 only. On Windows use the shared npm installer, codey doctor and codey start; existing Windows service/DevTunnel configuration is retained.");
+  }
   const prepared = await installedSetup(root, options.config);
   home = await realpath(home);
   const allowed = [".local/share", ".local/lib/node_modules", ".npm-global/lib/node_modules", ".nvm/versions/node"];

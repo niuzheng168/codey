@@ -7,8 +7,9 @@ dependency. Both use Codey's single runtime dependency tree and shrinkwrap.
 ## Install a built package
 
 ```sh
-npm install --global ./codey-0.1.0.tgz
+npm install --global ./codey-0.1.1.tgz
 codey --version
+codey doctor
 codey auth login --provider copilot
 codey start
 ```
@@ -22,6 +23,40 @@ Node.js 22.13+ is required. Install the official Codex CLI separately; Codey
 does not package another Codex binary. The locked SDK's JavaScript is inlined
 as an internal module, without its transitive native CLI dependency. Native
 dependencies such as SQLite and PTY are installed by npm for the target machine.
+
+## One artifact for Linux and Windows
+
+The canonical release is **one `codey-<version>.tgz` with one SHA-256**, shared by
+Linux x64 and Windows x64. Do not rebuild a second `codey-win` package or regenerate
+its dependency lock on the target machine. Release builds use the repository's
+public-npm lock byte-for-byte and normalize text line endings before fingerprinting.
+No native executable or installed `node_modules` directory is included.
+
+With Node/npm already installed, place `install-codey.mjs` next to the `.tgz` and
+run the same command in Bash, PowerShell or cmd:
+
+```sh
+node install-codey.mjs
+```
+
+The installer verifies the embedded artifact checksum, installs into a new private
+prefix through npm, checks the package before enabling native install hooks, then
+runs `codey doctor`. It registers the CLI in the user's PATH without changing
+services, DevTunnel, provider credentials or Codex configuration. `--check` still
+installs and validates but does not register the CLI or edit PATH. A source checkout
+requires explicit `--package FILE.tgz --sha256 HASH`.
+
+Windows uses its native npm directory layout and a `.cmd` launcher; npm is invoked
+through `npm-cli.js`, not by trying to spawn `npm.cmd`. Existing unmanaged launchers
+are not overwritten. Open a new terminal or use the current-session PATH command
+printed by the installer. Native dependencies may need their platform build tools
+when no compatible prebuilt binary is available.
+
+**Runtime installation is separate from managed deployment.** Linux retains the
+systemd/DevTunnel `codey setup` workflow below. Windows can install and run the same
+gateway/workspace npm code, but its existing service/DevTunnel hosting remains
+external; the Linux updater and managed setup must not be run on Windows.
+`codey doctor` explicitly reports this distinction and never claims model login.
 
 ## Linux managed installation without a ZIP
 
@@ -42,7 +77,7 @@ Only the prerequisite Node distribution is extracted by the launcher, not Codey.
 For an existing Node.js installation, standard npm installation also works:
 
 ```sh
-npm install --global --prefix "$HOME/.local" ./codey-0.1.0.tgz
+npm install --global --prefix "$HOME/.local" ./codey-0.1.1.tgz
 "$HOME/.local/bin/codey" setup --check
 "$HOME/.local/bin/codey" setup
 ```
@@ -61,7 +96,9 @@ in the current one; the installer cannot change its parent shell's environment.
 Installing the npm package alone or using `--check` does not edit shell profiles.
 
 `machine:build` embeds only public Portal configuration (origin and updater public
-key). A generic `codey:build` needs `codey setup --config FILE`; the file has the
+key), with `platform: "auto"` so the application artifact is not tied to the Linux
+installer. Linux managed setup resolves that public configuration to `linux-x64`.
+A generic `codey:build` needs `codey setup --config FILE`; the file has the
 same public fields as `onboarding/setup.json`, without node identity or credentials.
 `codey setup --check` does not change services or contact models.
 The launcher's `--check` still installs npm dependencies, but does not deploy.
@@ -77,6 +114,7 @@ and session files. Merely installing the npm package never invokes setup.
 - `codey gateway start --headless --host 127.0.0.1 --port 4141`: run just the gateway.
 - `codey auth …`, `codey mcp …`, `codey gateway debug --json`: gateway tools
   through the same executable.
+- `codey doctor [--package-only] [--json]`: verify the common package and local native modules without services or models.
 - `codey setup [--config FILE] [--check]`: configure an installed Linux node.
 
 Existing environment configuration, gateway data and Codex sessions remain in
@@ -102,13 +140,16 @@ existing default.
 npm run codey:build -- --output artifacts/codey-npm-test
 ```
 
-Builds from the checked-out submodule commits in isolated directories, installs
-the unified runtime dependencies from `packages/codey/package-lock.json`, checks
+Build once on Linux x64 from the checked-out submodule commits in isolated directories.
+The same output is installed on Windows; a Windows source build is not a separate
+release. The builder installs the unified runtime dependencies from
+`packages/codey/package-lock.json`, checks
 native modules and entrypoints, then runs `npm pack`. The package contains one
 application manifest, `bin/codey.mjs`, workspace output in `dist-server/` and
 `dist/`, gateway output in `gateway/` and `pages/`, and the managed node updater.
 There are no embedded application tarballs, application-specific package
-manifests, or application-specific `node_modules` trees.
+manifests, or application-specific `node_modules` trees. `install-codey.mjs` and
+the artifact checksum are emitted alongside the npm package.
 
 Source commits and output fingerprints are recorded in `codey-build.json`;
 `sourceDirty` marks local uncommitted Codey packaging/updater changes (the commit
@@ -122,6 +163,16 @@ To validate a built artifact in a disposable npm prefix and HOME, without real
 credentials or model calls:
 
 ```sh
-CODEY_PACKAGE_TGZ="$PWD/artifacts/codey-npm-test/codey-0.1.0.tgz" \
-  node --test test/codey-package-install.test.mjs
+CODEY_PACKAGE_TGZ="$PWD/artifacts/codey-npm-test/codey-0.1.1.tgz" \
+  node --test test/codey-package-shared-install.test.mjs test/codey-package-install.test.mjs
 ```
+
+The shared-install test also runs natively on Windows:
+
+```powershell
+$env:CODEY_PACKAGE_TGZ = (Resolve-Path .\artifacts\codey-npm-test\codey-0.1.1.tgz).Path
+node --test test/codey-package-shared-install.test.mjs
+```
+
+Windows path/dispatch unit tests are not a substitute for that native test. Keep
+the Linux and Windows validation reports tied to the **same artifact hash**.

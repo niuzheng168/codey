@@ -19,11 +19,17 @@ cd codey
 
 节点应用定义在 `packages/codey/`：一份主 `package.json`、统一依赖锁和一个
 `codey` CLI，直接包含 CloudCLI 与 copilot-api 的构建产物，不依赖两个应用 npm 包。
+
+从 `0.1.1` 起，Linux x64 与 Windows x64 消费同一份 npm `.tgz` 和 SHA-256；
+不分别发布 `codey-linux` / `codey-win`。构建固定使用公共 npm 锁文件，
+目标机安装自己的原生依赖。已有 Node/npm 时可运行随包提供的
+`node install-codey.mjs`，并用 `codey doctor` 自检。Linux 的完整
+systemd/DevTunnel 部署仍是独立的 `codey setup` 流程，不会套用到 Windows。
 源码仍保留为 submodule，构建、安装和升级产物统一为 Codey。
 
 ```sh
 npm run codey:build -- --output artifacts/codey-npm
-npm install --global ./artifacts/codey-npm/codey-0.1.0.tgz
+npm install --global ./artifacts/codey-npm/codey-0.1.1.tgz
 codey --version
 codey start
 ```
@@ -32,11 +38,15 @@ codey start
 registry，不要从公共源安装同名包。构建不会自动发布或部署。
 完整的一键安装与整包升级见 [节点接入说明](./docs/codey-machine-setup.md)。
 
-Linux 节点现在直接下载标准 npm 包和 `install-codey-linux.sh`，不必解压 ZIP。
+“账号与节点 → 添加节点”只保留一个 Codey 安装 Skill 下载入口，不再让用户选择系统。
+Skill 内是同一份 Linux/Windows npm 包；安装步骤及注册文件仍按真实平台识别。
+旧的 Linux 专用发行版不会被当作共用安装包开放此入口。
+
+Linux 的独立 npm 包和 `install-codey-linux.sh` 入口仍保留，不必解压 Skill ZIP。
 将两者放在同一目录后运行 `bash install-codey-linux.sh`；也可以从仓库执行：
 
 ```sh
-bash scripts/linux/install-codey.sh --package ./codey-0.1.0.tgz
+bash scripts/linux/install-codey.sh --package ./codey-0.1.1.tgz
 ```
 
 一键脚本先用 npm 在新的私有 prefix 安装，再调用包内的 `codey setup`。

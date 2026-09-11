@@ -1,12 +1,31 @@
 # Codey Linux 一键节点接入
 
+## Linux / Windows 共用的应用包
+
+`codey-0.1.1.tgz` 是两个系统共用的运行包，不再独立生成 Windows 应用发行物。
+构建器从同一源码与公共 npm 锁生成一次，打包前规范化文本换行；
+不把任一系统的 `node_modules` 或原生二进制装进应用包。原生依赖在目标机安装。
+包内 `runtimePlatforms` 同时列出 `linux-x64` 与 `windows-x64`。
+
+随包提供的 `install-codey.mjs` 可在已有 Node.js 22.13+（含 npm）的两种系统上运行，
+检查内置 SHA-256、npm 安装、新的 `codey doctor` 原生模块自检及用户 PATH。
+它只安装运行包，不接管服务、凭据或 DevTunnel；Windows 托管部署不会因此自动启用。
+Linux 完整一键流程仍用下文的脚本。
+
 ## Skill ZIP 交付
 
 需要 Skill 时，应交付 `config-new-codey-machine.zip`，而不是只有 README 和脚本的
 普通 ZIP。完整包以 `config-new-codey-machine/` 为根，包含 `SKILL.md`、
-`agents/openai.yaml`、`scripts/install-npm.sh` 和唯一的 `assets/codey-<version>.tgz`。
+`agents/openai.yaml`、`scripts/install-npm.sh`、`scripts/install-runtime.mjs`
+和唯一的 `assets/codey-<version>.tgz`。
 
-在 Skill 根目录执行：
+“账号与节点 → 添加节点”只有一个“下载 Codey 安装 Skill”按钮，不按操作系统分栏。
+它使用不带平台参数的 `POST /api/settings/machines/shared-skill`；只有已发布并校验
+跨平台安装器及对应 npm 包的发行版才可用。旧 Linux 专用包不会冒充共用包。
+安装时读取 `SKILL.md` 按实际系统执行；注册时仍校验 JSON 中的真实平台，
+不改变 Windows 托管部署与 Linux 的支持边界。
+
+Linux 完整节点部署在 Skill 根目录执行：
 
 ```bash
 bash scripts/install-npm.sh --package assets/codey-*.tgz
@@ -17,8 +36,8 @@ bash scripts/install-npm.sh --package assets/codey-*.tgz
 
 ## 独立 npm 入口
 
-活动入口是 `skills/config-new-codey-machine/SKILL.md`。Linux x64 从 Portal
-直接下载 `codey-<version>.tgz` 和 `install-codey-linux.sh`，放在同一目录后执行：
+活动入口是 `skills/config-new-codey-machine/SKILL.md`。旧的独立下载 API 仍保留：
+Linux x64 可下载 `codey-<version>.tgz` 和 `install-codey-linux.sh`，放在同一目录后执行：
 
 ```bash
 bash install-codey-linux.sh
@@ -32,9 +51,9 @@ bash install-codey-linux.sh
 私有 registry：
 
 ```bash
-bash scripts/linux/install-codey.sh --package ./codey-0.1.0.tgz
-bash scripts/linux/install-codey.sh --package https://packages.example/codey-0.1.0.tgz
-bash scripts/linux/install-codey.sh --package codey@0.1.0 --registry https://npm.example/
+bash scripts/linux/install-codey.sh --package ./codey-0.1.1.tgz
+bash scripts/linux/install-codey.sh --package https://packages.example/codey-0.1.1.tgz
+bash scripts/linux/install-codey.sh --package codey@0.1.1 --registry https://npm.example/
 ```
 
 上述 `scripts/linux/install-codey.sh` 是仓库内的源脚本。发布后的脚本名为
@@ -45,7 +64,7 @@ bash scripts/linux/install-codey.sh --package codey@0.1.0 --registry https://npm
 已有 Node.js 22.13+ 时也可以直接安装并部署：
 
 ```bash
-npm install --global --prefix "$HOME/.local" ./codey-0.1.0.tgz
+npm install --global --prefix "$HOME/.local" ./codey-0.1.1.tgz
 "$HOME/.local/bin/codey" setup --check
 "$HOME/.local/bin/codey" setup
 ```
@@ -61,7 +80,7 @@ npm install --global --prefix "$HOME/.local" ./codey-0.1.0.tgz
 立即使用时执行 `export PATH="$HOME/.local/bin:$PATH"`。仅 npm 安装及
 `--check` 不修改这些 shell 配置。
 
-`machine:build` 在包内加入 `onboarding/setup.json`，只有 Portal origin、平台、
+`machine:build` 在包内加入 `onboarding/setup.json`，只有 Portal origin、`platform: auto`、
 隧道方式和升级器公钥，没有机器身份、账号或 token。普通 `codey:build` 不绑定
 Portal，部署时需显式提供 `codey setup --config <公开配置.json>`。
 
@@ -131,7 +150,7 @@ Skill 通过 `scripts/install-npm.sh --package assets/codey-*.tgz` 走相同的 
 
 ```bash
 npm run codey:build -- --output artifacts/codey-npm
-npm install --global ./artifacts/codey-npm/codey-0.1.0.tgz
+npm install --global ./artifacts/codey-npm/codey-0.1.1.tgz
 codey --version
 codey start
 ```
@@ -155,22 +174,27 @@ codey start
 `~/.codex/auth.json`、`~/.codex/sessions/` 和其他用户文件保留；
 `~/.codex/config.toml`、`~/.codex/models.json` 以及 Codey 服务配置按当前版本覆盖。
 
-Windows PowerShell 和 macOS 版本暂不发布；等 Linux 实机流程稳定后再按同样六步迁移。
+Windows 完整托管部署和 macOS 版本暂不发布；Windows x64 可安装上述共用运行包，
+不把运行包安装误认为已完成六步托管部署。
 
 ## 独立发布
 
 发行版发布到共享存储的 `machine-bundles/packages-v2/`，使用不可变
 `releases/<releaseId>/` 和原子 `active.json`。发布器从已验证的兼容 ZIP 中取出
-原样的 Codey npm 包和小型一键脚本，三份文件及 manifest 全部上传成功才切换 active。
+原样的 Codey npm 包、Linux 一键脚本和共享运行包安装器，连同 Skill ZIP 及 manifest
+全部上传成功才切换 active。共享运行包安装器也包含在 Skill ZIP 内。
 Portal 从共享存储直接流式返回文件，不从镜像拼装，不把应用内嵌为 Base64 脚本。
 
-- `POST /api/settings/machines/npm`：标准 Codey npm `.tgz`。
+- `POST /api/settings/machines/shared-skill`：UI 唯一入口，Linux/Windows 共用安装 Skill，不接受平台参数。
+- `POST /api/settings/machines/npm`：标准 Codey npm `.tgz`，保留独立下载兼容。
 - `POST /api/settings/machines/installer`：`install-codey-linux.sh`。
 - `POST /api/settings/machines/skill`：旧 ZIP 兼容入口。
 
-三个入口保持相同的登录、CSRF、下载并发和无身份副作用边界。新文件必须通过
+下载入口保持相同的登录、CSRF、下载并发和无身份副作用边界。新文件必须通过
 路径、大小、文件类型和 SHA-256 校验；旧发行版未提供 `npmSetup: 1` 及独立文件时，
-新按钮禁用、npm 请求返回 503，不把 ZIP 伪装成 npm 包。
+npm 请求返回 503，不把 ZIP 伪装成 npm 包。共用入口还要求 `runtimeInstaller`
+指向已发布的 `install-codey.mjs`，内置文件名和 SHA-256 必须匹配同一 npm 包；
+缺失时禁用共用下载按钮，共用请求返回 503，而不是回退到旧 Linux 专用 Skill。
 
 - 更新 Portal：只部署 ACA 镜像，不修改下载包 `active.json`。
 - 更新下载包：运行 `scripts/publish-machine-skill.py`，不重启 ACA 或节点服务。

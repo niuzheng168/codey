@@ -1,4 +1,4 @@
 interface:
-  display_name: "Install Codey on Linux"
-  short_description: "用 npm 直接安装 Codey，并用 codey setup 配置 Linux 节点"
-  default_prompt: "使用 $config-new-codey-machine，在 Skill 根目录以目标 Linux x64 普通用户运行 bash scripts/install-npm.sh --package assets/codey-*.tgz，直接用包内唯一的 Codey npm 包安装并由 codey setup 部署；不要手工解压应用或改装公共 registry 的同名项目。"
+  display_name: "Install shared Codey"
+  short_description: "安装 Linux/Windows 共用的 Codey npm 运行包，或部署 Linux 节点"
+  default_prompt: "使用 $config-new-codey-machine，为目标系统安装同一份 Codey npm 包；Linux 完整节点部署走 install-npm.sh，Windows 运行包安装走 install-runtime.mjs，不运行 Linux 托管部署脚本。"

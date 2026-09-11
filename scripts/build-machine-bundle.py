@@ -8,7 +8,7 @@ import shlex
 import urllib.parse
 import zipfile
 
-from codey_package import ROOT, build_package, metadata
+from codey_package import ROOT, build_package, metadata, write_runtime_installer
 
 
 def assemble_bundle(output, built, portal_origin, public_key):
@@ -42,6 +42,8 @@ def assemble_bundle(output, built, portal_origin, public_key):
                                   "DEFAULT_PACKAGE_FILE=" + shlex.quote(artifacts[0]["file"]))
     (output / "install-codey-linux.sh").write_text(installer)
     (package_root / "scripts/install-npm.sh").write_text(installer)
+    runtime_installer = write_runtime_installer(output, artifacts[0])
+    shutil.copy2(output / runtime_installer["file"], package_root / "scripts/install-runtime.mjs")
     assets = package_root / "assets"
     assets.mkdir()
     for item in artifacts:
@@ -75,6 +77,7 @@ def assemble_bundle(output, built, portal_origin, public_key):
         "ok": True, "releaseId": manifest["releaseId"], "artifacts": artifacts,
         "package": package_metadata, "npmPackage": artifacts[0],
         "installer": metadata(output / "install-codey-linux.sh"),
+        "runtimeInstaller": runtime_installer,
     }
 
 
@@ -87,7 +90,7 @@ def build(args):
     if not public_key.startswith("-----BEGIN PUBLIC KEY-----\n") or len(public_key) > 8192:
         raise RuntimeError("Invalid updater public key")
     setup = {
-        "schema": 1, "portalOrigin": args.portal_origin, "platform": "linux-x64",
+        "schema": 1, "portalOrigin": args.portal_origin, "platform": "auto",
         "network": {"mode": "devtunnel"}, "tunnelAuthProvider": "github",
         "updater": {"protocol": 1, "releasePublicKey": public_key},
     }

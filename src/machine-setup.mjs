@@ -114,6 +114,7 @@ export async function loadMachineBundle(root, platformId = "linux-x64") {
   }
   let npmPackage;
   let installer;
+  let runtimeInstaller;
   if (manifest.npmSetup !== undefined) {
     if (manifest.npmSetup !== 1 || manifest.runtimePackage?.name !== "codey" ||
         !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(manifest.codey?.version ?? "")) {
@@ -124,7 +125,17 @@ export async function loadMachineBundle(root, platformId = "linux-x64") {
     installer = await releasedFile(release, manifest.installer, "install-codey-linux.sh",
       Buffer.from("#!/usr/bin/env bash\n"), 1024 * 1024);
   }
-  return { manifest, package: { ...packageInfo, path: packageFile }, npmPackage, installer };
+  if (manifest.runtimeInstaller !== undefined) {
+    if (!npmPackage || !installer) throw new Error("Shared Skill requires a complete npm release");
+    runtimeInstaller = await releasedFile(release, manifest.runtimeInstaller, "install-codey.mjs",
+      Buffer.from("#!/usr/bin/env node\n"), 1024 * 1024);
+    const source = await readFile(runtimeInstaller.path, "utf8");
+    if (!source.includes(`const DEFAULT_PACKAGE_FILE = "${npmPackage.file}";`) ||
+        !source.includes(`const DEFAULT_PACKAGE_SHA256 = "${npmPackage.sha256}";`)) {
+      throw new Error("Shared runtime installer does not match the npm artifact");
+    }
+  }
+  return { manifest, package: { ...packageInfo, path: packageFile }, npmPackage, installer, runtimeInstaller };
 }
 
 export function machineNetworkConfig(raw) {
@@ -174,11 +185,13 @@ export class MachineSetup {
       return { ...identity, enabled: false, reason: "请先配置节点升级器签名公钥，确保新机器可持续更新" };
     }
     try {
-      const { manifest, package: packageInfo, npmPackage, installer } = await this.selectedBundle(platformId);
+      const { manifest, package: packageInfo, npmPackage, installer, runtimeInstaller } = await this.selectedBundle(platformId);
       return {
         ...identity, enabled: true, platform: manifest.platform, releaseId: manifest.releaseId,
         bytes: npmPackage?.size ?? packageInfo.size,
         npmAvailable: Boolean(npmPackage && installer),
+        sharedSkillAvailable: Boolean(runtimeInstaller),
+        ...(runtimeInstaller ? { sharedSkillBytes: packageInfo.size, runtimePlatforms: ["linux-x64", "windows-x64"] } : {}),
         ...(npmPackage ? { npmFile: npmPackage.file, entrypoint: "codey setup" } : {}),
         node: manifest.node, cloudcli: manifest.cloudcli.version, copilotApi: manifest.copilotApi.version,
         ...(manifest.codey ? { codey: manifest.codey.version } : {}),
@@ -222,6 +235,9 @@ export class MachineSetup {
     const available = await this.availability(platformId, req.codeyPrincipal.id);
     if (!available.enabled) throw requestError(available.reason, 503);
     const selected = await this.selectedBundle(platformId);
+    if (format === "shared-skill" && !selected.runtimeInstaller) {
+      throw requestError("尚未发布 Linux / Windows 共用安装 Skill；不会以旧的 Linux 专用包代替", 503);
+    }
     const packageInfo = format === "npm" ? selected.npmPackage : format === "installer" ? selected.installer : selected.package;
     if (!packageInfo) throw requestError("尚未发布支持直接 npm 安装的 Codey 包和 Linux 一键脚本，请先更新机器发行版", 503);
     const contentType = format === "npm" ? "application/gzip"
@@ -305,8 +321,12 @@ export class MachineSetup {
     if (!pathname.startsWith("/api/settings/machines")) return false;
     try {
       if (!req.codeyPrincipal) throw requestError("需要登录", 401);
-      if (["/api/settings/machines/skill", "/api/settings/machines/npm", "/api/settings/machines/installer"].includes(pathname)) {
+      if (["/api/settings/machines/shared-skill", "/api/settings/machines/skill",
+        "/api/settings/machines/npm", "/api/settings/machines/installer"].includes(pathname)) {
         if (req.method !== "POST") throw requestError("Method not allowed", 405);
+        if (pathname.endsWith("/shared-skill") && url.search) {
+          throw requestError("共用安装 Skill 不接受平台或其他查询参数");
+        }
         if ([...url.searchParams.keys()].some((key) => key !== "platform") || url.searchParams.getAll("platform").length > 1) {
           throw requestError("只接受一个目标平台参数");
         }

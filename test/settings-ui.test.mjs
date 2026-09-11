@@ -24,8 +24,8 @@ async function page({ role = "user", hash = "", nodes = [ownedNode], pending = [
   const windowListeners = new Map();
   const state = {
     user: { role }, nodes: structuredClone(nodes), pendingMachines: pending,
-    machineSetup: { enabled: true, npmAvailable: true, npmFile: "codey-0.1.0.tgz",
-      bytes: 4194304, node: "24.20.0", codey: "0.1.0", cloudcli: "1.37.2", copilotApi: "2.5.1" },
+    machineSetup: { enabled: true, sharedSkillAvailable: true, runtimePlatforms: ["linux-x64", "windows-x64"],
+      sharedSkillBytes: 4194304, node: "24.20.0", codey: "0.1.1", cloudcli: "1.37.2", copilotApi: "2.5.1" },
   };
   const users = [{ id: "owner", username: "demo", role: "admin", enabled: true },
     { id: "member", username: "alice", role: "user", enabled: true }];
@@ -202,7 +202,8 @@ test("legacy pending identities are ignored because static Skill downloads do no
   assert.equal(p.requests.some((request) => request.url.includes(machineId)), false);
   await p.get("open-add-node").click();
   assert.match(p.get("add-node").textContent, /不含 token 或机器身份.*分发到多台机器/);
-  assert.match(p.get("add-node").textContent, /无需解压 ZIP/);
+  assert.match(p.get("add-node").textContent, /应用始终通过 npm 安装，不要手工解压 .tgz/);
+  assert.equal(p.get("add-node").querySelectorAll("form").length, 2, "Only one Skill download and one registration form");
 });
 
 test("the retained legacy editor still preserves its address restrictions behind the disabled UI flag", async () => {
@@ -227,7 +228,7 @@ test("the shipped node editor exposes only DevTunnel, display settings and the s
   assert.equal(row.querySelectorAll("img").length, 0);
   assert.equal(row.querySelector(".node-endpoint-field"), null);
   assert.doesNotMatch(row.textContent, /VNet|浏览器直连|接入资料|https:\/\//);
-  assert.match(p.get("machine-package-status").textContent, /Codey 0\.1\.0（统一 npm 包）/);
+  assert.match(p.get("machine-package-status").textContent, /Codey 0\.1\.1（统一 npm 包）/);
   assert.doesNotMatch(p.get("add-node").textContent, /CloudCLI|copilot-api|VNet|直连/i);
 });
 

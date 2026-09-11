@@ -74,7 +74,8 @@ def inspect_package(file):
         root = "config-new-codey-machine/"
         base = {
             root + "SKILL.md", root + "dependencies.json", root + "agents/openai.yaml",
-            root + "scripts/install.sh", root + "scripts/install-npm.sh", root + "templates/a100-models.json",
+            root + "scripts/install.sh", root + "scripts/install-npm.sh",
+            root + "scripts/install-runtime.mjs", root + "templates/a100-models.json",
             root + "assets/manifest.json",
             root + "assets/setup.json", root + "assets/SHA256SUMS",
         }
@@ -141,12 +142,22 @@ def inspect_package(file):
                             raise KeyError(required)
                 except (KeyError, TypeError, ValueError, AttributeError) as error:
                     raise PublishError("MISSING_NPM_SETUP") from error
-            if (bundled_setup != {key: value for key, value in setup.items() if key != "releaseId"}
+            # The one npm application is shared; the outer Skill remains a
+            # platform-specific managed deployment workflow.
+            comparable_setup = {**bundled_setup}
+            if comparable_setup.get("platform") == "auto":
+                comparable_setup["platform"] = setup["platform"]
+            if (comparable_setup != {key: value for key, value in setup.items() if key != "releaseId"}
                     or manifest["releaseId"] != "machine-" + npm_info["entrySha256"][:16]):
                 raise PublishError("NPM_SETUP_METADATA_MISMATCH")
         installer = archive.read(root + "scripts/install-npm.sh")
         if not installer.startswith(b"#!/usr/bin/env bash\n") or len(installer) > 1024 * 1024:
             raise PublishError("INVALID_NPM_INSTALLER")
+        runtime_installer = archive.read(root + "scripts/install-runtime.mjs")
+        if (not runtime_installer.startswith(b"#!/usr/bin/env node\n") or len(runtime_installer) > 1024 * 1024
+                or f'const DEFAULT_PACKAGE_FILE = "{filename}";'.encode() not in runtime_installer
+                or f'const DEFAULT_PACKAGE_SHA256 = "{expected[filename]["sha256"]}";'.encode() not in runtime_installer):
+            raise PublishError("INVALID_SHARED_RUNTIME_INSTALLER")
         checksums = archive.read(root + "assets/SHA256SUMS").decode("ascii").splitlines()
         expected_sums = {}
         for line in checksums:
@@ -175,6 +186,8 @@ def inspect_package(file):
         "npmSetup": 1,
         "installer": {"file": "install-codey-linux.sh", "size": len(installer),
                       "sha256": hashlib.sha256(installer).hexdigest()},
+        "runtimeInstaller": {"file": "install-codey.mjs", "size": len(runtime_installer),
+                             "sha256": hashlib.sha256(runtime_installer).hexdigest()},
         "codey": manifest["codey"],
         "bundledRuntimes": ["cloudcli", "copilot-api", "updater"],
         "downloadedOfficialRuntimes": ["node", "codex", "devtunnel"],
@@ -350,6 +363,7 @@ def publish(store, package_file, manifest, manifest_raw, expected_current):
                 for item, member in [
                     (manifest["runtimePackage"], "assets/" + manifest["runtimePackage"]["file"]),
                     (manifest["installer"], "scripts/install-npm.sh"),
+                    (manifest["runtimeInstaller"], "scripts/install-runtime.mjs"),
                 ]:
                     body = archive.read("config-new-codey-machine/" + member)
                     if len(body) != item["size"] or hashlib.sha256(body).hexdigest() != item["sha256"]:
