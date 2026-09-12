@@ -5,6 +5,24 @@ umask 077
 log() { printf '\n[%s/6] %s\n' "$1" "$2"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
+parse_devtunnel_json() {
+  # The pinned CLI writes its welcome banner to stdout even with --json.
+  # Keep one complete JSON object, and never echo credential-bearing parse errors.
+  "$1" -e '
+const fs = require("node:fs");
+try {
+  const output = fs.readFileSync(0, "utf8").replace(/^\uFEFF/, "");
+  const start = output.search(/^\s*\{/m);
+  if (start < 0) throw new Error();
+  const value = JSON.parse(output.slice(start));
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+  process.stdout.write(JSON.stringify(value) + "\n");
+} catch {
+  console.error("DevTunnel did not return a valid JSON object");
+  process.exitCode = 1;
+}
+'
+}
 stop_user_unit() { systemctl --user disable --now "$1" >/dev/null 2>&1 || true; }
 stop_system_unit() { sudo -n systemctl disable --now "$1" >/dev/null 2>&1 || true; }
 kill_matches() {
@@ -297,7 +315,8 @@ if [[ ! -x "$DEVTUNNEL" ]] ||
   mv -f "$tmp" "$DEVTUNNEL"
 fi
 
-if ! "$DEVTUNNEL" user show --json >"$STATE_ROOT/devtunnel-user.json" 2>/dev/null ||
+if ! "$DEVTUNNEL" user show --json 2>/dev/null |
+   parse_devtunnel_json "$NODE" >"$STATE_ROOT/devtunnel-user.json" ||
    ! "$NODE" - "$STATE_ROOT/devtunnel-user.json" <<'NODE'
 const d = JSON.parse(require("node:fs").readFileSync(process.argv[2], "utf8"));
 process.exit(String(d.status).toLowerCase() === "logged in" &&
@@ -305,13 +324,15 @@ process.exit(String(d.status).toLowerCase() === "logged in" &&
 NODE
 then
   "$DEVTUNNEL" user login --github --use-device-code-auth
-  "$DEVTUNNEL" user show --json >"$STATE_ROOT/devtunnel-user.json"
+  "$DEVTUNNEL" user show --json |
+    parse_devtunnel_json "$NODE" >"$STATE_ROOT/devtunnel-user.json"
 fi
 
 TUNNEL_ID="codey-$NODE_ID"
-if ! "$DEVTUNNEL" show "$TUNNEL_ID" --json >"$STATE_ROOT/tunnel-show.json" 2>/dev/null; then
+if ! "$DEVTUNNEL" show "$TUNNEL_ID" --json 2>/dev/null |
+   parse_devtunnel_json "$NODE" >"$STATE_ROOT/tunnel-show.json"; then
   "$DEVTUNNEL" create "$TUNNEL_ID" --description "Codey Linux $NODE_ID" --json \
-    >"$STATE_ROOT/tunnel-show.json"
+    | parse_devtunnel_json "$NODE" >"$STATE_ROOT/tunnel-show.json"
 fi
 readarray -t TUNNEL < <("$NODE" - "$STATE_ROOT/tunnel-show.json" "$TUNNEL_ID" <<'NODE'
 const fs = require("node:fs");
@@ -342,7 +363,8 @@ NODE
     "$DEVTUNNEL" port create "$QUALIFIED_TUNNEL" --port-number "$port" --protocol https --json >/dev/null
   fi
 done
-"$DEVTUNNEL" show "$QUALIFIED_TUNNEL" --json >"$CONFIG_ROOT/tunnel.json"
+"$DEVTUNNEL" show "$QUALIFIED_TUNNEL" --json |
+  parse_devtunnel_json "$NODE" >"$CONFIG_ROOT/tunnel.json"
 "$NODE" - "$CONFIG_ROOT/tunnel.json" "$TUNNEL_ID" "$TUNNEL_CLUSTER" <<'NODE'
 const fs = require("node:fs");
 const d = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -671,9 +693,11 @@ RENEW_SCRIPT="$RUNTIME_ROOT/renew-devtunnel.sh"
 cat >"$RENEW_SCRIPT" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+$(declare -f parse_devtunnel_json)
 tmp="\$(mktemp)"
 trap 'rm -f "\$tmp"' EXIT
-"$DEVTUNNEL" token "$QUALIFIED_TUNNEL" --scope connect --json >"\$tmp"
+"$DEVTUNNEL" token "$QUALIFIED_TUNNEL" --scope connect --json |
+  parse_devtunnel_json "$NODE" >"\$tmp"
 "$NODE" - "$IDENTITY" "$CONFIG_ROOT/tunnel.json" "\$tmp" "$PORTAL_ORIGIN" <<'NODE'
 const fs = require("node:fs"), crypto = require("node:crypto"), https = require("node:https");
 const [identityFile, tunnelFile, tokenFile, origin] = process.argv.slice(2);
@@ -759,7 +783,8 @@ for unit in codey-copilot-api.service codey-cloudcli.service codey-devtunnel.ser
 done
 
 TOKEN_FILE="$STATE_ROOT/connect-token.json"
-"$DEVTUNNEL" token "$QUALIFIED_TUNNEL" --scope connect --json >"$TOKEN_FILE"
+"$DEVTUNNEL" token "$QUALIFIED_TUNNEL" --scope connect --json |
+  parse_devtunnel_json "$NODE" >"$TOKEN_FILE"
 OUTPUT="$HOME_DIR/codey-machine-registration.json"
 "$NODE" - "$ASSETS/setup.json" "$IDENTITY" "$CONFIG_ROOT/tunnel.json" \
   "$TOKEN_FILE" "$CERT" "$OUTPUT" "$(hostname)" <<'NODE'
