@@ -9,8 +9,9 @@
 
 **代码实现不等于已上线。** 必须部署新版 Portal，在 Mac 首次接入代理，
 再发布对应平台的签名发行版。已发布的 **0.1.4 包只声明 Linux/Windows**，
-不能重标记或重打同版本当作 Mac 包。本次应用源码准备为 **0.1.5**；依赖版本
-和已发布 0.1.4 的字节不变，0.1.5 的构建、Mac 原生验收、发布仍是后续步骤。
+不能重标记或重打同版本当作 Mac 包。**0.1.5** 的共享包已包含 Mac 平台声明，
+依赖版本和已发布 0.1.4 的字节不变。Mac 可先按下文显式发布测试发行版，
+再从 Portal 进行首次实机验收；“可选择发行版”不等于“已经实机验收通过”。
 
 接入代理可以直接读取原来的 Mac npm 安装，包括旧三平台包中的 Apple Silicon
 安装；**不需要先装 0.1.5 才能接入**。首次成功心跳应显示真实的旧版本。
@@ -74,7 +75,7 @@ Mac 清单拒绝整个目录。仍不发布新的 Mac 新机安装器。
 `--package-only`），保存真实输出为构建目录的 `doctor-macos-arm64.json`
 或 `doctor-macos-x64.json`。发布器要求其平台、版本、包入口/锁文件指纹、
 源 commit、实际 Node major 和五项原生检查与该包完全匹配；没有 Mac 原生
-验证报告则拒绝签名发布。一次只声明这个报告实测的 Node major。
+验证报告则默认拒绝签名发布。常规发布一次只声明这个报告实测的 Node major。
 
 ```sh
 node scripts/publish-node-update.mjs publish \
@@ -82,6 +83,29 @@ node scripts/publish-node-update.mjs publish \
   --output /absolute/feed --private-key /absolute/private.pem \
   --platform macos-arm64 --sequence NEW_GLOBAL_SEQUENCE --codey-node-majors 24
 ```
+
+### 首次实机测试：先发布 canary，再从 Portal 验收
+
+用户明确要求先开放 Mac 测试时，可对**同一份已构建、已通过基础验证的包**使用：
+
+```sh
+node scripts/publish-node-update.mjs publish \
+  --manifest /absolute/build/codey-package.json \
+  --output /absolute/feed --private-key /absolute/private.pem \
+  --platform macos-arm64 --sequence NEW_GLOBAL_SEQUENCE --codey-node-majors 22,24 \
+  --macos-validation canary --notes "Owner approved first native macOS testing; acceptance pending"
+```
+
+Intel 使用 `--platform macos-x64` 和下一个全局序号。Node majors 是此次允许测试的
+原有运行时，不是已完成的 Mac 验证矩阵；不升级 Node。没有显式 canary 参数和说明，
+仍要求原生报告。canary 只允许**缺少**报告，不忽略格式损坏、失败或指纹不匹配的报告，
+也不放宽基础构建验证、实际包的平台/指纹、签名、公钥、有效期或防降级检查。
+
+签名说明会强制标注 `[macOS CANARY: native acceptance pending]`，不写假 doctor。
+发布本身不创建升级任务；先由 owner 在 Portal 选择一台 Mac 确认测试。
+代理仍须在**停止 Codey 之前**完成暂存包、锁定依赖和原生 doctor 检查，保留空闲检查、
+健康/模型验收和代码回滚。已发布包和签名 ID 不可覆盖；后续正式授权需要新的发行 ID/
+全局序号以及真实原生报告，不把 canary 记录改写成已验收。
 
 不能手写假 doctor 成功报告绕过门槛。原生模块通过也不代替 canary 上真实的
 launchd 切换、模型响应、回滚以及睡眠/注销后恢复验收；先一台 Mac，再扩大范围。

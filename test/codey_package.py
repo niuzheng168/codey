@@ -26,6 +26,7 @@ def load(name, file):
 
 bundle = load("codey_machine_bundle", "scripts/build-machine-bundle.py")
 publisher = load("codey_machine_publisher", "scripts/publish-machine-skill.py")
+offline_builder = load("codey_offline_builder", "scripts/build-codey-offline-windows.py")
 
 
 def write_json(file, value):
@@ -63,6 +64,35 @@ class MemoryStore:
         self.writes.append(destination)
     def unlink(self, name): self.files.pop(name, None)
     def rmdir(self, name): self.directories.remove(name)
+
+
+class OfflineWindowsBuilderTests(unittest.TestCase):
+    def test_accepts_published_two_and_four_platform_packages_but_not_relabelled_matrices(self):
+        for platforms in [
+            ["linux-x64", "windows-x64"],
+            ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"],
+        ]:
+            offline_builder.validate_runtime_platforms(platforms)
+        for platforms in [
+            None, [], ["linux-x64"], ["windows-x64"],
+            ["linux-x64", "windows-x64", "macos-arm64"],
+            ["windows-x64", "linux-x64"],
+            ["linux-x64", "windows-x64", "android-arm64"],
+        ]:
+            with self.subTest(platforms=platforms), self.assertRaises(ValueError):
+                offline_builder.validate_runtime_platforms(platforms)
+
+    def test_delivered_readme_matches_the_actual_package_version_and_computer(self):
+        for version in ["0.1.4", "0.1.5"]:
+            text = offline_builder.render_readme(version, "CPC-zhn-VZO0BX3")
+            self.assertIn(f"Update-Codey-{version}.ps1", text)
+            self.assertIn(f"codey-{version}.tgz", text)
+            self.assertIn("CPC-zhn-VZO0BX3", text)
+            self.assertIn("接入升级器", text)
+            self.assertNotIn("{{", text)
+        for version, computer in [("../0.1.5", "CPC-zhn"), ("0.1.5", "wrong/computer")]:
+            with self.assertRaises(ValueError):
+                offline_builder.render_readme(version, computer)
 
 
 @unittest.skipUnless(sys.platform == "linux", "Linux package builder")

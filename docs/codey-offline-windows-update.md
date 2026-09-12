@@ -1,19 +1,21 @@
-# Windows 0.1.4 离线升级包
+# Windows {{CODEY_VERSION}} 离线升级包
 
-这是**已有 Windows 节点的本地维护包**，不是新机安装器，也不接入 Linux 签名拉取
-agent。Portal 的“未接入 / 平台不支持 / 版本未上报”不能替代本机版本检查；本次更新
-不会改变这些 agent 能力标记。
+这是交付说明模板，构建器会在包内 README 中填入版本和目标电脑。
+
+这是**已有 Windows 节点的本地维护包**，不是新机安装器，不需要网页升级可用，
+也不会自动接入 Portal 升级代理。Portal 已支持 Windows；“未接入升级器 / 版本未上报”
+不是应用版本检查结果。仅升级 Codey 应用不会自动安装独立代理。
 
 交付两个文件，放在同一个目录：
 
-- `codey-0.1.4-windows-x64-offline.zip`
-- `Update-Codey-0.1.4.ps1`
+- `codey-{{CODEY_VERSION}}-windows-x64-offline.zip`
+- `Update-Codey-{{CODEY_VERSION}}.ps1`
 
-ZIP 内包含**原样保留、相同 SHA-256 的已发布 `codey-0.1.4.tgz`**、Windows/x64
+ZIP 内包含**原样保留、相同 SHA-256 的已发布 `codey-{{CODEY_VERSION}}.tgz`**、Windows/x64
 锁定生产依赖的 npm 缓存、Node 22/24 ABI 对应的官方 SQLite 预编译模块，以及原版
-0.1.4 更新器的引导副本。它不是另一个 `codey-win` 应用发行版，不重写发布包或 lock。
+{{CODEY_VERSION}} 更新器的引导副本。它不是另一个 `codey-win` 应用发行版，不重写发布包或 lock。
 
-## 在 CPC-zhn-VZO0BX3 执行
+## 在 {{EXPECTED_COMPUTER}} 执行
 
 1. 保存工作，结束 Codey 任务并退出 Windows 本机 Codex。不要强杀其他任务。
 2. 从开始菜单打开原 Windows 用户的**非管理员** PowerShell，进入存放这两个文件的
@@ -21,8 +23,8 @@ ZIP 内包含**原样保留、相同 SHA-256 的已发布 `codey-0.1.4.tgz`**、
 3. 先检查，再明确应用：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Update-Codey-0.1.4.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Update-Codey-0.1.4.ps1 -Apply
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Update-Codey-{{CODEY_VERSION}}.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Update-Codey-{{CODEY_VERSION}}.ps1 -Apply
 ```
 
 这里的执行策略只作用于本次 PowerShell 进程，不更改系统/用户策略。
@@ -30,7 +32,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Update-Codey-0.1.4.ps1
 或改服务。`-Apply` 在新的私有目录通过原 npm 自带的 pacote 提取已核验的共享包，
 再执行 `npm ci --offline --ignore-scripts`，严格遵守原 shrinkwrap，而不是让全局
 安装重新解析依赖版本范围。校验全部依赖版本，放入已核验的 SQLite 预编译模块，执行真实 SQLite、
-bcrypt、PTY、ripgrep、SDK 本地检测，然后才调用**未经修改的 0.1.4 Windows 更新器**
+bcrypt、PTY、ripgrep、SDK 本地检测，然后才调用**未经修改的 {{CODEY_VERSION}} Windows 更新器**
 检查空闲、切换和验收。忙碌、未知布局、错误用户/机器、Node ABI 不支持均拒绝。
 
 使用原 `runtime.json` 中的 Node/npm，不依赖 PATH 中碰巧存在的 `node` 或旧 `codey`。
@@ -49,12 +51,26 @@ TLS/SSO、任务定义、数据和原代码备份。
 或公开完整 `runtime.json`。断电/被终止后保留两个交付文件，使用：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Update-Codey-0.1.4.ps1 -Recover
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Update-Codey-{{CODEY_VERSION}}.ps1 -Recover
 ```
 
 仅恢复与此包匹配的已有事务，不重复安装。日志和旧代码位于本人 HOME 的
 `.local\share\codey-machine-windows\local-updates`，引导文件位于
 `.codey-offline`（短路径，兼容 Windows PowerShell 5.1 解压）。不自动清理这些目录。
+
+## 以后从 Portal 更新
+
+不必先升级应用版本才能接入。在 Portal 的「设置 → 软件更新 → 本机 → 管理 →
+接入升级器」下载**本机专属** ZIP；在原用户的外部、非管理员 PowerShell 中进入
+解压后的 `codey-updater`，执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Apply
+```
+
+这一步只安装独立代理。等待 Portal 显示升级器在线和实际版本，再从网页选择更新。
+不要重新注册机器，也不要把专属 ZIP、config.json 或 runtime.json 发给其他人。
 
 ## 构建与验证边界
 

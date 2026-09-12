@@ -41,6 +41,21 @@ def allowed_path(name):
         raise ValueError("Unsafe offline path")
 
 
+def validate_runtime_platforms(platforms):
+    if platforms not in (
+        ["linux-x64", "windows-x64"],
+        ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"],
+    ):
+        raise ValueError("Offline Windows kits require a reviewed Windows-capable shared package")
+
+
+def render_readme(version, computer):
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version) or not re.fullmatch(r"[A-Za-z0-9-]{1,63}", computer):
+        raise ValueError("Invalid offline documentation version or computer")
+    text = (ROOT / "docs/codey-offline-windows-update.md").read_text()
+    return text.replace("{{CODEY_VERSION}}", version).replace("{{EXPECTED_COMPUTER}}", computer)
+
+
 def build(package, cache, seed, native_proof, output, computer):
     assert re.fullmatch(r"[A-Za-z0-9-]{1,63}", computer)
     assert not output.exists(), "Use a new output directory; never overwrite a delivered kit."
@@ -55,7 +70,7 @@ def build(package, cache, seed, native_proof, output, computer):
         version = pkg["version"]
         assert pkg["name"] == "codey" and re.fullmatch(r"\d+\.\d+\.\d+", version)
         assert lock["version"] == build_info["version"] == version and lock["lockfileVersion"] == 3
-        assert build_info["runtimePlatforms"] == ["linux-x64", "windows-x64"]
+        validate_runtime_platforms(build_info["runtimePlatforms"])
         assert hashlib.sha256(archive.extractfile("package/npm-shrinkwrap.json").read()).hexdigest() == build_info["lockSha256"]
         assert (seed / "npm-shrinkwrap.json").read_bytes() == archive.extractfile("package/npm-shrinkwrap.json").read()
         assert json.loads((seed / "package.json").read_text()) == pkg
@@ -68,7 +83,7 @@ def build(package, cache, seed, native_proof, output, computer):
     package_name = f"codey-{version}.tgz"
     shutil.copyfile(package, content / package_name)
     shutil.copyfile(ROOT / "scripts/windows/offline-update.mjs", content / "offline-update.mjs")
-    shutil.copyfile(ROOT / "docs/codey-offline-windows-update.md", content / "README.md")
+    (content / "README.md").write_text(render_readme(version, computer))
     # No npm logs, userconfig, credentials or dependency trees enter the kit.
     for folder in ["content-v2", "index-v5"]:
         source = cache / "_cacache" / folder
