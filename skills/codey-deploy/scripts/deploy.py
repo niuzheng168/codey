@@ -323,7 +323,7 @@ class Deploy:
                     self.upload(self.args.builder, [str(self.job / "portal-reviewed.tar.gz")], self.remote)
                 self.report["source"] = self.worker("prepare", timeout=100)
             with phase(self.report, "portal-checks-and-image-build", self.record):
-                self.manifest = self.worker("build_portal", timeout=260)
+                self.manifest = self.worker("build_portal", timeout=480)
                 save(self.job / "manifest.json", self.manifest)
             with phase(self.report, "portal-aca-revision-rollout", self.record):
                 self.report["aca"] = self.worker("activate", timeout=330)

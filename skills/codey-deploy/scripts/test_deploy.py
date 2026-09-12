@@ -332,6 +332,22 @@ class DeploymentSafety(unittest.TestCase):
         directory.assert_called_once_with(prefix="codey-test-", dir="/var/tmp")
         self.assertTrue(worker.job.is_dir())
 
+    def test_portal_full_suite_has_a_bounded_disk_io_budget_without_changing_other_checks(self):
+        from builder import Builder
+        worker = object.__new__(Builder)
+        worker.source, worker.job, worker.report = self.root, self.root, {"checks": []}
+        with patch("builder.command", return_value=("", 1)) as run:
+            worker.check("portal", "tests", ["npm", "test"], {"HOME": "/isolated"})
+            self.assertEqual(run.call_args.kwargs["timeout"], 180)
+            self.assertEqual(run.call_args.args[0], ["npm", "test"])
+            worker.check("portal", "check", ["npm", "run", "check"], {})
+            self.assertEqual(run.call_args.kwargs["timeout"], 100)
+            worker.check("cloudcli", "backend-tests", ["npm", "test"], {})
+            self.assertEqual(run.call_args.kwargs["timeout"], 100)
+            worker.check("portal", "tests", ["npm", "test"], {}, timeout=75)
+            self.assertEqual(run.call_args.kwargs["timeout"], 75)
+        self.assertEqual(len(worker.report["checks"]), 4)
+
     def test_workspace_build_preserves_gateway_metadata_and_never_builds_it(self):
         from builder import Builder
         worker = object.__new__(Builder)

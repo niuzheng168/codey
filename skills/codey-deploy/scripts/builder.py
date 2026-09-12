@@ -140,7 +140,12 @@ class Builder:
                 "gatewayRoutes": gateway_routes,
                 "worktreesModified": False, "legacyMcpPresent": legacy_mcp}
 
-    def check(self, name, label, args, env, timeout=100):
+    def check(self, name, label, args, env, timeout=None):
+        # The full Portal suite includes native updater transaction fixtures with
+        # durable disk writes. Only the test-runner budget changes here, not any
+        # application activity, health or rollout safeguard.
+        if timeout is None:
+            timeout = 180 if (name, label) == ("portal", "tests") else 100
         _, seconds = command(args, cwd=self.source / name, env=env, timeout=timeout,
                              log=self.job / f"{name}-{label}.log")
         self.report["checks"].append({"component": name, "check": label, "seconds": seconds})

@@ -7,21 +7,26 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+// These suites exercise durable filesystem journals, including real fsync.
+// Disk-backed isolated CI homes can take >30s without a failed assertion.
+// Bound the suite, not the application's idle/health/recovery timeouts.
+const serviceSuiteTimeout = 120000;
+
 test("Linux local service switching, busy/concurrent guards and recovery are isolated", {
-  timeout: 30000, skip: process.platform === "win32",
+  timeout: serviceSuiteTimeout, skip: process.platform === "win32",
 }, async () => {
   const output = await promisify(execFile)(process.env.PYTHON || "python3", [
     "-I", "-B", "test/test_codey_local_update.py",
-  ], { timeout: 29000, maxBuffer: 1024 * 1024 });
+  ], { timeout: serviceSuiteTimeout - 5000, maxBuffer: 1024 * 1024 });
   assert.match(output.stderr, /OK/);
 });
 
 test("Linux tool switching, companion validation, CLI/tunnel isolation and recovery are isolated", {
-  timeout: 30000, skip: process.platform === "win32",
+  timeout: serviceSuiteTimeout, skip: process.platform === "win32",
 }, async () => {
   const output = await promisify(execFile)(process.env.PYTHON || "python3", [
     "-I", "-B", "test/test_codey_tool_update.py",
-  ], { timeout: 29000, maxBuffer: 1024 * 1024 });
+  ], { timeout: serviceSuiteTimeout - 5000, maxBuffer: 1024 * 1024 });
   assert.match(output.stderr, /OK/);
 });
 
