@@ -26,9 +26,9 @@ function error(req, res, status, code) {
   send(req, res, status, JSON.stringify({ error: code }));
 }
 
-/** Identify the routed node even before the shared frontend has hydrated. */
-function withWorkspaceTitle(template, nodeId) {
-  const title = `cloudcli - ${nodeId}`.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+/** Show the authorized machine label even before the shared frontend has hydrated. */
+function withWorkspaceTitle(template, nodeName) {
+  const title = `cloudcli - ${nodeName}`.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   const markup = `<title>${title}</title>`;
   const existing = /<title\b[^>]*>[\s\S]*?<\/title\s*>/i;
   return existing.test(template)
@@ -126,11 +126,14 @@ export class CloudCliUi {
       return true;
     }
     try {
+      const nodeName = typeof node.name === "string" && node.name.trim() ? node.name.trim() : node.id;
       if (runtime) {
         // No release-dependent values: an old page racing an activation keeps its own asset URLs.
         const base = JSON.stringify(`${node.basePath}/`);
+        const identity = JSON.stringify({ id: node.id, name: nodeName })
+          .replaceAll("<", "\\u003c").replaceAll(">", "\\u003e").replaceAll("&", "\\u0026");
         send(req, res, 200,
-          `window.__CLOUDCLI_BASE_PATH__=${base};window.__ROUTER_BASENAME__=${JSON.stringify(node.basePath)};\n`,
+          `window.__CLOUDCLI_BASE_PATH__=${base};window.__ROUTER_BASENAME__=${JSON.stringify(node.basePath)};window.__CLOUDCLI_NODE__=${identity};\n`,
           "text/javascript; charset=utf-8");
         return true;
       }
@@ -143,7 +146,7 @@ export class CloudCliUi {
         }), undefined, headers);
       } else if (page) {
         const template = validateUiTemplate((await readUiPackageFile(bundle, "index.html")).toString("utf8"));
-        const html = withWorkspaceTitle(template, node.id)
+        const html = withWorkspaceTitle(template, nodeName)
           .replace(UI_RUNTIME_MARKER, `<script src="${node.basePath}/_ui/runtime.js"></script>`)
           .replace(UI_MANIFEST_MARKER, `${node.basePath}/manifest.json`);
         send(req, res, 200, html, "text/html; charset=utf-8", headers);

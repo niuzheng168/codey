@@ -392,7 +392,7 @@ export function createPortalServer(options) {
       ) return;
       if (
         cloudCliGateway?.handles(url.pathname) &&
-        (await cloudCliGateway.proxyHttp(req, res, cloudCliNodeIds))
+        (await cloudCliGateway.proxyHttp(req, res, cloudCliNodeIds, activeConfig.clientNodes))
       ) {
         return;
       }

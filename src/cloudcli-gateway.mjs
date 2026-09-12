@@ -353,7 +353,7 @@ export class CloudCliGateway {
     return cleanup;
   }
 
-  async proxyHttp(req, res, allowedNodeIds) {
+  async proxyHttp(req, res, allowedNodeIds, displayNodes = []) {
     await this.refreshMachines?.();
     const requestUrl = new URL(req.url ?? "/", "http://codey.local");
     const node = this.match(requestUrl.pathname);
@@ -376,7 +376,12 @@ export class CloudCliGateway {
     }
     // Share static UI only after the same ownership checks as an upstream request.
     // All API/SSE/plugin routes and legacy /assets requests continue to the VM.
-    if (this.ui && await this.ui.handleWorkspace(req, res, node)) return true;
+    if (this.ui) {
+      // Use the same owner-visible label as /api/cloudcli/nodes, not the
+      // immutable enrollment ID or a stale name in the gateway inventory.
+      const name = displayNodes.find((entry) => entry.id === node.id)?.name ?? node.name;
+      if (await this.ui.handleWorkspace(req, res, { id: node.id, basePath: node.basePath, name })) return true;
+    }
 
     const target = new URL(node.upstream);
     target.pathname = requestUrl.pathname.slice(node.basePath.length) || "/";

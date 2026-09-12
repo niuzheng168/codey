@@ -4,6 +4,7 @@ import { cp, readFile, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import { CloudCliGateway } from "../src/cloudcli-gateway.mjs";
 import { CloudCliUi } from "../src/cloudcli-ui.mjs";
 import { readUiPackage, readUiPackageFile, validateUiManifest, validateUiTemplate } from "../src/cloudcli-ui-package.mjs";
@@ -19,7 +20,7 @@ async function listen(t, server) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 
-async function portal(t, options) {
+async function portal(t, options = {}) {
   const fixture = await uiFixture(t, "ui-one", options);
   const seen = [];
   const backend = await listen(t, http.createServer((req, res) => {
@@ -31,10 +32,13 @@ async function portal(t, options) {
     nodes: ["node-a", "node-b"].map((id) => ({ id, name: `Display name ${id}`, basePath: `/cloudcli/${id}`, upstream: new URL(backend) })),
   }, { ui });
   const url = await listen(t, createPortalServer({
-    config: validateConfig({ nodes: ["node-a", "node-b"].map((id) => ({ id, name: id, endpoint: `${backend}/usage` })) }),
+    config: validateConfig({
+      nodes: ["node-a", "node-b"].map((id) => ({ id, name: id, endpoint: `${backend}/usage` })),
+      clientNodes: (options.displayNodes ?? []).map((node) => ({ ...node, endpoint: `${backend}/usage` })),
+    }),
     cloudCliGateway: gateway, cloudCliUi: ui,
   }));
-  return { ...fixture, ui, seen, url };
+  return { ...fixture, ui, gateway, seen, url };
 }
 
 test("one package serves both node shells without contacting either backend", async (t) => {
@@ -43,8 +47,8 @@ test("one package serves both node shells without contacting either backend", as
     const response = await fetch(`${fixture.url}/cloudcli/${node}/session/example`);
     const html = await response.text();
     assert.equal(response.status, 200);
-    assert.match(html, new RegExp(`<title>cloudcli - ${node}</title>`));
-    assert.doesNotMatch(html, /CloudCLI UI|Display name/);
+    assert.match(html, new RegExp(`<title>cloudcli - Display name ${node}</title>`));
+    assert.doesNotMatch(html, /CloudCLI UI/);
     assert.match(html, /src="\/cloudcli-ui\/ui-one\/assets\/app.js"/);
     assert.ok(html.includes(`src="/cloudcli/${node}/_ui/runtime.js"`));
     assert.ok(html.includes(`href="/cloudcli/${node}/manifest.json"`));
@@ -54,6 +58,10 @@ test("one package serves both node shells without contacting either backend", as
     const runtime = await (await fetch(`${fixture.url}/cloudcli/${node}/_ui/runtime.js`)).text();
     assert.ok(runtime.includes(`window.__CLOUDCLI_BASE_PATH__="/cloudcli/${node}/"`));
     assert.ok(runtime.includes(`window.__ROUTER_BASENAME__="/cloudcli/${node}"`));
+    const context = { window: {} };
+    runInNewContext(runtime, context);
+    assert.equal(context.window.__CLOUDCLI_NODE__.id, node);
+    assert.equal(context.window.__CLOUDCLI_NODE__.name, `Display name ${node}`);
     assert.doesNotMatch(runtime, /cloudcli-ui|token|password|upstream/);
   }
   assert.deepEqual(fixture.seen, []);
@@ -67,14 +75,14 @@ test("one package serves both node shells without contacting either backend", as
   assert.equal(await cached.text(), "");
 });
 
-test("every SPA shell has its routed node title without modifying the immutable shared template", async (t) => {
+test("every SPA shell has its machine name without modifying the immutable shared template", async (t) => {
   const fixture = await portal(t);
   for (const node of ["node-a", "node-b"]) {
     for (const suffix of ["/", "/session/example", "/future-client-route"]) {
       const response = await fetch(`${fixture.url}/cloudcli/${node}${suffix}`);
       const html = await response.text();
       assert.equal(response.status, 200);
-      assert.deepEqual(html.match(/<title>[^<]*<\/title>/g), [`<title>cloudcli - ${node}</title>`]);
+      assert.deepEqual(html.match(/<title>[^<]*<\/title>/g), [`<title>cloudcli - Display name ${node}</title>`]);
     }
   }
   const bundle = await fixture.ui.active();
@@ -87,8 +95,39 @@ test("older shared templates without a title also receive the node-specific shel
   const response = await fetch(`${fixture.url}/cloudcli/node-b/`);
   const html = await response.text();
   assert.equal(response.status, 200);
-  assert.deepEqual(html.match(/<title>[^<]*<\/title>/g), ["<title>cloudcli - node-b</title>"]);
+  assert.deepEqual(html.match(/<title>[^<]*<\/title>/g), ["<title>cloudcli - Display name node-b</title>"]);
   assert.deepEqual(fixture.seen, []);
+});
+
+test("workspace titles use the owner's display name and safely encode it in HTML and runtime metadata", async (t) => {
+  const name = '我的机器 "</title><script>alert(1)</script> & $&';
+  const fixture = await portal(t, { displayNodes: [{ id: "node-a", name }] });
+  const listing = await (await fetch(`${fixture.url}/api/cloudcli/nodes`)).json();
+  assert.equal(listing.nodes.find((node) => node.id === "node-a").name, name);
+  const html = await (await fetch(`${fixture.url}/cloudcli/node-a/`)).text();
+  assert.match(html, /<title>cloudcli - 我的机器 "&lt;\/title&gt;&lt;script&gt;alert\(1\)&lt;\/script&gt; &amp; \$&amp;<\/title>/);
+  assert.doesNotMatch(html, /<script>alert/);
+  const response = await fetch(`${fixture.url}/cloudcli/node-a/_ui/runtime.js`);
+  assert.equal(response.headers.get("cache-control"), "private, no-store");
+  const runtime = await response.text();
+  const context = { window: {} };
+  runInNewContext(runtime, context);
+  assert.equal(context.window.__CLOUDCLI_NODE__.name, name);
+  assert.equal(context.window.__CLOUDCLI_NODE__.id, "node-a");
+  assert.doesNotMatch(runtime, /<\/script>|upstream|endpoint|credential/);
+  const other = await (await fetch(`${fixture.url}/cloudcli/node-b/`)).text();
+  assert.match(other, /<title>cloudcli - Display name node-b<\/title>/);
+  assert.deepEqual(fixture.seen, []);
+});
+
+test("missing machine names fall back to the node ID in both initial HTML and runtime metadata", async (t) => {
+  const fixture = await portal(t);
+  fixture.gateway.config.nodes[0].name = "  ";
+  const html = await (await fetch(`${fixture.url}/cloudcli/node-a/`)).text();
+  assert.match(html, /<title>cloudcli - node-a<\/title>/);
+  const context = { window: {} };
+  runInNewContext(await (await fetch(`${fixture.url}/cloudcli/node-a/_ui/runtime.js`)).text(), context);
+  assert.equal(context.window.__CLOUDCLI_NODE__.name, "node-a");
 });
 
 test("API, SSE, health and legacy per-node assets are still proxied, not turned into HTML", async (t) => {
