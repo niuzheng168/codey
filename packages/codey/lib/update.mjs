@@ -6,13 +6,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readPackageInfo, runtimePlatform } from "./package-info.mjs";
 import { inspectUpdateArchive } from "./update-archive.mjs";
+import { copyDependencies, EXTRACT_PACKAGE, reusableDependencies, verifyDependencyTree } from "./update-dependencies.mjs";
 import {
   atomicWrite, buildEnvironment, controlEnvironment, execute, exists, fileHash, findNpm, inside, ownedPath, privateDirectory, readInstalledPackageInfo, readJson,
 } from "./update-files.mjs";
 
 const LIB = path.dirname(fileURLToPath(import.meta.url));
 const terminalStates = new Set(["complete", "rolled_back", "aborted"]);
-export const UPDATE_HELP = `Usage: codey update PACKAGE.tgz [--check] [--sha256 HASH]
+export const UPDATE_HELP = `Usage: codey update PACKAGE.tgz [--check] [--offline] [--sha256 HASH]
        codey update codey PACKAGE.tgz [--check] [--sha256 HASH]
        codey update codex TOOL-UPDATE.json --sha256 HASH [--check]
        codey update devtunnel TOOL-UPDATE.json --sha256 HASH [--check | --allow-disconnect]
@@ -21,6 +22,9 @@ export const UPDATE_HELP = `Usage: codey update PACKAGE.tgz [--check] [--sha256 
 Select exactly one component. The original PACKAGE.tgz syntax updates only Codey.
 Uses the existing Node/npm and locked dependencies. Never calls setup, installs
 Node/Python, changes model configuration, or contacts a model.
+Identical dependency locks reuse a private copy of the installed dependencies,
+without registry access or install hooks. --offline requires this reuse path;
+otherwise changed dependency locks use the normal npm installation path.
 Named tool updates require Codey >=0.1.3, an existing owner-managed installation,
 and a reviewed native distribution wrapped in a checksummed tool-update.json.
 Codex CLI and its app-server are one distribution; the Desktop app is untouched.
@@ -50,7 +54,7 @@ export function updateOptions(args) {
       if (args.length !== 1) throw new Error("Use codey update --help by itself.");
       return { help: true };
     }
-    if (["--check", "--recover"].includes(arg)) {
+    if (["--check", "--recover", "--offline"].includes(arg)) {
       const key = arg.slice(2);
       if (options[key]) throw new Error(`Duplicate update option: ${arg}`);
       options[key] = true;
@@ -70,7 +74,7 @@ export function updateOptions(args) {
     } else throw new Error(`Invalid update option: ${arg}`);
   }
   if (options.recover) {
-    if (options.package || options.check || options.sha256 || options.installedRoot) throw new Error("--recover cannot be combined with a package or other options.");
+    if (options.package || options.check || options.offline || options.sha256 || options.installedRoot) throw new Error("--recover cannot be combined with a package or other options.");
   } else if (!options.package) throw new Error("Usage: codey update PACKAGE.tgz [--check] [--sha256 HASH]");
   return options;
 }
@@ -201,7 +205,7 @@ export async function verifyStagedPackage(root, artifact) {
   return info;
 }
 
-export async function stagePackage(artifact, plan, job, { command = execute, npm } = {}) {
+export async function stagePackage(artifact, plan, job, { command = execute, npm, reuseDependencies = false } = {}) {
   const home = path.join(job, "build-home");
   await mkdir(home, { mode: 0o700 });
   const env = buildEnvironment(home, plan.node);
@@ -209,6 +213,20 @@ export async function stagePackage(artifact, plan, job, { command = execute, npm
   await copyFile(artifact.file, archive);
   if (await fileHash(archive) !== artifact.sha256) throw new Error("The source tarball changed after inspection.");
   const prefix = path.join(job, "app");
+  const root = path.join(prefix, ...(process.platform === "win32" ? [] : ["lib"]), "node_modules", "codey");
+  await command(plan.node, ["--input-type=commonjs", "-e", EXTRACT_PACKAGE, npm, archive, root,
+    env.npm_config_cache, "sha256-" + Buffer.from(artifact.sha256, "hex").toString("base64")], {
+    env, cwd: job, log: path.join(job, "npm-extract.private.log"), timeout: 120000,
+  });
+  await verifyStagedPackage(root, artifact);
+  if (reuseDependencies) {
+    await copyDependencies(plan.root, root, artifact.lock);
+    await verifyStagedPackage(root, artifact);
+    await command(plan.node, [path.join(root, "bin/codey.mjs"), "doctor", "--json"], {
+      env, cwd: home, log: path.join(job, "doctor.private.log"), timeout: 60000,
+    });
+    return root;
+  }
   // A permissive caller umask must not make the activated package fail the next
   // owner-path check. Keep both the install and native rebuild private.
   const flags = ["--omit=dev", "--no-audit", "--no-fund", "--engine-strict", "--umask=0077", "--strict-ssl=true", "--registry=https://registry.npmjs.org"];
@@ -217,10 +235,11 @@ export async function stagePackage(artifact, plan, job, { command = execute, npm
   const npmArgs = process.platform === "win32" ? [npm] : [
     "--input-type=commonjs", "-e", "process.umask(0o077); require(process.argv[1]);", npm,
   ];
-  await command(plan.node, [...npmArgs, "install", "--global", "--prefix", prefix, "--ignore-scripts", ...flags, archive], {
-    env, cwd: job, log: path.join(job, "npm-install.private.log"), timeout: 1200000,
+  // Global npm install may resolve ranges again despite retaining shrinkwrap.
+  // ci inside the extracted application installs the exact reviewed lock.
+  await command(plan.node, [...npmArgs, "ci", "--prefix", root, "--ignore-scripts", ...flags], {
+    env, cwd: root, log: path.join(job, "npm-install.private.log"), timeout: 1200000,
   });
-  const root = path.join(prefix, ...(process.platform === "win32" ? [] : ["lib"]), "node_modules", "codey");
   await verifyStagedPackage(root, artifact);
   await command(plan.node, [...npmArgs, "rebuild", "--prefix", root, ...flags], {
     env, cwd: root, log: path.join(job, "npm-rebuild.private.log"), timeout: 1200000,
@@ -389,6 +408,11 @@ export async function runUpdate(root, args, {
   const artifact = await inspectUpdateArchive(options.package, options.sha256);
   const plan = await discover(root, home, platform, command);
   const tools = await compatibility(artifact, plan, command, home);
+  const reuseDependencies = await reusableDependencies(root, artifact.lock);
+  if (options.offline && !reuseDependencies) {
+    throw new Error("--offline requires installed dependencies matching the new package lock; nothing was installed or changed.");
+  }
+  if (reuseDependencies) await verifyDependencyTree(root, artifact.lock);
   if (plan.kind === "npm") {
     for (const name of ["CODEX_HOME", "COPILOT_API_HOME", "DATABASE_PATH"]) {
       const value = process.env[name];
@@ -403,6 +427,7 @@ export async function runUpdate(root, args, {
     layout: plan.kind, fromVersion: current.pkg.version, toVersion: artifact.pkg.version,
     sha256: artifact.sha256, node: plan.node, nodeVersion: tools.nodeVersion, services: plan.services,
     unchanged: artifact.entrySha256 === current.entrySha256, modelRequests: false,
+    dependencyMode: reuseDependencies ? "reuse-installed-offline" : "npm-install",
   };
   if (options.check || report.unchanged) {
     log(JSON.stringify({ ...report, serviceChanges: false }));
@@ -430,11 +455,13 @@ export async function runUpdate(root, args, {
     await privateDirectory(job, home);
     await atomicWrite(activeFile, { schema: 1, pid: process.pid, job });
     log(`Staging Codey ${report.fromVersion} -> ${report.toVersion}; current services remain running.`);
+    log(reuseDependencies ? "Reusing the identical installed dependency tree; no registry requests or install hooks."
+      : "Dependency reuse is unavailable; installing locked dependencies through npm.");
     for (const name of ["update-service.py", "update-windows.ps1", "update-probe.mjs"]) await copyFile(path.join(LIB, name), path.join(job, name));
     if (plan.kind === "linux-managed") {
       for (const name of ["engine.py", "probe.mjs"]) await copyFile(path.join(root, "updater", name), path.join(job, name));
     }
-    const candidate = await stage(artifact, plan, job, { command, npm: tools.npm });
+    const candidate = await stage(artifact, plan, job, { command, npm: tools.npm, reuseDependencies });
     await verifyStagedPackage(candidate, artifact);
     if (interrupted) throw new Error("Update cancelled before activation; the old package is still installed.");
     const request = {

@@ -31,6 +31,13 @@ Settings presents only the single **Codey npm package**. The node overview reads
 release or a standalone Workspace version. Missing reports remain explicitly unknown.
 
 The release picker and confirmation dialog offer only whole-Codey releases.
+The **Download Codey update package** button downloads the selected signed `.tgz`
+through an authenticated owner endpoint, with size/SHA-256 verification in both
+the service and browser. It creates no upgrade plan, job or agent credential.
+This application-only download is separate from the new-machine installation
+Skill. On an existing Codey 0.1.6+ installation, use `codey update FILE.tgz --offline`
+to reuse identical installed dependencies without registry access; changed locks
+or missing/incompatible dependencies are refused in offline mode.
 Legacy component releases remain supported by the backend, but are not selectable
 in the UI. Older node layouts are shown as needing migration; they are not silently
 treated as Codey installations or submitted for a cross-layout update. Selection,

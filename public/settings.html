@@ -53,9 +53,12 @@
         </div>
         <div class="update-controls update-toolbar">
           <label class="release-picker">目标 Codey 发行版<select id="node-update-release" disabled aria-label="目标 Codey 发行版"></select></label>
+          <button id="node-update-download" type="button" disabled>下载 Codey 更新包</button>
           <button id="node-update-selected" class="primary" type="button" disabled>更新选中机器</button>
           <button id="node-update-all" type="button" disabled>更新全部可升级机器</button>
         </div>
+        <p id="node-update-download-info" class="muted"></p>
+        <p class="panel-footnote">下载仅包含 Codey 应用，不包含 Node 或依赖缓存，也不会提交节点升级任务。已有 0.1.6+ 可在外部终端运行 <code>codey update 包路径 --offline</code>，复用锁文件一致的现有依赖；新机安装仍使用“添加节点”中的安装 Skill。</p>
         <p id="node-update-message" role="status" aria-live="polite" class="muted">正在读取升级状态…</p>
         <div id="node-update-list"></div>
         <details id="node-update-history" class="secondary-details" hidden>

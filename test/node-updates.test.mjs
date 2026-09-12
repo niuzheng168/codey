@@ -158,6 +158,38 @@ test("release signatures bind artifacts, expiration, paths, protocol and version
   }
 });
 
+test("authenticated owners download only signed whole-Codey packages without creating update jobs", async t => {
+  const f = await fixture(t);
+  const release = { ...f.built.release, components: { codey: {
+    ...f.built.release.components.cloudcli, version: "0.1.6", file: "codey-0.1.6.tgz",
+  } } };
+  const bytes = Buffer.from(JSON.stringify(release));
+  const envelope = { payload: bytes.toString("base64"), signature: sign(null, bytes, keys.privateKey).toString("base64url") };
+  const catalog = path.join(f.catalogRoot, "catalog.json");
+  const artifact = path.join(f.catalogRoot, "releases", release.id, release.components.codey.file);
+  await writeFile(catalog, JSON.stringify({ schema: 1, releases: [envelope] }));
+  await writeFile(artifact, f.built.archive);
+  const endpoint = `/api/settings/updates/releases/${release.id}/codey.tgz`;
+  const before = (await f.updates.store.read()).data;
+  assert.equal((await f.request(endpoint, { cookie: null })).status, 401);
+  for (const cookie of [f.cookieA, f.cookieB]) {
+    const response = await f.request(endpoint, { cookie });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-disposition"), 'attachment; filename="codey-0.1.6.tgz"');
+    assert.equal(response.headers.get("x-codey-sha256"), sha(f.built.archive));
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), f.built.archive);
+  }
+  assert.deepEqual((await f.updates.store.read()).data, before);
+  assert.equal((await f.request(endpoint.replace("codey.tgz", "config.json"))).status, 404);
+  await writeFile(artifact, Buffer.alloc(f.built.archive.length));
+  assert.equal((await f.request(endpoint)).status, 503, "Even same-size corruption must fail before download");
+  await writeFile(catalog, JSON.stringify({ schema: 1, releases: [f.built.envelope] }));
+  assert.equal((await f.request(endpoint)).status, 404, "Legacy component releases are not application downloads");
+  await writeFile(catalog, JSON.stringify({ schema: 1, releases: [{ ...envelope, signature: "invalid" }] }));
+  assert.equal((await f.request(endpoint)).status, 503);
+});
+
 test("update UI and static module stay authenticated; owner API rejects CSRF, forged identity and arbitrary commands", async (t) => {
   const f = await fixture(t);
   for (const pathname of ["/api/settings/updates", "/machine-updates.js"]) {

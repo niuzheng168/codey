@@ -566,6 +566,20 @@ export class MachineUpdates {
       if (req.method !== "GET" && !this.authenticator.sameOrigin(req)) throw requestError("不允许跨源更新请求", 403);
       if (pathname === "/api/settings/updates" && req.method === "GET") {
         send(res, 200, await this.list(principal.id));
+      } else if (/^\/api\/settings\/updates\/releases\/[a-z0-9][a-z0-9-]{0,63}\/codey\.tgz$/.test(pathname) && req.method === "GET") {
+        const releaseId = pathname.split("/")[5];
+        const { release } = await this.catalog.get(releaseId);
+        const component = release.components.codey;
+        if (!component || Object.keys(release.components).length !== 1) throw requestError("不是 Codey 整包发行版", 404);
+        const file = await this.catalog.artifact(releaseId, component.file);
+        const digest = createHash("sha256");
+        for await (const chunk of createReadStream(file.target)) digest.update(chunk);
+        if (digest.digest("hex") !== file.sha256) throw requestError("发行包校验失败，请联系管理员", 503);
+        res.writeHead(200, { "content-type": "application/gzip", "content-length": file.size,
+          "content-disposition": `attachment; filename="${component.file}"`,
+          "x-codey-sha256": file.sha256, "cache-control": "private, no-store", "vary": "Cookie",
+          "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" });
+        await pipeline(createReadStream(file.target), res);
       } else if (pathname === "/api/settings/updates/plans" && req.method === "POST") {
         const input = await body(req, ["nodeIds", "releaseId"]);
         send(res, 200, await this.plan(principal.id, input.nodeIds, input.releaseId));

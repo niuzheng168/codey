@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -25,10 +25,15 @@ async function port() {
 }
 
 test("the identical shared artifact installs, validates native modules and starts both servers on the target OS", {
-  skip: !artifact || !["linux", "win32"].includes(process.platform), timeout: 300000,
+  skip: !artifact || !["linux", "win32"].includes(process.platform),
+  timeout: process.env.CODEY_PACKAGE_REUSE_FROM ? 900000 : 300000,
 }, async t => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codey-shared-install-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  let stopServer;
+  t.after(async () => {
+    if (stopServer) await stopServer();
+    await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  });
   const home = path.join(directory, "owner home");
   const apiHome = path.join(home, "gateway-data");
   await mkdir(apiHome, { recursive: true });
@@ -57,9 +62,19 @@ test("the identical shared artifact installs, validates native modules and start
   const file = path.resolve(artifact);
   const hash = createHash("sha256").update(await readFile(file)).digest("hex");
   const installer = fileURLToPath(new URL("../scripts/install-codey-runtime.mjs", import.meta.url));
+  const reuseArgs = [];
+  if (process.env.CODEY_PACKAGE_REUSE_FROM) {
+    const donor = path.join(home, "reuse-source/node_modules/codey");
+    await mkdir(path.dirname(donor), { recursive: true, mode: 0o700 });
+    await cp(process.env.CODEY_PACKAGE_REUSE_FROM, donor, { recursive: true, verbatimSymlinks: true });
+    reuseArgs.push("--reuse-from", donor);
+  }
   const install = await exec(process.execPath, [installer, "--package", file, "--sha256", hash,
-    "--prefix", prefix, "--check"], { env, timeout: 240000, maxBuffer: 8 * 1024 * 1024 });
+    "--prefix", prefix, "--check", ...reuseArgs], {
+    env, timeout: reuseArgs.length ? 600000 : 240000, maxBuffer: 8 * 1024 * 1024,
+  });
   assert.match(install.stdout, /"pathChanged":false,"serviceChanges":false/);
+  if (reuseArgs.length) assert.match(install.stdout, /"dependencyMode":"reuse-installed-offline"/);
   const root = npmPackageRoot(prefix);
   const cli = path.join(root, "bin/codey.mjs");
   const info = JSON.parse((await exec(process.execPath, [cli, "doctor", "--json"], { env, timeout: 20000 })).stdout);
@@ -106,7 +121,7 @@ test("the identical shared artifact installs, validates native modules and start
       throw error;
     } finally { clearTimeout(timer); }
   }
-  t.after(stop);
+  stopServer = stop;
   const workspace = `http://127.0.0.1:${workspacePort}`;
   const gateway = `http://127.0.0.1:${gatewayPort}`;
   let ready = false;

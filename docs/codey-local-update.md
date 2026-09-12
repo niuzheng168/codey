@@ -48,6 +48,7 @@ codey update "C:\Downloads\codey-new.tgz"
 | --- | --- |
 | `PACKAGE.tgz` | 本地、可信的 Codey npm 包；不接受 npm 名称、`latest`、URL |
 | `--check` | 检查包、现有布局和 Node 兼容性；不安装依赖、不写更新任务、不改服务 |
+| `--offline` | 必须复用与目标 lock 完全相同的本机依赖；不匹配则拒绝，不尝试联网 |
 | `--sha256 HASH` | 额外核对从独立可信渠道获得的包 SHA-256 |
 | `--recover` | 恢复上次中断的本地事务，不接收新包 |
 | `--installed-root DIR` | 首次引导用：由新 CLI 更新指定的旧应用目录；必须是原 owner 的实际安装 |
@@ -68,7 +69,15 @@ codey update "C:\Downloads\codey-new.tgz"
 4. 验证新服务，保存版本记录。失败只恢复本次代码指针/运行描述符/版本标记，
    不恢复旧数据库或旧密钥，不覆盖另一部署者的修改。
 
-依赖冷安装仍可能联网，并需要现有平台编译工具。不会自动安装缺失的工具。
+从 0.1.6 起，依赖图不变且本机已有依赖目录时，自动把现有依赖复制到新私有目录，
+不访问 npm registry、不运行 npm install/rebuild 或依赖 hooks。复制前后检查锁定版本、
+链接边界，并用现有 Node 运行原生模块自检；不共享可变目录，不影响回滚。
+`--check` 报告 `dependencyMode`；加 `--offline` 可要求只使用此路径。
+轻量 npm 包仍只携带应用文件，不携带 Node、node_modules 或离线依赖缓存。
+旧 CLI 可先用新安装器 `--check --reuse-from OLD_ROOT` 离线安装独立新 CLI，
+再用其 `update PACKAGE.tgz --offline --installed-root OLD_ROOT` 完成原事务升级。
+
+依赖冷安装或锁发生变化时仍可能联网，并需要现有平台编译工具。不会自动安装缺失的工具。
 安装来源必须可信：完整性校验不是对任意本地 npm 代码的安全背书。
 需要不兼容数据/配置迁移的发行版应另行审核，本命令不是通用迁移器。
 

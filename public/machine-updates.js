@@ -77,6 +77,10 @@ if (root) {
     $("selected").disabled = working || !selected.size;
     $("all").disabled = working || !eligible.length;
     $("release").disabled = working || !current?.releases.length;
+    $("download").disabled = working || !target();
+    const component = target()?.components.codey;
+    $("download-info").textContent = component?.file
+      ? `${component.file} · ${(component.size / 1024 / 1024).toFixed(2)} MiB · SHA-256: ${component.sha256}` : "";
     $("refresh").disabled = working;
     $("selected").textContent = selected.size ? `更新选中 (${selected.size})` : "更新选中机器";
     $("apply").disabled = working || !plan?.targets.some((node) => node.eligible);
@@ -91,6 +95,35 @@ if (root) {
     $("count").classList.toggle("update-warning", Boolean(attention));
     $("job-count").textContent = `${current?.jobs.length || 0} 条${active ? ` · ${active} 进行中` : ""}${attention ? ` · ${attention} 待处理` : ""}`;
   }
+  $("download").addEventListener("click", async () => {
+    const release = target();
+    if (working || !release) return;
+    const component = release.components.codey;
+    working = true; controls();
+    try {
+      const response = await fetch(`/api/settings/updates/releases/${encodeURIComponent(release.id)}/codey.tgz`, {
+        credentials: "same-origin", mode: "same-origin", redirect: "error", cache: "no-store",
+        referrerPolicy: "same-origin",
+      });
+      if (response.status === 401) { window.location.replace("/portal-auth/login"); throw new Error("请重新登录"); }
+      if (!response.ok) throw new Error((await response.json()).error || "下载失败");
+      if (response.headers.get("content-type") !== "application/gzip" ||
+          response.headers.get("content-disposition") !== `attachment; filename="${component.file}"`) {
+        throw new Error("更新包响应与所选发行版不一致");
+      }
+      const bytes = await response.arrayBuffer();
+      const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
+        byte => byte.toString(16).padStart(2, "0")).join("");
+      if (bytes.byteLength !== component.size || digest !== component.sha256) throw new Error("更新包大小或 SHA-256 不匹配");
+      const url = URL.createObjectURL(new Blob([bytes], { type: "application/gzip" }));
+      const link = element("a");
+      link.href = url; link.download = component.file;
+      document.body.append(link); link.click(); link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+      notice(`${component.file} 已下载并通过 SHA-256 校验；未提交任何节点升级任务。`);
+    } catch (error) { notice(error.message, true); }
+    finally { working = false; controls(); }
+  });
   async function bootstrap(node) {
     if (working) return;
     const warning = node.enrolled

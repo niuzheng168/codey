@@ -357,7 +357,9 @@ test("real npm staging and CLI update work in a disposable HOME without any mode
     cwd: f.home, env: { ...process.env, HOME: f.home },
   });
   assert.equal(output, "codey 2.0.0");
-  assert.match(await readFile(path.join(result.job, "npm-install.private.log"), "utf8"), /added/);
+  assert.match(await readFile(path.join(result.job, "npm-install.private.log"), "utf8"), /up to date/);
+  assert.deepEqual(await readFile(path.join(f.old, "npm-shrinkwrap.json")),
+    await readFile(path.join(f.next, "npm-shrinkwrap.json")), "npm ci must retain the exact reviewed lock");
   const doctor = await readJson(path.join(result.job, "doctor.private.log"));
   assert.equal(doctor.fixture, true, "This test must not claim real native-module/model validation");
   assert.ok(await exists(path.join(result.job, "previous-codey/bin/codey.mjs")));

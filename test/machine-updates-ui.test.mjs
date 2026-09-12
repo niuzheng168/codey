@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash, webcrypto } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
@@ -6,11 +7,14 @@ import { settingsDom } from "./helpers/settings-dom.mjs";
 
 const source = await readFile(new URL("../public/machine-updates.js", import.meta.url), "utf8");
 const tick = () => new Promise(setImmediate);
+const downloadBytes = Buffer.from("verified synthetic Codey package");
 
 function data() {
   const target = { id: "release-one", sequence: 1, platform: "linux-x64", migrations: ["gateway-api-key-v1"],
     notes: "<img src=x onerror=evil()>", components: {
-      codey: { version: "0.2.0", commit: "b".repeat(40), entrySha256: "b".repeat(64), nodeMajors: [24] },
+      codey: { version: "0.2.0", commit: "b".repeat(40), entrySha256: "b".repeat(64), nodeMajors: [24],
+        file: "codey-0.2.0.tgz", size: downloadBytes.length,
+        sha256: createHash("sha256").update(downloadBytes).digest("hex") },
     } };
   const report = { platform: "linux-x64", layout: "npm", highestSequence: 0, readyMigrations: ["gateway-api-key-v1"],
     components: { codey: {
@@ -24,14 +28,14 @@ function data() {
   ] };
 }
 
-async function page({ failPlan = false, pendingPlan = null, initialData, planComponents } = {}) {
-  const { document, elements } = settingsDom();
+async function page({ failPlan = false, pendingPlan = null, initialData, planComponents, downloadStatus = 200, tamperDownload = false } = {}) {
+  const { document, elements, downloads } = settingsDom();
   const requests = [];
   const timers = [];
   const redirects = [];
   const status = initialData ?? data();
   runInNewContext(source, {
-    document, clearTimeout() {},
+    document, clearTimeout() {}, crypto: webcrypto, Blob,
     window: { confirm: () => true, location: { replace: (url) => redirects.push(url) },
       setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; } },
     URL: { createObjectURL: () => "blob:fixture", revokeObjectURL() {} },
@@ -39,6 +43,14 @@ async function page({ failPlan = false, pendingPlan = null, initialData, planCom
       const body = options.body && JSON.parse(options.body);
       requests.push({ url, options, body });
       if (url === "/api/settings/updates") return { ok: true, status: 200, json: async () => status };
+      if (url.endsWith("/codey.tgz")) return {
+        ok: downloadStatus === 200, status: downloadStatus,
+        json: async () => ({ error: "download unavailable" }),
+        headers: { get: name => ({
+          "content-type": "application/gzip", "content-disposition": 'attachment; filename="codey-0.2.0.tgz"',
+        })[name] },
+        arrayBuffer: async () => new Uint8Array(tamperDownload ? Buffer.from("tampered") : downloadBytes).buffer,
+      };
       if (url.endsWith("/plans")) {
         if (pendingPlan) await pendingPlan;
         if (failPlan) return { ok: false, status: 403, json: async () => ({ error: "Owner mismatch" }) };
@@ -57,9 +69,37 @@ async function page({ failPlan = false, pendingPlan = null, initialData, planCom
     },
   });
   await tick(); await tick();
-  return { elements, requests, timers, redirects, status, document,
+  return { elements, requests, timers, redirects, status, document, downloads,
     get: (suffix) => document.querySelector("#node-update-" + suffix) };
 }
+
+test("package download verifies the selected artifact and never previews or submits a node update", async () => {
+  const p = await page();
+  assert.equal(p.get("download").disabled, false);
+  assert.match(p.get("download-info").textContent, /codey-0.2.0.tgz.*SHA-256/);
+  await p.get("download").click();
+  assert.equal(p.downloads.length, 1);
+  assert.equal(p.downloads[0].download, "codey-0.2.0.tgz");
+  const request = p.requests.at(-1);
+  assert.equal(request.url, "/api/settings/updates/releases/release-one/codey.tgz");
+  assert.equal(request.options.credentials, "same-origin");
+  assert.ok(!p.requests.some(row => /\/(plans|jobs)$/.test(row.url)));
+  assert.match(p.get("message").textContent, /未提交任何节点升级任务/);
+});
+
+test("tampered downloads and expired login never save a package; an empty catalog disables download", async () => {
+  const bad = await page({ tamperDownload: true });
+  await bad.get("download").click();
+  assert.equal(bad.downloads.length, 0);
+  assert.match(bad.get("message").textContent, /不匹配/);
+  const loggedOut = await page({ downloadStatus: 401 });
+  await loggedOut.get("download").click();
+  assert.deepEqual(loggedOut.redirects, ["/portal-auth/login"]);
+  assert.equal(loggedOut.downloads.length, 0);
+  const status = data();
+  status.releases = [];
+  assert.equal((await page({ initialData: status })).get("download").disabled, true);
+});
 
 test("machine update controls include single-node, selected/all batch, setup and protected-local states", async () => {
   const p = await page();

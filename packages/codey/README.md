@@ -115,11 +115,27 @@ and session files. Merely installing the npm package never invokes setup.
 
 ## Update only Codey from a local npm package
 
+Starting with **0.1.6**, identical dependency locks automatically reuse a private
+copy of the installed dependency tree. Neither the package nor this update path
+includes/downloads Node or dependency archives. No npm registry request, native
+rebuild or install hook runs on this path. Native probes still verify the copied
+modules against the existing Node before activation. Changed locks use the normal
+npm path; add `--offline` to refuse that path rather than attempt a download.
+
+For a one-time offline bootstrap from an older CLI, use the new release's installer
+with `--check --reuse-from /absolute/path/to/existing/node_modules/codey`, then run
+the resulting new CLI with `update PACKAGE.tgz --offline --installed-root OLD_ROOT`.
+`--check` leaves PATH and services untouched. The old dependency tree is copied,
+not moved or linked, so both activation and rollback remain independent.
+Do not use plain `npm install` for offline dependency reuse: normal npm installation
+still resolves the declared runtime dependencies. A fresh machine must supply its
+dependencies separately; a 7 MB application-only archive cannot replace them.
+
 Run from an external terminal as the original OS owner:
 
 ```sh
-codey update /absolute/path/codey-new.tgz --check
-codey update /absolute/path/codey-new.tgz
+codey update /absolute/path/codey-new.tgz --offline --check
+codey update /absolute/path/codey-new.tgz --offline
 ```
 
 `--check` validates the shared artifact, installed layout and existing Node

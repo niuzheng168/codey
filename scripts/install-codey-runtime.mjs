@@ -6,19 +6,23 @@ import { createReadStream } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile, appendFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const DEFAULT_PACKAGE_FILE = "";
 const DEFAULT_PACKAGE_SHA256 = "";
 const MARKER = "CODEY_SHARED_NPM_LAUNCHER";
 const PUBLIC_REGISTRY = "https://registry.npmjs.org";
 const HELP = `Usage: node install-codey.mjs [--package FILE.tgz] [--sha256 HASH] [--prefix DIR] [--check]
+                              [--reuse-from EXISTING_CODEY_DIRECTORY]
 
 Install the SAME Codey npm artifact on Linux x64 or Windows x64 using Node.js 22.13+.
 A published installer has its adjacent package filename and SHA-256 built in.
 Source use requires both --package and --sha256; public npm names are never accepted.
 --prefix must be a new directory under the current user's home.
 --check installs and verifies the package/native dependencies, but does not change PATH.
+--reuse-from copies identical, already installed dependencies instead of downloading
+or rebuilding them. This offline path requires the same dependency lock and a
+compatible existing Node/native ABI; it never falls back to the registry.
 
 No services, DevTunnel, credentials or Codex settings are modified. On Linux, run
 codey setup separately for managed deployment; Windows service hosting stays external.
@@ -34,7 +38,7 @@ export function installOptions(args, directory = path.dirname(fileURLToPath(impo
     if (seen.has(flag)) throw new Error(`Duplicate installer option: ${flag}`);
     seen.add(flag);
     if (flag === "--check") options.check = true;
-    else if (["--package", "--sha256", "--prefix"].includes(flag) && args[index + 1] && !args[index + 1].startsWith("--")) {
+    else if (["--package", "--sha256", "--prefix", "--reuse-from"].includes(flag) && args[index + 1] && !args[index + 1].startsWith("--")) {
       options[flag.slice(2)] = args[++index];
     } else throw new Error(`Invalid installer option: ${flag}`);
   }
@@ -203,6 +207,8 @@ export async function installRuntime(args) {
   const hash = createHash("sha256");
   for await (const bytes of createReadStream(file)) hash.update(bytes);
   if (hash.digest("hex") !== options.sha256) throw new Error("Codey artifact SHA-256 mismatch; nothing installed.");
+  const donor = options["reuse-from"] ? await realpath(options["reuse-from"]) : null;
+  if (donor && !inside(home, donor)) throw new Error("Reuse dependencies only from an existing installation under your own home.");
 
   let prefix;
   if (options.prefix) {
@@ -223,19 +229,47 @@ export async function installRuntime(args) {
     "--input-type=commonjs", "-e", "process.umask(0o077); require(process.argv[1]);", npm,
   ];
   console.log(`Installing the shared Codey artifact through npm into ${prefix}`);
-  // Call npm's JS entrypoint directly: npm.cmd is not spawnable without a shell.
-  await command(node, [...npmArgs, "install", "--global", "--prefix", prefix, "--ignore-scripts", ...npmFlags, file], env);
   const app = npmPackageRoot(prefix);
+  // Bootstrap before package helpers exist, with a private child-process umask.
+  const extract = `process.umask(0o077);
+require('node:module').createRequire(process.argv[1])('pacote').extract(process.argv[2],process.argv[3],{
+  cache:process.argv[4],integrity:process.argv[5],offline:true,ignoreScripts:true,
+  umask:0o077,fmode:0o600,dmode:0o700
+}).catch(error=>{console.error(error.message);process.exitCode=1});`;
+  await command(node, ["--input-type=commonjs", "-e", extract, npm, file, app,
+    path.join(prefix, ".npm"), "sha256-" + Buffer.from(options.sha256, "hex").toString("base64")], env);
+  if (donor) {
+    // The independently checked release supplies the offline installer helpers.
+    const load = name => import(pathToFileURL(path.join(app, "lib", name)).href);
+    const { inspectUpdateArchive } = await load("update-archive.mjs");
+    const { verifyStagedPackage } = await load("update.mjs");
+    const { copyDependencies } = await load("update-dependencies.mjs");
+    const { ownedPath, buildEnvironment } = await load("update-files.mjs");
+    await ownedPath(donor, home);
+    const artifact = await inspectUpdateArchive(file, options.sha256);
+    await verifyStagedPackage(app, artifact);
+    await copyDependencies(donor, app, artifact.lock);
+    await verifyStagedPackage(app, artifact);
+    const buildHome = path.join(prefix, "build-home");
+    await mkdir(buildHome, { mode: 0o700 });
+    await command(node, [path.join(app, "bin/codey.mjs"), "doctor", "--json"], buildEnvironment(buildHome, node));
+  } else {
+    // Call npm's JS entrypoint directly: npm.cmd is not spawnable without a shell.
+    await command(node, [...npmArgs, "ci", "--prefix", app, "--ignore-scripts", ...npmFlags], env);
+  }
   const pkg = JSON.parse(await readFile(path.join(app, "package.json"), "utf8"));
   if (pkg.name !== "codey" || pkg.bin?.codey !== "bin/codey.mjs") throw new Error("Not the shared Codey application.");
   const cli = path.join(app, "bin/codey.mjs");
   await command(node, [cli, "doctor", "--package-only", "--json"], env);
-  await command(node, [...npmArgs, "rebuild", "--prefix", app, ...npmFlags], env);
-  await command(node, [cli, "doctor", "--json"], env);
+  if (!donor) {
+    await command(node, [...npmArgs, "rebuild", "--prefix", app, ...npmFlags], env);
+    await command(node, [cli, "doctor", "--json"], env);
+  }
   const bin = options.check ? null : await installLauncher(home, node, app);
   console.log(JSON.stringify({ ok: true, name: "codey", version: pkg.version, packageSha256: options.sha256,
     platform: platform === "win32" ? "windows-x64" : "linux-x64", packageRoot: app, bin,
-    pathChanged: !options.check, serviceChanges: false, modelRequests: false }));
+    pathChanged: !options.check, serviceChanges: false, modelRequests: false,
+    dependencyMode: donor ? "reuse-installed-offline" : "npm-install" }));
   if (bin) {
     console.log("Open a new terminal to use codey. For the current terminal:");
     console.log(platform === "win32" ? `$env:Path = '${bin.replaceAll("'", "''")};' + $env:Path`

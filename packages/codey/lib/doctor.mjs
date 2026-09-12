@@ -24,7 +24,46 @@ export function doctorOptions(args) {
   return options;
 }
 
-export async function checkNativeModules(root) {
+// Windows node-pty workers can retain handles after onExit. Only this isolated
+// probe may explicitly exit; doctor must await its completion and verified result.
+const PTY_PROBE = String.raw`
+const { createRequire } = require("node:module");
+const { writeSync } = require("node:fs");
+const path = require("node:path");
+const root = process.argv[1];
+let terminal, output, exit;
+let settled = false, exited = false;
+function finish(error) {
+  if (settled) return;
+  settled = true;
+  clearTimeout(timer);
+  if (!exited) {
+    try { terminal?.kill(process.platform === "win32" ? undefined : "SIGKILL"); }
+    catch { /* The owned PTY may have already exited. */ }
+  }
+  for (const subscription of [output, exit]) {
+    try { subscription?.dispose(); }
+    catch (cause) { error ||= "PTY native check failed: " + cause.message; }
+  }
+  try { writeSync(error ? 2 : 1, error ? error + "\n" : "codey-pty-ok\n"); }
+  finally { process.exit(error ? 1 : 0); }
+}
+const timer = setTimeout(() => finish("PTY native check timed out"), Number(process.argv[2]));
+try {
+  terminal = createRequire(path.join(root, "package.json"))("node-pty").spawn(
+    process.execPath, ["-e", "process.exit(0)"],
+    { name: "xterm-color", cols: 80, rows: 24, cwd: root, env: process.env },
+  );
+  output = terminal.onData(() => {});
+  exit = terminal.onExit(({ exitCode, signal }) => {
+    exited = true;
+    finish(exitCode === 0 && !signal ? null :
+      "PTY native check failed (exit code " + exitCode + ", signal " + (signal || 0) + ")");
+  });
+} catch (error) { finish("PTY native check failed: " + error.message); }
+`;
+
+export async function checkNativeModules(root, { ptyTimeout = 10000 } = {}) {
   const require = createRequire(path.join(root, "package.json"));
   const Database = require("better-sqlite3");
   const db = new Database(":memory:");
@@ -37,23 +76,23 @@ export async function checkNativeModules(root) {
   await promisify(execFile)(require("@vscode/ripgrep").rgPath, ["--version"], {
     timeout: 10000, maxBuffer: 65536, windowsHide: true,
   });
-  const terminal = require("node-pty").spawn(process.execPath, ["-e", "process.exit(0)"], {
-    name: "xterm-color", cols: 80, rows: 24, cwd: root, env: process.env,
-  });
-  await new Promise((resolve, reject) => {
-    const output = terminal.onData(() => {});
-    const timer = setTimeout(() => {
-      try { terminal.kill(); } catch { /* The owned probe may have already exited. */ }
-      output.dispose();
-      reject(new Error("PTY native check timed out"));
-    }, 10000);
-    terminal.onExit(({ exitCode }) => {
-      clearTimeout(timer);
-      output.dispose();
-      if (exitCode === 0) resolve();
-      else reject(new Error("PTY native check failed"));
+  let probe;
+  try {
+    probe = await promisify(execFile)(process.execPath, [
+      "--input-type=commonjs", "-e", PTY_PROBE, root, String(ptyTimeout),
+    ], {
+      cwd: root, timeout: ptyTimeout + 1000, killSignal: "SIGKILL",
+      maxBuffer: 65536, windowsHide: true,
     });
-  });
+  } catch (error) {
+    if (error.killed && error.signal === "SIGKILL") {
+      throw new Error("PTY native check timed out", { cause: error });
+    }
+    const detail = error.stderr?.trim();
+    throw new Error(detail?.startsWith("PTY native check ") ? detail :
+      `PTY native check failed: ${detail || error.code || error.message}`, { cause: error });
+  }
+  if (probe.stdout.trim() !== "codey-pty-ok") throw new Error("PTY native check failed: missing exit confirmation");
   return { sqlite: true, bcrypt: true, ripgrep: true, pty: true, codexSdk: true };
 }
 

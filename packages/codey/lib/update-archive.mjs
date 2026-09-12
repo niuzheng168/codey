@@ -204,7 +204,7 @@ export async function inspectUpdateArchive(filename, expectedSha256) {
   // npm omits. Bind the actual payload to the tarball SHA and verify every packed
   // file after npm installation instead of equating these two different trees.
   return {
-    file, size: info.size, sha256: archiveSha256, pkg, build, files,
+    file, size: info.size, sha256: archiveSha256, pkg, build, lock, files,
     entrySha256: hash(documents.get("codey-build.json")), packedContentSha256: content.digest("hex"),
   };
 }
