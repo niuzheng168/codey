@@ -13,11 +13,18 @@ import {
 const LIB = path.dirname(fileURLToPath(import.meta.url));
 const terminalStates = new Set(["complete", "rolled_back", "aborted"]);
 export const UPDATE_HELP = `Usage: codey update PACKAGE.tgz [--check] [--sha256 HASH]
+       codey update codey PACKAGE.tgz [--check] [--sha256 HASH]
+       codey update codex TOOL-UPDATE.json --sha256 HASH [--check]
+       codey update devtunnel TOOL-UPDATE.json --sha256 HASH [--check | --allow-disconnect]
        codey update --recover
 
-Update only this installed Codey application from a trusted local npm tarball.
+Select exactly one component. The original PACKAGE.tgz syntax updates only Codey.
 Uses the existing Node/npm and locked dependencies. Never calls setup, installs
-Codex/Node/Python/DevTunnel, changes model configuration, or contacts a model.
+Node/Python, changes model configuration, or contacts a model.
+Named tool updates require Codey >=0.1.3, an existing owner-managed installation,
+and a reviewed native distribution wrapped in a checksummed tool-update.json.
+Codex CLI and its app-server are one distribution; the Desktop app is untouched.
+DevTunnel activation requires --allow-disconnect in an external local terminal.
 --check inspects the artifact, installation and compatibility without installing
 dependencies, changing services or writing an update job.
 --sha256 additionally checks an independently obtained artifact checksum.
@@ -26,7 +33,7 @@ dependencies, changing services or writing an update job.
 an older existing package that has no update command. Native service paths must
 still match DIR, and the same owner/runtime/idle safeguards apply.
 
-Managed Linux and Windows nodes restart only the Codey
+For Codey package updates, managed Linux and Windows restart only the Codey
 application. Linux briefly pauses its existing pull updater and retains its
 signed-release high-water mark. Unknown layouts and busy nodes are refused.
 For an unmanaged npm installation, stop codey start yourself before updating;
@@ -70,7 +77,7 @@ export function updateOptions(args) {
 
 const nativeDescriptor = home => path.join(home, ".config", "codey-machine-windows", "runtime.json");
 
-async function serviceHost(home, platform, command) {
+export async function serviceHost(home, platform, command) {
   if (platform === "win32") {
     if (!process.env.SystemRoot) throw new Error("Windows SystemRoot is required.");
     return { file: path.join(process.env.SystemRoot, "System32/WindowsPowerShell/v1.0/powershell.exe"), prefix: ["-NoLogo", "-NoProfile", "-NonInteractive", "-File"] };
@@ -85,7 +92,7 @@ async function serviceHost(home, platform, command) {
   return { file: python, prefix: ["-I", "-S", "-B"] };
 }
 
-async function serviceCommand(host, script, action, input, command, options = {}) {
+export async function serviceCommand(host, script, action, input, command, options = {}) {
   const args = script.endsWith(".ps1")
     ? [...host.prefix, script, "-Action", action, "-InputPath", input]
     : [...host.prefix, script, action, input];
@@ -311,14 +318,18 @@ async function recoverActiveUnlocked(stateRoot, home, command, idle) {
   let result;
   if (await exists(journalFile)) {
     const journal = await readJson(journalFile);
-    if (journal.request.job !== active.job || !["npm", "linux-managed", "windows-managed"].includes(journal.kind)) {
+    if (journal.request.job !== active.job || !["npm", "linux-managed", "windows-managed", "linux-tool", "windows-tool"].includes(journal.kind)) {
       throw new Error("Recovery job identity mismatch.");
     }
     if (journal.kind === "npm") result = await recoverStandalone(journal, home, idle);
     else result = await serviceCommand(journal.request.plan.host,
-      path.join(active.job, journal.kind === "windows-managed" ? "update-windows.ps1" : "update-service.py"),
+      path.join(active.job, ({
+        "windows-managed": "update-windows.ps1", "linux-managed": "update-service.py",
+        "windows-tool": "tool-update-windows.ps1", "linux-tool": "tool-update-service.py",
+      })[journal.kind]),
       "recover", journalFile, command, { env: controlEnvironment(home), log: path.join(active.job, "recovery.private.log") });
   } else result = { ok: true, recovered: "aborted-before-switch", modelRequests: false };
+  if (result.ok !== true) throw new Error("Native recovery did not report success; update records were retained.");
   await rm(activeFile);
   await rm(lock, { recursive: true, force: true });
   return result;
@@ -343,8 +354,14 @@ async function recoverActive(stateRoot, home, command, idle) {
 
 export async function runUpdate(root, args, {
   home = os.homedir(), platform = process.platform, arch = process.arch, command = execute,
-  discover = discoverInstallation, stage = stagePackage, idle = assertStandaloneIdle, log = console.log,
+  discover = discoverInstallation, stage = stagePackage, idle = assertStandaloneIdle, log = console.log, toolDependencies = {},
 } = {}) {
+  if (["codex", "devtunnel"].includes(args[0])) {
+    if (args.length === 2 && ["--help", "-h"].includes(args[1])) { log(UPDATE_HELP); return; }
+    const { runToolUpdate } = await import("./tool-update.mjs");
+    return runToolUpdate(root, args, { home, platform, arch, command, log, ...toolDependencies });
+  }
+  if (args[0] === "codey") args = args.slice(1);
   const options = updateOptions(args);
   if (options.help) { log(UPDATE_HELP); return; }
   runtimePlatform(platform, arch);

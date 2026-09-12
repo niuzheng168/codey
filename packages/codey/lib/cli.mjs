@@ -15,6 +15,8 @@ Usage:
   codey mcp [arguments...]
   codey doctor [--package-only] [--json]
   codey update PACKAGE.tgz [--check] [--sha256 HASH]
+  codey update codex TOOL-UPDATE.json --sha256 HASH [--check]
+  codey update devtunnel TOOL-UPDATE.json --sha256 HASH [--check | --allow-disconnect]
   codey update --recover
   codey setup [--config FILE] [--check]
   codey --version
@@ -23,7 +25,7 @@ start runs both services in the foreground; Ctrl+C stops both.
 Defaults: loopback only, workspace :3001, gateway :4141.
 Responses WebSocket defaults to off; explicit gateway config takes precedence.
 doctor checks the shared Linux/Windows runtime; managed setup is Linux-only.
-update replaces only Codey using existing runtimes; it never runs setup.
+update selects one component at a time; it never runs setup. See "codey update --help".
 Use "codey gateway --help" for gateway options.
 Install the official Codex CLI separately and authenticate the gateway with
 "codey auth login --provider copilot". Existing configuration is preserved.

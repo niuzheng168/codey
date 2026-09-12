@@ -2,8 +2,9 @@
 # Local package maintenance only. Never invoke setup, install tools or replace login tasks.
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('plan', 'apply', 'recover')][string]$Action,
-    [Parameter(Mandatory = $true)][string]$InputPath
+    [ValidateSet('plan', 'apply', 'recover')][string]$Action,
+    [string]$InputPath,
+    [switch]$Library
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -25,12 +26,12 @@ function Get-UpdateHash {
 }
 
 function Assert-HomePath {
-    param([string]$File, [string]$Home)
+    param([string]$File, [string]$OwnerHome)
     $full = [IO.Path]::GetFullPath($File)
-    Require-Update ($full.StartsWith($Home.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) `
+    Require-Update ($full.StartsWith($OwnerHome.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) `
         'Update path is outside the original owner profile.'
     $cursor = $full
-    while ($cursor -and $cursor -ne $Home) {
+    while ($cursor -and $cursor -ne $OwnerHome) {
         if (Test-Path -LiteralPath $cursor) {
             $item = Get-Item -LiteralPath $cursor -Force
             Require-Update (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) `
@@ -45,8 +46,14 @@ function Assert-HomePath {
 }
 
 function Get-ProtectedHashes {
-    param($Config)
-    $files = @($Config.nodeExe, $Config.devtunnelExe, $Config.codexExe, $Config.identityFile, $Config.certificate)
+    param($Config, [ValidateSet('', 'codex', 'devtunnel')][string]$ExcludeTool = '')
+    $files = @($Config.nodeExe, $Config.identityFile, $Config.certificate)
+    if ($ExcludeTool -ne 'devtunnel') { $files += $Config.devtunnelExe }
+    if ($ExcludeTool -ne 'codex') {
+        # The official standalone installer owns one known codex-bin junction.
+        $null = Get-ManagedCodexPath $Config
+        $files += $Config.codexExe
+    }
     $envMap = $Config.services.codey.environment
     foreach ($name in @('COPILOT_API_CODEY_TLS_KEY', 'COPILOT_API_CODEY_SIGNING_KEY_FILE')) {
         if ($envMap.PSObject.Properties[$name]) { $files += $envMap.$name }
@@ -58,10 +65,41 @@ function Get-ProtectedHashes {
     $files += Join-Path $envMap.COPILOT_API_HOME 'config.json'
     $result = [ordered]@{}
     foreach ($file in @($files | Sort-Object -Unique)) {
-        $null = Assert-CodeyPath $file $script:owner.Home
+        if ($file -ne $Config.codexExe) { $null = Assert-HomePath $file $script:owner.Home }
         $result[$file] = Get-UpdateHash $file
     }
     $result
+}
+
+function Get-ManagedCodexPath {
+    param($Config)
+    $anchor = Join-Path $Config.runtimeRoot 'codex-bin'
+    Require-Update ($Config.codexExe -eq (Join-Path $anchor 'codex.exe') -and
+        $Config.services.codey.environment.CODEY_CODEX_EXECUTABLE -eq $Config.codexExe) `
+        'Codex must use the existing owner-managed native CLI, not a Desktop/system installation.'
+    $null = Assert-HomePath (Split-Path -Parent $anchor) $script:owner.Home
+    $item = Get-Item -LiteralPath $anchor -Force
+    $linked = [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+    Require-Update ($item.PSIsContainer -and (-not $linked -or $item.LinkType -eq 'Junction')) `
+        'Only the official standalone Codex directory/junction is supported.'
+    Require-Update ((Get-Acl -LiteralPath $anchor).GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $script:owner.Sid) `
+        'The Codex entrypoint belongs to another owner.'
+    $resolved = (Invoke-CodeyProcess $Config.nodeExe @('-p',
+        'require("node:fs").realpathSync(process.argv[1])', $Config.codexExe) -TimeoutSeconds 10).Stdout.Trim()
+    $null = Assert-HomePath $resolved $script:owner.Home
+    if ($linked) {
+        $store = $Config.codexStandaloneRoot.TrimEnd('\') + '\'
+        $updates = (Join-Path $Config.runtimeRoot 'local-updates').TrimEnd('\') + '\'
+        Require-Update ($resolved.StartsWith($store, [StringComparison]::OrdinalIgnoreCase) -or
+            ($resolved.StartsWith($updates, [StringComparison]::OrdinalIgnoreCase) -and
+             $resolved.Substring($updates.Length) -match '^[a-f0-9]{32}\\payload\\codex\.exe$')) `
+            'The Codex junction targets an unknown installation.'
+    } else {
+        Require-Update ($resolved -eq $Config.codexExe) 'Unexpected linked Codex executable.'
+    }
+    return [pscustomobject]@{ anchor = $anchor; executable = $Config.codexExe; resolved = $resolved
+        target = (Split-Path -Parent $resolved); anchorKind = $(if ($linked) { 'junction' } else { 'directory' })
+        entrySha256 = Get-UpdateHash $resolved }
 }
 
 function Assert-Protected {
@@ -79,7 +117,7 @@ function Assert-ExternalUpdate {
         $parent = @($processes | Where-Object { $_.ProcessId -eq $currentId })
         if (-not $parent.Count) { break }
         Require-Update ($parent[0].Name -notmatch '^codex(\.exe)?$' -and
-            $parent[0].CommandLine -notmatch 'codey\.mjs"?\s+(start|workspace|gateway)\b') `
+            $parent[0].CommandLine -notmatch 'codey\.mjs"?\s+"?(start|workspace|gateway)\b') `
             'Run codey update in a separate owner terminal, not inside Codey or Codex.'
         $currentId = $parent[0].ParentProcessId
     }
@@ -164,19 +202,19 @@ function Restore-LocalUpdate {
     Write-CodeyJson (Join-Path $Job 'local-update.json') $Journal
 }
 
-try {
+function Initialize-LocalWindows {
     $script:ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $home = [Environment]::GetFolderPath('UserProfile')
-    $script:configFile = Join-Path $home '.config\codey-machine-windows\runtime.json'
-    $null = Assert-HomePath $configFile $home
+    $ownerHome = [Environment]::GetFolderPath('UserProfile')
+    $script:configFile = Join-Path $ownerHome '.config\codey-machine-windows\runtime.json'
+    $null = Assert-HomePath $configFile $ownerHome
     $config = Read-UpdateJson $configFile
     Require-Update ($config.schema -eq 2 -and $config.kind -eq 'codey-windows-oneclick' -and
         $config.layout -eq 'npm-codey-package' -and $config.ownerSid -eq $ownerSid -and
-        $config.ownerHome -eq $home -and $config.computer -ceq $env:COMPUTERNAME -and
-        $config.runtimeRoot -eq (Join-Path $home '.local\share\codey-machine-windows')) `
+        $config.ownerHome -eq $ownerHome -and $config.computer -ceq $env:COMPUTERNAME -and
+        $config.runtimeRoot -eq (Join-Path $ownerHome '.local\share\codey-machine-windows')) `
         'This is not an existing owner-managed Codey installation.'
     $common = Join-Path (Split-Path -Parent $config.runnerPath) 'windows-common.ps1'
-    $null = Assert-HomePath $common $home
+    $null = Assert-HomePath $common $ownerHome
     Require-Update ((Get-UpdateHash $common) -eq $config.helperHashes.'windows-common.ps1'.ToLowerInvariant()) `
         'Pinned Windows service helpers changed.'
     . $common
@@ -198,7 +236,13 @@ try {
     $task = (Get-CodeyTaskFolder).Folder.GetTask("Codey Machine $($config.nodeId) codey")
     Assert-CodeyTask $task $config $configFile 'codey'
     $jobsRoot = Join-Path $config.runtimeRoot 'local-updates'
+}
 
+if ($Library) { return }
+try {
+    Require-Update ($Action -and $InputPath) 'Specify the update action and input.'
+    # Dot-source so only these reviewed functions can load the already pinned OS helper.
+    . Initialize-LocalWindows
     if ($Action -eq 'plan') {
         Require-Update ($config.ready -and $task.Enabled -and $task.State -eq 4 -and
             [IO.Path]::GetFullPath($InputPath).TrimEnd('\') -eq $config.codeyDirectory) `
@@ -247,6 +291,7 @@ try {
                 Write-CodeyJson $afterFile $next
                 $journal = [pscustomobject]@{ schema = 1; kind = 'windows-managed'; state = 'applying'
                     request = $request; beforeHash = Get-UpdateHash $beforeFile; afterHash = Get-UpdateHash $afterFile }
+                Require-Update ($journal.beforeHash -eq $request.plan.configHash) 'Runtime changed while preparing rollback records.'
                 Write-CodeyJson (Join-Path $job 'local-update.json') $journal
                 try {
                     Set-CodeyTaskState $config $configFile @('codey')

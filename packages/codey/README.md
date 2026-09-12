@@ -7,7 +7,7 @@ dependency. Both use Codey's single runtime dependency tree and shrinkwrap.
 ## Install a built package
 
 ```sh
-npm install --global --umask=0077 ./codey-0.1.3.tgz
+npm install --global --umask=0077 ./codey-0.1.4.tgz
 codey --version
 codey doctor
 codey auth login --provider copilot
@@ -77,7 +77,7 @@ Only the prerequisite Node distribution is extracted by the launcher, not Codey.
 For an existing Node.js installation, standard npm installation also works:
 
 ```sh
-npm install --global --prefix "$HOME/.local" --umask=0077 ./codey-0.1.3.tgz
+npm install --global --prefix "$HOME/.local" --umask=0077 ./codey-0.1.4.tgz
 "$HOME/.local/bin/codey" setup --check
 "$HOME/.local/bin/codey" setup
 ```
@@ -156,6 +156,42 @@ The target must still be the actual owner-managed service package (or an existin
 user npm installation); the bootstrap does not bypass compatibility/idle checks.
 See `docs/codey-local-update.md` in the source repository for recovery and validation.
 
+## Update the managed Codex or DevTunnel runtime independently
+
+The updater in **Codey 0.1.4** uses **installed Codey >=0.1.3** as its compatibility
+baseline. The already-published 0.1.3 artifact is immutable: use the 0.1.4 CLI
+(or its explicit `--installed-root` bootstrap), not the old 0.1.3 executable.
+
+```sh
+codey update codex /absolute/codex-bundle/tool-update.json --sha256 "$TRUSTED_SHA256" --check
+codey update codex /absolute/codex-bundle/tool-update.json --sha256 "$TRUSTED_SHA256"
+codey update devtunnel /absolute/tunnel-bundle/tool-update.json --sha256 "$TRUSTED_TUNNEL_SHA256" --allow-disconnect
+```
+
+Select exactly one component. The native bundle contains the **entire** reviewed
+vendor distribution, not just a copied exe; `scripts/build-tool-update.mjs` in the
+source repository creates its declarative manifest without downloading/executing
+an installer. The independently obtained manifest SHA-256 is mandatory and binds
+all companion files. `--check` is read-only and never runs the candidate binary.
+
+Codex CLI and `codex app-server` are one native distribution. The updater follows
+the actual managed CLI pin, not an unrelated PATH/Desktop installation. It checks
+the candidate's exact version and app-server JSONL handshake in an isolated HOME,
+with no thread creation or model request. External CLI/Desktop work blocks the
+switch rather than being killed. The existing owner CLI entrypoint is retained.
+
+DevTunnel updates keep the original tunnel, login and renewal configuration.
+They briefly disconnect the host: use a terminal independent of that tunnel and
+explicitly pass `--allow-disconnect`. Only the managed host/necessary owner task
+is restarted; Windows renewal is not killed and reads the new executable on its
+next invocation. Node/Python, model settings, keys and user data are untouched.
+All local components share a lock, rollback journal and `codey update --recover`.
+
+This does **not** add tool releases to the Portal's signed Linux Codey feed or add
+a Windows pull agent. No existing node is deployed automatically. Windows owner
+ACLs, Task Scheduler and actual network recovery still require native acceptance
+testing; portable/mock tests are not production validation.
+
 ## Commands
 
 - `codey start`: run both services in the foreground; stop both on Ctrl+C or
@@ -166,7 +202,10 @@ See `docs/codey-local-update.md` in the source repository for recovery and valid
   through the same executable.
 - `codey doctor [--package-only] [--json]`: verify the common package and local native modules without services or models.
 - `codey update PACKAGE.tgz [--check] [--sha256 HASH]`: update this application's package only.
-- `codey update --recover`: recover an interrupted local package update.
+- `codey update codey PACKAGE.tgz …`: explicit alias for the existing package-only command.
+- `codey update codex TOOL-UPDATE.json --sha256 HASH [--check]`: update the managed native CLI/app-server distribution.
+- `codey update devtunnel TOOL-UPDATE.json --sha256 HASH [--check | --allow-disconnect]`: update the managed tunnel host.
+- `codey update --recover`: recover an interrupted local package or tool update.
 - `codey setup [--config FILE] [--check]`: configure an installed Linux node.
 
 Existing environment configuration, gateway data and Codex sessions remain in
@@ -215,14 +254,14 @@ To validate a built artifact in a disposable npm prefix and HOME, without real
 credentials or model calls:
 
 ```sh
-CODEY_PACKAGE_TGZ="$PWD/artifacts/codey-npm-test/codey-0.1.3.tgz" \
+CODEY_PACKAGE_TGZ="$PWD/artifacts/codey-npm-test/codey-0.1.4.tgz" \
   node --test test/codey-package-shared-install.test.mjs test/codey-package-install.test.mjs
 ```
 
 The shared-install test also runs natively on Windows:
 
 ```powershell
-$env:CODEY_PACKAGE_TGZ = (Resolve-Path .\artifacts\codey-npm-test\codey-0.1.3.tgz).Path
+$env:CODEY_PACKAGE_TGZ = (Resolve-Path .\artifacts\codey-npm-test\codey-0.1.4.tgz).Path
 node --test test/codey-package-shared-install.test.mjs
 ```
 

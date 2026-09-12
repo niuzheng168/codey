@@ -546,7 +546,16 @@ class Runtime:
         require(config_home.resolve().is_relative_to(self.home), "configuration_changed")
         config_file = config_home / "config.toml"
         config = tomllib.loads(config_file.read_text()) if config_file.is_file() else {}
-        cli = shutil.which("codex", path=env.get("PATH", ""))
+        configured_cli = env.get("CODEY_CODEX_EXECUTABLE")
+        if configured_cli:
+            # Managed npm nodes pin the owner CLI independently of service PATH.
+            # Never substitute another installation for an invalid explicit pin.
+            configured_path = Path(configured_cli)
+            require(configured_path.is_absolute() and configured_path.is_file()
+                    and os.access(configured_path, os.X_OK), "model_login_required")
+            cli = configured_cli
+        else:
+            cli = shutil.which("codex", path=env.get("PATH", ""))
         require(cli is not None, "model_login_required")
         child_env = {"HOME": str(self.home), "PATH": env["PATH"], "CODEX_HOME": str(config_home)}
         for provider in config.get("model_providers", {}).values():

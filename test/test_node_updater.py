@@ -668,6 +668,61 @@ class NodeUpdaterTests(unittest.TestCase):
         self.assertEqual(options["env"], {"HOME": str(runtime.home), "PATH": service_env["PATH"],
                                          "CODEX_HOME": str(config_home), "FIXTURE_MODEL_KEY": "synthetic-model-key"})
 
+    def test_codex_probe_prefers_the_configured_owner_cli_over_path(self):
+        runtime = self.runtime(directory_anchor=True)
+        config_home = runtime.home / "custom-codex"
+        config_home.mkdir()
+        (config_home / "config.toml").write_text(
+            '[model_providers.fixture]\nenv_key = "FIXTURE_MODEL_KEY"\n')
+        cli = runtime.home / "configured tools/codex"
+        cli.parent.mkdir()
+        cli.write_text("#!/bin/sh\nexit 88\n")
+        cli.chmod(0o700)
+        job = runtime.root / "jobs/configured-model-probe"
+        job.mkdir(parents=True)
+        service_env = {"PATH": str(runtime.home / "empty-bin"), "CODEX_HOME": str(config_home),
+                       "CODEY_CODEX_EXECUTABLE": str(cli), "FIXTURE_MODEL_KEY": "synthetic-model-key",
+                       "UNRELATED_SECRET": "must-not-be-copied"}
+
+        def runner(arguments, **kwargs):
+            self.assertEqual(arguments[0], str(cli))
+            self.assertEqual(arguments[1:7], [
+                "exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--json"])
+            self.assertEqual(kwargs["env"], {
+                "HOME": str(runtime.home), "PATH": service_env["PATH"], "CODEX_HOME": str(config_home),
+                "FIXTURE_MODEL_KEY": "synthetic-model-key",
+            })
+            Path(arguments[arguments.index("--output-last-message") + 1]).write_text("CODEX_NODE_UPDATE_OK")
+            return ""
+
+        for fallback in [None, "/different/path/codex"]:
+            with self.subTest(path_cli=fallback), patch("engine.environment", return_value=service_env), patch(
+                    "engine.shutil.which", return_value=fallback) as which, patch.object(
+                    runtime, "probe", return_value={"passed": True}), patch("engine.run", side_effect=runner) as run:
+                engine.Runtime.model(runtime, runtime.snapshot(), job)
+                which.assert_not_called()
+                run.assert_called_once()
+
+    def test_invalid_explicit_codex_cli_never_falls_back_to_another_installation(self):
+        runtime = self.runtime(directory_anchor=True)
+        job = runtime.root / "jobs/invalid-configured-cli"
+        job.mkdir(parents=True)
+        not_executable = runtime.home / "non-executable-codex"
+        not_executable.write_text("fixture")
+        not_executable.chmod(0o600)
+        paths = ["codex", "./codex", str(runtime.home / "missing-codex"), str(runtime.home)]
+        if os.name != "nt":
+            paths.append(str(not_executable))
+        for cli in paths:
+            with self.subTest(cli=cli), patch("engine.environment", return_value={
+                    "PATH": "/fallback/bin", "CODEY_CODEX_EXECUTABLE": cli,
+            }), patch("engine.shutil.which", return_value="/fallback/bin/codex") as which, patch.object(
+                    runtime, "probe", return_value={"passed": True}), patch("engine.run") as run:
+                with self.assertRaisesRegex(engine.UpdateError, "model_login_required"):
+                    engine.Runtime.model(runtime, runtime.snapshot(), job)
+                which.assert_not_called()
+                run.assert_not_called()
+
     def test_downgrade_and_equal_sequence_digest_changes_do_not_download_or_restart(self):
         runtime = self.runtime(directory_anchor=True)
         manifest, _ = self.package(runtime, sequence=7)

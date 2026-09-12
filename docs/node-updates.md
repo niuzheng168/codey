@@ -6,6 +6,11 @@ release. See [local package updates](codey-local-update.md), including native
 Windows handling, one-time bootstrap, concurrency and recovery. The feed
 workflow below remains the centrally signed, owner-confirmed fleet mechanism.
 
+The local updater also has explicit `codex` and `devtunnel` component commands,
+with Codey 0.1.3 as the installed compatibility baseline. These use reviewed local
+tool manifests, not this Portal feed. They do not change the heartbeat, protocol 1,
+release picker, or Windows pull-agent support. See the same local updater guide.
+
 The Portal brokers **desired package versions**, not remote shell commands. An independent
 `codey-node-updater.service` on each Linux x64 node polls outbound HTTPS. No SSH key, Portal
 master, model credential, release signing private key, or new inbound management port is
@@ -79,6 +84,12 @@ The agent preserves service units, original Node executables, model/SSO/TLS conf
 databases. It stages prebuilt packages and reuses dependencies only for a matching lock and
 install fingerprint. Cold mismatches install locked production dependencies, not another
 full backend build. Only changed services are stopped.
+
+Native Codex verification reuses the running Workspace service's
+`CODEY_CODEX_EXECUTABLE` when configured. That pin must be an executable absolute
+file; an invalid pin fails closed rather than selecting another installation.
+Only services without a pin fall back to their own `PATH`. The updater never
+installs or upgrades Codex to satisfy verification.
 
 The `npm` layout uses one application directory and one `npm-shrinkwrap.json`.
 Only a sole `components.codey` release is eligible: both services stop before one

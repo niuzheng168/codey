@@ -1,6 +1,6 @@
 {
   "name": "codey",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Codey workspace and model gateway in one npm application.",
   "type": "module",
   "bin": {
