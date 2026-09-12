@@ -80,6 +80,7 @@ npm test
 - [多用户与节点隔离](./docs/codey-multiuser-design.md)
 - [手动语音润色、撤销与恢复](./docs/codey-voice-rewrite.md)
 - [Workspace 前端统一发布（已上线）](./docs/codey-shared-workspace-ui.md)
+- [Workspace `/goal` 与 `/plan` 命令](./docs/codey-goal-plan.md)
 
 **当前 ACA 部署（2026-09-06）：** Codey 支持多个用户名密码账号；原 `zhn`
 为管理员，在“账号与节点 → 用户管理”创建账号。节点设置按不可变 owner ID
