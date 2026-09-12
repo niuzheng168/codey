@@ -24,7 +24,8 @@ Usage:
 start runs both services in the foreground; Ctrl+C stops both.
 Defaults: loopback only, workspace :3001, gateway :4141.
 Responses WebSocket defaults to off; explicit gateway config takes precedence.
-doctor checks the shared Linux/Windows runtime; managed setup is Linux-only.
+doctor checks the shared Linux/Windows/macOS runtime; managed setup is Linux-only.
+macOS managed updates use the separately enrolled Portal LaunchAgent, not update/setup.
 update selects one component at a time; it never runs setup. See "codey update --help".
 Use "codey gateway --help" for gateway options.
 Install the official Codex CLI separately and authenticate the gateway with

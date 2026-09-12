@@ -15,7 +15,7 @@ import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "packages/codey"
-RUNTIME_PLATFORMS = ["linux-x64", "windows-x64"]
+RUNTIME_PLATFORMS = ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]
 TEXT_SUFFIXES = {".js", ".mjs", ".cjs", ".json", ".map", ".md", ".html", ".css", ".svg", ".txt", ".sh", ".ps1"}
 
 
@@ -252,7 +252,7 @@ def inspect_npm_package(file):
             raise RuntimeError("Invalid Codey npm metadata")
         validate_runtime_lock(package, lock)
         if build.get("runtimePlatforms") != RUNTIME_PLATFORMS or "platform" in build:
-            raise RuntimeError("Codey must declare one shared Linux/Windows runtime, not a build-host platform")
+            raise RuntimeError("Codey must declare one shared Linux/Windows/macOS runtime, not a build-host platform")
         for group in ("dependencies", "optionalDependencies"):
             deps = package.get(group, {})
             if (deps != lock.get("packages", {}).get("", {}).get(group, {})

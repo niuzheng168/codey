@@ -8,13 +8,21 @@ workflow below remains the centrally signed, owner-confirmed fleet mechanism.
 
 The local updater also has explicit `codex` and `devtunnel` component commands,
 with Codey 0.1.3 as the installed compatibility baseline. These use reviewed local
-tool manifests, not this Portal feed. They do not change the heartbeat, protocol 1,
-release picker, or Windows pull-agent support. See the same local updater guide.
+tool manifests, not this Portal feed. The Portal feed updates only Codey, not the
+native Codex/DevTunnel tools. See the same local updater guide.
 
 The Portal brokers **desired package versions**, not remote shell commands. An independent
-`codey-node-updater.service` on each Linux x64 node polls outbound HTTPS. No SSH key, Portal
+`codey-node-updater.service` on Linux x64, the original-owner
+`Codey Node Updater <nodeId>` logon task on Windows x64, or
+`com.codey.node-updater.<nodeId>` LaunchAgent on macOS polls outbound HTTPS. No SSH key, Portal
 master, model credential, release signing private key, or new inbound management port is
-distributed to nodes. Windows local copilot-api is excluded.
+distributed to nodes. The Windows agent supports only the existing unified,
+owner-managed Codey npm installation, never a standalone/system copilot-api or
+an unrelated Windows service. See [Windows enrollment and rollout](windows-node-updates.md).
+The Mac adapter adopts only the existing owner-managed schema-2 npm/launchd
+layout, not a split relay install or Codex Desktop. See [Mac enrollment and
+rollout](macos-node-updates.md). Local `codey update`/tool commands remain
+Linux/Windows-specific; Mac Portal support does not enable those commands.
 
 ## Current Portal UI
 
@@ -32,7 +40,7 @@ batch canaries, owner checks, offline waiting and confirmation still apply.
 
 1. For npm-layout nodes, build/test one Codey npm package with `npm run codey:build`.
    Retain `codey-package.json`, `codey-<version>.tgz` and independent `validation.json`
-   evidence. For legacy nodes, retain the deploy Skill's `manifest.json`,
+   evidence. For Linux legacy nodes, retain the deploy Skill's `manifest.json`,
    `validation.json` and two prebuilt `cloudcli.tar.gz` / `gateway.tar.gz` archives.
    A changed upstream commit is not itself sufficient evidence of compatibility.
 2. Generate an Ed25519 signing pair once on the owner-only build host:
@@ -42,6 +50,17 @@ batch canaries, owner checks, offline waiting and confirmation still apply.
 3. Publish using `publish --manifest <manifest.json> --output <feed> --private-key <private.pem>
    --sequence <increasing integer>`. Optional `--components cloudcli` supports a CloudCLI-only
    legacy release. A `codey-package.json` automatically selects the sole `codey` component.
+   The default platform is `linux-x64`. Use `--platform windows-x64` only with the
+   validated shared npm artifact: it signs a distinct `codey-windows-…` release ID
+   pointing at the SAME tarball and hash. Keep sequence numbers increasing across
+   the entire catalog. An explicit `--release-id` can re-authorize unchanged bytes
+   with a new ID/sequence; it never overwrites an existing ID.
+   macOS uses `--platform macos-arm64` or `--platform macos-x64`, with distinct
+   IDs and the same shared tarball. The publisher also inspects the actual archive
+   and requires the matching target's `doctor-<platform>.json` native report;
+   editing a manifest cannot turn the published Linux/Windows-only 0.1.4 into
+   a Mac artifact. Deploy the platform-aware Portal before publishing new
+   platform manifests, so older catalog parsers do not reject the feed.
    Specify `--codey-node-majors` or the legacy `--cloudcli-node-majors` /
    `--gateway-node-majors` only for runtimes actually tested; the default is Node 24.
    The publisher verifies evidence and artifact hashes; it never installs an npm package by name.
@@ -62,10 +81,22 @@ Never set a version from `latest` or execute an arbitrary command supplied by a 
 
 ## Bootstrap old and new machines
 
-- Existing nodes: owner downloads that node's private updater ZIP, then runs
+- Existing Linux nodes: owner downloads that node's private updater ZIP, then runs
   `python3 install.py` to inspect the plan and `python3 install.py --apply` to install only
   the updater. Use an existing Python 3.12+ interpreter (including the separately installed
   Azure CLI Python if appropriate); do not upgrade global Node/Codex or restart the apps.
+- Existing Windows nodes: Settings → Software Updates → the node's Manage →
+  Enroll Updater downloads its own private native ZIP. Run `install.ps1`, then
+  `install.ps1 -Apply` in the original owner's non-administrator PowerShell.
+  No Python installation, new-machine registration, app restart or model login is
+  part of enrollment. The hidden task starts after that owner logs on; it uses a
+  separate process-tree Job Object and a kernel-owned file lock.
+- Existing Mac npm nodes: download the Mac node's private ZIP. Run `install.py`,
+  then `install.py --apply`, with the original installer's Python 3.12+ in that
+  Mac owner's terminal. Never sudo, install a new Python, or re-register the
+  node. This installs only the independent updater LaunchAgent and reports the
+  actual old package version; it does not require Codey 0.1.5 to be installed
+  first. See the Mac guide for exact commands and unsupported legacy layouts.
 - New nodes: the fixed, credential-free `config-new-codey-machine` download includes one
   Codey npm package and the public trust key. The installer generates per-node credentials
   locally and installs the updater after both internal services pass checks. It cannot
@@ -77,6 +108,9 @@ The private configuration is `~/.config/codey-updater/config.json` (0600), immut
 data is in `~/.local/share/codey-updater/jobs/`, and the installed version is recorded
 separately from enrollment identity. Updater status intentionally excludes logs, prompts,
 model keys, TLS keys and SSO material.
+Native Windows/Mac application jobs instead use their original
+`~/.local/share/codey-machine-<platform>/local-updates/` directory. Their shared
+local transaction marker/lock is under `~/.local/share/codey-local-update`.
 
 ## Compatibility and rollback
 
@@ -122,6 +156,10 @@ and use the owner-confirmed queue.
 
 `npm run updates:check`, `npm test`, and on Linux
 `python3 -m unittest discover -s test -p test_node_updater.py`.
+`npm run updates:test:macos` exercises the Mac filesystem/launchd adapter with
+injected OS I/O; it does not invoke live launchctl or models. Native doctor,
+real launchd activation/recovery, model responses and sleep/login behavior must
+still be accepted on a Mac before calling that platform production-ready.
 The Python transaction fixtures never invoke real systemctl; they cover directory/symlink
 adoption, partial-component changes, model-failure rollback and concurrent-state protection.
 Only live fleet evidence counts as production/model verification. MCP and Session History

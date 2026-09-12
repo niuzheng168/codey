@@ -10,6 +10,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { npmPackageRoot } from "../scripts/install-codey-runtime.mjs";
+import { knownRuntimePlatforms } from "../packages/codey/lib/package-info.mjs";
 
 const exec = promisify(execFile);
 const artifact = process.env.CODEY_PACKAGE_TGZ;
@@ -64,7 +65,8 @@ test("the identical shared artifact installs, validates native modules and start
   const info = JSON.parse((await exec(process.execPath, [cli, "doctor", "--json"], { env, timeout: 20000 })).stdout);
   assert.equal(info.ok, true);
   assert.equal(info.platform, windows ? "windows-x64" : "linux-x64");
-  assert.deepEqual(info.runtimePlatforms, ["linux-x64", "windows-x64"]);
+  assert.ok(knownRuntimePlatforms(info.runtimePlatforms));
+  assert.ok(info.runtimePlatforms.includes(info.platform));
   assert.deepEqual(info.native, { sqlite: true, bcrypt: true, ripgrep: true, pty: true, codexSdk: true });
   assert.equal(info.lockSha256, createHash("sha256").update(await readFile(path.join(root, "npm-shrinkwrap.json"))).digest("hex"));
   if (!windows) assert.equal((await stat(root)).mode & 0o022, 0, "The runtime must stay eligible for owner-only local updates");

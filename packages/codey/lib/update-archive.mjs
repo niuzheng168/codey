@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
 import { createGunzip } from "node:zlib";
-import { RUNTIME_PLATFORMS, validateRuntimeLock } from "./package-info.mjs";
+import { knownRuntimePlatforms, validateRuntimeLock } from "./package-info.mjs";
 import { fileHash, hash } from "./update-files.mjs";
 
 const MAX_ARCHIVE = 512 * 1024 * 1024;
@@ -195,7 +195,7 @@ export async function inspectUpdateArchive(filename, expectedSha256) {
       !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(pkg.version) ||
       !/^[a-f0-9]{40}$/.test(build.sourceCommit ?? "") ||
       Object.hasOwn(build, "platform") || Object.hasOwn(pkg, "os") || Object.hasOwn(pkg, "cpu") ||
-      JSON.stringify(build.runtimePlatforms) !== JSON.stringify(RUNTIME_PLATFORMS) ||
+      !knownRuntimePlatforms(build.runtimePlatforms) ||
       build.lockSha256 !== files.get("npm-shrinkwrap.json").sha256 ||
       build.workspaceEntrySha256 !== files.get("dist-server/server/index.js").sha256 ||
       build.gatewayEntrySha256 !== files.get("gateway/main.js").sha256 ||

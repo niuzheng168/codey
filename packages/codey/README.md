@@ -24,15 +24,18 @@ does not package another Codex binary. The locked SDK's JavaScript is inlined
 as an internal module, without its transitive native CLI dependency. Native
 dependencies such as SQLite and PTY are installed by npm for the target machine.
 
-## One artifact for Linux and Windows
+## One artifact, platform-specific compatibility
 
-The canonical release is **one `codey-<version>.tgz` with one SHA-256**, shared by
-Linux x64 and Windows x64. Do not rebuild a second `codey-win` package or regenerate
+The canonical release is **one `codey-<version>.tgz` with one SHA-256**. Published
+0.1.4 supports Linux x64 and Windows x64; the next 0.1.5 source additionally
+supports macOS arm64/x64. Never relabel/overwrite a published 0.1.4 archive to
+make it a Mac release. Mac native acceptance and publication are separate gates.
+Do not rebuild a second `codey-win`/`codey-mac` package or regenerate
 its dependency lock on the target machine. Release builds use the repository's
 public-npm lock byte-for-byte and normalize text line endings before fingerprinting.
 No native executable or installed `node_modules` directory is included.
 
-With Node/npm already installed, place `install-codey.mjs` next to the `.tgz` and
+On Linux/Windows, with Node/npm already installed, place `install-codey.mjs` next to the `.tgz` and
 run the same command in Bash, PowerShell or cmd:
 
 ```sh
@@ -57,6 +60,10 @@ systemd/DevTunnel `codey setup` workflow below. Windows can install and run the 
 gateway/workspace npm code, but its existing service/DevTunnel hosting remains
 external; the Linux updater and managed setup must not be run on Windows.
 `codey doctor` explicitly reports this distinction and never claims model login.
+Existing schema-2 Mac npm/launchd nodes instead enroll the independent
+[Portal updater](../../docs/macos-node-updates.md). It reuses their original
+Python/Node and service definitions and never runs setup or updates Codex/
+DevTunnel. `codey update` local/tool commands are still Linux/Windows-only.
 
 ## Linux managed installation without a ZIP
 

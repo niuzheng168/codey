@@ -63,11 +63,12 @@ export async function runDoctor(root, args, {
   const options = doctorOptions(args);
   if (options.help) return log(DOCTOR_HELP);
   const target = runtimePlatform(platform, arch);
-  const { pkg, build, entrySha256 } = await readPackageInfo(root);
+  const { pkg, build, entrySha256 } = await readPackageInfo(root, { platform, arch });
   const native = options.packageOnly ? null : await nativeCheck(root);
   const result = {
     ok: true, name: "codey", version: pkg.version, platform: target,
     runtimePlatforms: build.runtimePlatforms, sourceCommit: build.sourceCommit,
+    nodeMajor: Number(process.versions.node.split(".")[0]),
     entrySha256, lockSha256: build.lockSha256, native,
     managedSetupSupported: target === "linux-x64", serviceChanges: false, modelRequests: false,
   };

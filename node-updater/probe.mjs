@@ -5,6 +5,7 @@ import https from 'node:https';
 import tls from 'node:tls';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -30,11 +31,26 @@ const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const input = JSON.parse(Buffer.concat(chunks).toString());
 assert.ok(['idle', 'verify'].includes(input.mode));
-assert.ok(Number.isSafeInteger(input.cloudcliPid) && input.cloudcliPid > 0);
-const environ = Object.fromEntries((await readFile(`/proc/${input.cloudcliPid}/environ`)).toString()
-  .split('\0').filter((part) => part.includes('=')).map((part) => {
-    const index = part.indexOf('='); return [part.slice(0, index), part.slice(index + 1)];
-  }));
+let environ;
+if (input.runtimeFile) {
+  assert.ok(['win32', 'darwin'].includes(process.platform));
+  const config = JSON.parse((await readFile(input.runtimeFile, 'utf8')).replace(/^\uFEFF/, ''));
+  const windows = process.platform === 'win32';
+  const normalize = value => windows ? value.toLowerCase() : value;
+  assert.equal(config.kind, windows ? 'codey-windows-oneclick' : 'codey-macos-oneclick');
+  assert.equal(config.platform, windows ? 'windows-x64' : `macos-${process.arch}`);
+  assert.equal(normalize(config.ownerHome), normalize(os.homedir()));
+  assert.equal(config.nodeId, input.nodeId);
+  assert.equal(normalize(config.nodeExe), normalize(process.execPath));
+  assert.equal(normalize(config.codeyDirectory), normalize(input.cloudcliPath));
+  environ = { ...(windows ? config.services.codey.environment : config.environment), HOST: '127.0.0.1', SERVER_PORT: '3001' };
+} else {
+  assert.ok(Number.isSafeInteger(input.cloudcliPid) && input.cloudcliPid > 0);
+  environ = Object.fromEntries((await readFile(`/proc/${input.cloudcliPid}/environ`)).toString()
+    .split('\0').filter((part) => part.includes('=')).map((part) => {
+      const index = part.indexOf('='); return [part.slice(0, index), part.slice(index + 1)];
+    }));
+}
 assert.equal(environ.CODEY_PORTAL_NODE_ID, input.nodeId);
 assert.equal(environ.CODEY_PORTAL_PRINCIPAL_ID, input.ownerId);
 const key = Buffer.from(environ.CODEY_PORTAL_SSO_KEY, 'base64url');

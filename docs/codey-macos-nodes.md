@@ -9,9 +9,15 @@ installer bundle or an updater. The Portal still verifies the bound Portal origi
 matching package/machine platform, node TLS certificate, private DevTunnel,
 owner credentials, data authentication, Workspace SSO and WebSocket access.
 
-The new macOS managed installer and automatic updater remain unavailable. The
-shared Linux/Windows installation Skill is not a Mac installer; do not relabel a
-Mac registration as Linux or Windows to bypass a platform check.
+The new macOS managed installer remains unavailable. An independent Portal
+updater is now implemented for the existing schema-2 `codey-macos-oneclick` npm
+layout; it still requires Portal rollout, one-time private enrollment and a
+compatible signed release. See [Mac updater enrollment](macos-node-updates.md).
+The published 0.1.4 Linux/Windows archive is not a Mac release; the next
+macOS-capable application changes are prepared as 0.1.5.
+Do not relabel a Mac registration as Linux/Windows or rerun a new-machine
+installer to get past an updater check. The legacy split layout below is not
+silently migrated.
 
 The personalized installer and schema-1 activation workflow below are legacy
 design notes, not currently published installation instructions.

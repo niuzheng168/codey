@@ -8,6 +8,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { runDoctor, doctorOptions } from "../packages/codey/lib/doctor.mjs";
 import { RUNTIME_PLATFORMS, readPackageInfo, runtimePlatform, validateRuntimeLock } from "../packages/codey/lib/package-info.mjs";
+import { readInstalledPackageInfo } from "../packages/codey/lib/update-files.mjs";
 import { installLauncher, installOptions, launcherContents, npmCandidates, npmPackageRoot, WINDOWS_PATH_SCRIPT } from "../scripts/install-codey-runtime.mjs";
 
 const exec = promisify(execFile);
@@ -37,29 +38,51 @@ async function fixture(t) {
   return { root, home, pkg, lock, build };
 }
 
-test("one runtime manifest and fingerprint are shared by Linux and Windows doctor checks", async t => {
+test("one runtime manifest and fingerprint are shared by Linux, Windows and both Mac architectures", async t => {
   const f = await fixture(t);
   const reports = [];
-  for (const platform of ["linux", "win32"]) {
+  for (const [platform, arch] of [["linux", "x64"], ["win32", "x64"], ["darwin", "arm64"], ["darwin", "x64"]]) {
     let checks = 0;
     const report = await runDoctor(f.root, ["--json"], {
-      platform, arch: "x64", nativeCheck: async root => { assert.equal(root, f.root); checks++; return { fixture: true }; },
+      platform, arch, nativeCheck: async root => { assert.equal(root, f.root); checks++; return { fixture: true }; },
       log: value => { assert.equal(JSON.parse(value).ok, true); },
     });
     assert.equal(checks, 1);
     assert.equal(report.serviceChanges, false);
     assert.equal(report.modelRequests, false);
-    assert.deepEqual(report.runtimePlatforms, ["linux-x64", "windows-x64"]);
+    assert.deepEqual(report.runtimePlatforms, ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]);
     reports.push(report);
   }
   assert.equal(reports[0].entrySha256, reports[1].entrySha256);
   assert.equal(reports[0].lockSha256, reports[1].lockSha256);
   assert.equal(reports[1].platform, "windows-x64");
   assert.equal(reports[1].managedSetupSupported, false, "Runtime portability must not falsely claim Windows systemd setup");
+  assert.deepEqual(reports.slice(2).map(report => report.platform), ["macos-arm64", "macos-x64"]);
+  assert.ok(reports.slice(2).every(report => report.entrySha256 === reports[0].entrySha256 && !report.managedSetupSupported));
   assert.equal(runtimePlatform("win32", "x64"), "windows-x64");
   assert.throws(() => runtimePlatform("win32", "arm64"));
+  assert.throws(() => runtimePlatform("darwin", "ia32"));
 });
 
+test("published Linux/Windows-only bytes remain valid, but cannot masquerade as a Mac release", async t => {
+  const f = await fixture(t);
+  const build = { ...f.build, runtimePlatforms: ["linux-x64", "windows-x64"] };
+  await writeFile(path.join(f.root, "codey-build.json"), JSON.stringify(build));
+  for (const platform of ["linux", "win32"]) assert.equal((await readPackageInfo(f.root, { platform, arch: "x64" })).pkg.version, f.pkg.version);
+  for (const arch of ["arm64", "x64"]) {
+    await assert.rejects(readPackageInfo(f.root, { platform: "darwin", arch }), /compatible with this platform/);
+    await assert.rejects(readInstalledPackageInfo(f.root, { platform: "darwin", arch }));
+  }
+});
+
+test("the original three-platform Apple Silicon installation can be read, not relabeled for Intel", async t => {
+  const f = await fixture(t);
+  await writeFile(path.join(f.root, "codey-build.json"),
+    JSON.stringify({ ...f.build, runtimePlatforms: ["linux-x64", "windows-x64", "macos-arm64"] }));
+  const installed = await readInstalledPackageInfo(f.root, { platform: "darwin", arch: "arm64" });
+  assert.equal(installed.pkg.version, f.pkg.version);
+  await assert.rejects(readInstalledPackageInfo(f.root, { platform: "darwin", arch: "x64" }));
+});
 test("doctor validates the package before native code and package-only mode never loads native modules", async t => {
   const f = await fixture(t);
   const nativeCheck = () => { throw new Error("Must not load native code"); };

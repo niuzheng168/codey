@@ -2,14 +2,19 @@ import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 
-export const RUNTIME_PLATFORMS = Object.freeze(["linux-x64", "windows-x64"]);
+export const RUNTIME_PLATFORMS = Object.freeze(["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]);
+// Published 0.1.3/0.1.4 bytes stay valid on their original platforms. Adding
+// macOS to the next release must not relabel those immutable older artifacts.
+const previousPlatforms = Object.freeze(["linux-x64", "windows-x64"]);
+export const knownRuntimePlatforms = value =>
+  [RUNTIME_PLATFORMS, previousPlatforms].some(platforms => JSON.stringify(value) === JSON.stringify(platforms));
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const sha256 = /^[a-f0-9]{64}$/;
 const sameRecord = (a = {}, b = {}) => JSON.stringify(Object.entries(a).sort()) === JSON.stringify(Object.entries(b).sort());
 
 export function runtimePlatform(platform = process.platform, arch = process.arch) {
-  const name = `${platform === "win32" ? "windows" : platform}-${arch}`;
-  if (!RUNTIME_PLATFORMS.includes(name)) throw new Error("This shared Codey release supports Linux x64 and Windows x64.");
+  const name = `${platform === "win32" ? "windows" : platform === "darwin" ? "macos" : platform}-${arch}`;
+  if (!RUNTIME_PLATFORMS.includes(name)) throw new Error("Codey supports Linux x64, Windows x64 and macOS arm64/x64.");
   return name;
 }
 
@@ -33,7 +38,7 @@ export function validateRuntimeLock(pkg, lock) {
   }
 }
 
-export async function readPackageInfo(root) {
+export async function readPackageInfo(root, { platform = process.platform, arch = process.arch } = {}) {
   root = await realpath(root);
   const [packageRaw, buildRaw, lockRaw] = await Promise.all(
     ["package.json", "codey-build.json", "npm-shrinkwrap.json"].map(name => readFile(path.join(root, name))),
@@ -43,10 +48,10 @@ export async function readPackageInfo(root) {
   if (build.schema !== 1 || build.name !== "codey" || build.version !== pkg.version ||
       !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(pkg.version ?? "") ||
       !/^[a-f0-9]{40}$/.test(build.sourceCommit ?? "") ||
-      JSON.stringify(build.runtimePlatforms) !== JSON.stringify(RUNTIME_PLATFORMS) ||
+      !knownRuntimePlatforms(build.runtimePlatforms) || !build.runtimePlatforms.includes(runtimePlatform(platform, arch)) ||
       Object.hasOwn(build, "platform") || Object.hasOwn(pkg, "os") || Object.hasOwn(pkg, "cpu") ||
       !sha256.test(build.lockSha256 ?? "") || hash(lockRaw) !== build.lockSha256) {
-    throw new Error("Not a shared Linux/Windows Codey release");
+    throw new Error("Not a shared Linux/Windows/macOS Codey release compatible with this platform");
   }
   for (const [name, expected] of [
     ["dist-server/server/index.js", build.workspaceEntrySha256], ["gateway/main.js", build.gatewayEntrySha256],

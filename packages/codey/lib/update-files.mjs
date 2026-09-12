@@ -69,26 +69,26 @@ export async function fileHash(file) {
   return digest.digest("hex");
 }
 
-/** Read the previous shared layout without changing its metadata or enabling a retired platform. */
-export async function readInstalledPackageInfo(root) {
-  try { return await readPackageInfo(root); }
+/** Read previous installed layouts, without making their bytes eligible for a different OS. */
+export async function readInstalledPackageInfo(root, { platform = process.platform, arch = process.arch } = {}) {
+  try { return await readPackageInfo(root, { platform, arch }); }
   catch (original) {
     root = await realpath(root);
     const [pkg, build, lock] = await Promise.all(
       ["package.json", "codey-build.json", "npm-shrinkwrap.json"].map(name => readJson(path.join(root, name))),
     );
     const previousPlatforms = ["linux-x64", "windows-x64", "macos-arm64"];
-    const target = runtimePlatform();
+    const target = runtimePlatform(platform, arch);
     const previousShared = JSON.stringify(build.runtimePlatforms) === JSON.stringify(previousPlatforms) &&
       !Object.hasOwn(build, "platform");
     const previousNative = build.platform === target && !Object.hasOwn(build, "runtimePlatforms");
-    if ((!previousShared && !previousNative) || !["linux-x64", "windows-x64"].includes(target)) throw original;
+    if ((!previousShared && !previousNative) || previousShared && !previousPlatforms.includes(target)) throw original;
     validateRuntimeLock(pkg, lock);
     if (build.schema !== 1 || build.name !== "codey" || build.version !== pkg.version ||
         !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(pkg.version ?? "") ||
         !/^[a-f0-9]{40}$/.test(build.sourceCommit ?? "") ||
-        Object.hasOwn(pkg, "os") && (!previousNative || JSON.stringify(pkg.os) !== JSON.stringify([process.platform])) ||
-        Object.hasOwn(pkg, "cpu") && (!previousNative || JSON.stringify(pkg.cpu) !== '["x64"]') ||
+        Object.hasOwn(pkg, "os") && (!previousNative || JSON.stringify(pkg.os) !== JSON.stringify([platform])) ||
+        Object.hasOwn(pkg, "cpu") && (!previousNative || JSON.stringify(pkg.cpu) !== JSON.stringify([arch])) ||
         await fileHash(path.join(root, "npm-shrinkwrap.json")) !== build.lockSha256 ||
         await fileHash(path.join(root, "dist-server/server/index.js")) !== build.workspaceEntrySha256 ||
         await fileHash(path.join(root, "gateway/main.js")) !== build.gatewayEntrySha256) throw original;

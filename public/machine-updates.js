@@ -15,6 +15,7 @@ const labels = {
   needs_setup: "尚未接入升级器", protected_local: "受保护节点", no_release: "暂无 Codey 发行版",
   needs_codey_migration: "需先迁移到 Codey npm 包", updater_unavailable: "升级服务尚未配置",
   up_to_date: "已是目标版本", unsupported_platform: "平台不支持", runtime_incompatible: "Node 运行时不兼容",
+  release_platform_mismatch: "请选择对应平台的发行版",
   model_auth_migration_required: "需先迁移模型 API key/调用方", migration_unsupported: "升级器尚不支持此迁移",
   model_login_required: "需先完成本人模型登录", configuration_changed: "节点配置已改变，请检查",
   downgrade_blocked: "禁止退回较旧的发行序号", job_active: "已有升级任务", busy: "等待任务空闲",
@@ -51,15 +52,16 @@ if (root) {
   function eligibilityReason(node) {
     const release = target();
     if (node.protected) return "protected_local";
-    if (node.updaterSupported === false || node.report?.layout === "unsupported") return "unsupported_platform";
+    if (node.updaterSupported === false) return "unsupported_platform";
     if (!node.enrolled || !node.report) return "needs_setup";
     if (node.activeJob) return "job_active";
+    if (node.report.blockedReason) return node.report.blockedReason;
+    if (node.report.layout === "unsupported") return "configuration_changed";
     if (node.report.layout !== "npm" || !node.report.components?.codey) return "needs_codey_migration";
     if (!current?.enabled) return "updater_unavailable";
     if (!release) return "no_release";
-    if (node.report.platform !== release.platform) return "unsupported_platform";
+    if (node.report.platform !== release.platform) return "release_platform_mismatch";
     if (node.report.highestSequence > release.sequence) return "downgrade_blocked";
-    if (node.report.blockedReason) return node.report.blockedReason;
     if (release.migrations.some((id) => !node.report.readyMigrations.includes(id))) return "model_auth_migration_required";
     if (!release.components.codey.nodeMajors.includes(node.report.components.codey.nodeMajor)) return "runtime_incompatible";
     const installed = node.report.components.codey;
@@ -115,7 +117,11 @@ if (root) {
       link.href = url; link.download = filename;
       document.body.append(link); link.click(); link.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 60000);
-      notice("安装包已下载。在对应机器上阅读 UPGRADE.md 并运行 install.py；不要重新运行新机器 enrollment。");
+      notice(node.platform === "windows-x64"
+        ? "安装包已下载。在对应 Windows 的原用户、非管理员 PowerShell 中阅读 UPGRADE.md，先运行 install.ps1 检查，再加 -Apply 接入；不会重装 Codey。"
+        : node.platform?.startsWith("macos-")
+          ? "安装包已下载。在对应 Mac 的原登录用户终端中阅读 UPGRADE.md，使用原安装器的 Python 运行 install.py 检查，再加 --apply 接入；不要 sudo，也不要重装或重新注册节点。"
+        : "安装包已下载。在对应机器上阅读 UPGRADE.md 并运行 install.py；不要重新运行新机器 enrollment。");
     } catch (error) { notice(error.message, true); }
     finally { working = false; await refresh(false); }
   }
@@ -203,7 +209,9 @@ if (root) {
       current = { ...snapshot, releases: snapshot.releases.filter(codeyRelease) };
       $("release").replaceChildren();
       for (const release of current.releases) {
-        const option = element("option", `Codey ${release.components.codey.version} · ${release.id}`);
+        const platform = { "windows-x64": "Windows x64", "linux-x64": "Linux x64",
+          "macos-arm64": "macOS Apple Silicon", "macos-x64": "macOS Intel" }[release.platform] ?? release.platform;
+        const option = element("option", `Codey ${release.components.codey.version} · ${platform} · ${release.id}`);
         option.value = release.id; $("release").append(option);
       }
       if (!current.releases.length) {

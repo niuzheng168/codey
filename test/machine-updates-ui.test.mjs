@@ -130,6 +130,47 @@ test("changing the selected Codey release recomputes eligibility and status from
   assert.doesNotMatch(p.get("list").children[0].textContent, /已是目标版本/);
 });
 
+test("Windows and Linux releases remain explicit, with native bootstrap controls and no cross-platform batch", async () => {
+  const status = data();
+  status.releases.push({ ...status.releases[0], id: "windows-release", platform: "windows-x64", sequence: 2 });
+  status.nodes[1] = { ...status.nodes[1], platform: "windows-x64", updaterSupported: true,
+    report: { ...status.nodes[1].report, platform: "windows-x64" } };
+  status.nodes[2] = { ...status.nodes[2], platform: "windows-x64", updaterSupported: true };
+  const p = await page({ initialData: status });
+  assert.match(p.get("release").textContent, /Linux x64/);
+  assert.match(p.get("release").textContent, /Windows x64/);
+  assert.match(p.get("list").children[1].textContent, /对应平台/);
+  assert.ok(p.get("list").children[2].querySelectorAll("button").some(button => button.textContent === "接入升级器"));
+  p.get("release").value = "windows-release";
+  p.get("release").dispatch("change");
+  assert.equal(p.get("list").children[0].querySelector("input").disabled, true);
+  assert.equal(p.get("list").children[1].querySelector("input").disabled, false);
+  await p.get("all").click();
+  assert.deepEqual(p.requests.at(-1).body.nodeIds, ["beta"]);
+});
+
+test("Mac ARM/Intel releases and unreported enrollment stay explicit instead of silently choosing Linux", async () => {
+  const status = data();
+  status.releases.push(...["macos-arm64", "macos-x64"].map((platform, index) => ({
+    ...status.releases[0], id: platform + "-release", platform, sequence: index + 2,
+  })));
+  status.nodes[1] = { ...status.nodes[1], platform: "macos-arm64", updaterSupported: true,
+    report: { ...status.nodes[1].report, platform: "macos-arm64" } };
+  status.nodes[2] = { ...status.nodes[2], platform: "macos-x64", updaterSupported: true };
+  const p = await page({ initialData: status });
+  assert.match(p.get("release").textContent, /macOS Apple Silicon/);
+  assert.match(p.get("release").textContent, /macOS Intel/);
+  const unpaired = p.get("list").children[2];
+  assert.match(unpaired.textContent, /Codey 版本未上报/);
+  assert.ok(unpaired.querySelectorAll("button").some(button => button.textContent === "接入升级器"));
+  p.get("release").value = "macos-arm64-release";
+  p.get("release").dispatch("change");
+  assert.equal(p.get("list").children[0].querySelector("input").disabled, true);
+  assert.equal(p.get("list").children[1].querySelector("input").disabled, false);
+  await p.get("all").click();
+  assert.deepEqual(p.requests.at(-1).body.nodeIds, ["beta"]);
+});
+
 test("single-machine action only previews its node; no job is sent until explicit confirmation", async () => {
   const p = await page();
   await p.get("list").children[0].children.at(-1).children.find((button) => button.textContent === "更新此机器").click();

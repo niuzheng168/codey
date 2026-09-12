@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import { SignedStore, requestError } from "./signed-store.mjs";
-import { NodeUpdateCatalog, UPDATE_PROTOCOL } from "./node-update-release.mjs";
+import { NodeUpdateCatalog, UPDATE_PROTOCOL, UPDATE_PLATFORMS } from "./node-update-release.mjs";
 import { zipStream } from "./zip-stream.mjs";
 
 const NODE_ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
@@ -29,6 +29,7 @@ const CODES = new Set(["ok", "up_to_date", "busy", "unsupported_platform", "runt
   "rollback_failed", "recovered_rollback", "canary_failed", "lease_lost", "operation_failed", "waiting_canary", "release_unavailable"]);
 const id = () => randomBytes(16).toString("hex");
 const hash = (value) => createHash("sha256").update(value).digest("hex");
+const nodePlatform = node => node.platform ?? node.machine?.platform ?? "linux-x64";
 const sameHash = (left, right) => HEX.test(left ?? "") && HEX.test(right ?? "") &&
   timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
 
@@ -86,15 +87,15 @@ export function safeAgentReport(value) {
 
 function eligibility(node, device, release) {
   if (node.id === "local") return { eligible: false, reason: "protected_local" };
-  if (node.platform && node.platform !== "linux-x64") return { eligible: false, reason: "unsupported_platform" };
+  if (!UPDATE_PLATFORMS.includes(nodePlatform(node))) return { eligible: false, reason: "unsupported_platform" };
   if (!device || device.revoked || !device.report) return { eligible: false, reason: "needs_setup" };
   const report = device.report;
+  if (report.blockedReason) return { eligible: false, reason: report.blockedReason };
   if (report.platform !== release.platform || report.layout === "unsupported") return { eligible: false, reason: "unsupported_platform" };
   if ((report.layout === "npm") !== Object.hasOwn(release.components, "codey")) {
     return { eligible: false, reason: "runtime_incompatible" };
   }
   if (report.highestSequence > release.sequence) return { eligible: false, reason: "downgrade_blocked" };
-  if (report.blockedReason) return { eligible: false, reason: report.blockedReason };
   if (release.migrations.some((migration) => !report.readyMigrations.includes(migration))) {
     return { eligible: false, reason: "model_auth_migration_required" };
   }
@@ -141,8 +142,8 @@ export class MachineUpdates {
     if (!account?.enabled) throw requestError("账号已停用", 403);
     const node = await this.nodePolicy.owned(principalId, nodeId);
     if (nodeId === "local") throw requestError("受保护节点不接受页面或批量升级", 403);
-    if (node.machine?.platform && node.machine.platform !== "linux-x64") {
-      throw requestError("此平台尚未支持签名升级器；不会分发 Linux 升级脚本", 409);
+    if (!UPDATE_PLATFORMS.includes(nodePlatform(node))) {
+      throw requestError("此平台尚未支持签名升级器；不会分发其他平台的升级脚本", 409);
     }
     return { account, node };
   }
@@ -158,15 +159,18 @@ export class MachineUpdates {
       reason: this.catalog.configured ? (latest ? null : "尚未发布签名的节点发行版") : "运维尚未配置节点更新目录与发行版签名公钥",
       releases: releases.map(({ release, digest }) => ({ ...release, digest })),
       nodes: nodes.map((node) => {
+        const platform = nodePlatform(node);
+        const platformRelease = releases.find(row => row.release.platform === platform)?.release;
         const device = data.devices[node.id]?.ownerId === principalId ? data.devices[node.id] : null;
         const currentJob = data.jobs.findLast((job) => job.nodeId === node.id && job.ownerId === principalId && !terminal.has(job.state));
         return {
           id: node.id, name: node.name, protected: node.id === "local", enrolled: Boolean(device && !device.revoked),
-          updaterSupported: !node.platform || node.platform === "linux-x64",
+          platform, updaterSupported: UPDATE_PLATFORMS.includes(platform),
           connected: Boolean(device && !device.revoked && this.clock() - (device.lastSeen || 0) < HEARTBEAT_TIMEOUT_MS),
           lastSeen: device?.lastSeen || null, report: device?.report || null,
-          ...(node.platform && node.platform !== "linux-x64" ? { eligible: false, reason: "unsupported_platform" }
-            : latest ? eligibility(node, device, latest) : { eligible: false, reason: "no_release" }),
+          ...(UPDATE_PLATFORMS.includes(platform)
+            ? platformRelease ? eligibility(node, device, platformRelease) : { eligible: false, reason: "no_release" }
+            : { eligible: false, reason: "unsupported_platform" }),
           activeJob: currentJob ? publicJob(currentJob) : null,
         };
       }),
@@ -210,24 +214,71 @@ export class MachineUpdates {
       ? await this.nodePolicy.workspaceBindingFor(principalId, nodeId)
       : null;
     // Load the executable payload before issuing/replacing a credential.
-    const sources = await this.sources();
+    const platform = nodePlatform(node);
+    const sources = await this.sources(platform);
     const credential = randomBytes(32).toString("base64url");
+    let minimumSequence = 0;
     await this.mutate((data) => {
       if (data.jobs.some((job) => job.nodeId === nodeId && !terminal.has(job.state))) throw requestError("请等待当前升级任务结束", 409);
       if (Object.hasOwn(data.devices, nodeId) && !replace) throw requestError("升级器已绑定；重新接入需要明确确认凭据轮换", 409);
       if (!Object.hasOwn(data.devices, nodeId) && Object.keys(data.devices).length >= 1024) throw requestError("升级器数量已达上限", 409);
       const previous = data.devices[nodeId];
+      minimumSequence = previous?.ownerId === principalId ? previous.report?.highestSequence || 0 : 0;
       data.devices[nodeId] = { nodeId, ownerId: principalId, credentialHash: hash(credential),
+        platform,
         createdAt: this.clock(), lastSeen: null,
         report: previous?.ownerId === principalId ? previous.report : null, revoked: false };
     });
     const config = this.config(account, nodeId, credential, workspace);
+    if (platform !== "linux-x64") Object.assign(config, { platform, minimumSequence });
     const entries = [{ name: "codey-updater/config.json", data: JSON.stringify(config, null, 2) + "\n" }];
     entries.push(...sources);
     return zipStream(entries);
   }
 
-  sources() {
+  async sources(platform = "linux-x64") {
+    if (["macos-arm64", "macos-x64"].includes(platform)) {
+      // Preserve relative imports for the shared portable JS state machine.
+      // No PowerShell/systemd executable or new-machine installer is included.
+      const mapping = [
+        ["install.py", path.join(this.sourceRoot, "macos/install.py")],
+        ["UPGRADE.md", path.join(this.sourceRoot, "macos/UPGRADE.md")],
+        ["probe.mjs", path.join(this.sourceRoot, "probe.mjs")],
+        ...["agent.mjs", "runtime.mjs", "verify.mjs", "native.py", "host.py"]
+          .map(name => ["macos/" + name, path.join(this.sourceRoot, "macos", name)]),
+        ...["agent.mjs", "client.mjs", "runtime.mjs", "verify.mjs"]
+          .map(name => ["windows/" + name, path.join(this.sourceRoot, "windows", name)]),
+        ["windows/lib/node-update-manifest.mjs", path.resolve(this.sourceRoot, "../src/node-update-manifest.mjs")],
+        ...["update-probe.mjs", "update-files.mjs", "update-archive.mjs", "package-info.mjs"]
+          .map(name => ["windows/lib/" + name, path.resolve(this.sourceRoot, "../packages/codey/lib", name)]),
+      ];
+      const entries = await Promise.all(mapping.map(async ([name, file]) => ({
+        name: "codey-updater/" + name, data: await readFile(file),
+      })));
+      const files = Object.fromEntries(entries.map(entry => [entry.name.slice("codey-updater/".length), hash(entry.data)]));
+      entries.push({ name: "codey-updater/agent-files.json", data: JSON.stringify({ schema: 1, platform, files }) + "\n" });
+      return entries;
+    }
+    if (platform === "windows-x64") {
+      const mapping = [
+        ...["agent.mjs", "client.mjs", "runtime.mjs", "verify.mjs", "native.ps1", "install.ps1", "host.cs", "UPGRADE.md"]
+          .map(name => [name, path.join(this.sourceRoot, "windows", name)]),
+        ["probe.mjs", path.join(this.sourceRoot, "probe.mjs")],
+        ["process-tree.cs", path.join(this.sourceRoot, "windows/process-tree.cs")],
+        ["lib/node-update-manifest.mjs", path.resolve(this.sourceRoot, "../src/node-update-manifest.mjs")],
+        ...["update-windows.ps1", "update-probe.mjs", "update-files.mjs", "update-archive.mjs", "package-info.mjs"]
+          .map(name => ["lib/" + name, path.resolve(this.sourceRoot, "../packages/codey/lib", name)]),
+      ];
+      const entries = await Promise.all(mapping.map(async ([name, file]) => ({
+        name: "codey-updater/" + name, data: await readFile(file),
+      })));
+      const files = Object.fromEntries(entries.map(entry => [
+        entry.name.slice("codey-updater/".length), hash(entry.data),
+      ]));
+      entries.push({ name: "codey-updater/agent-files.json", data: JSON.stringify({ schema: 1, platform, files }) + "\n" });
+      return entries;
+    }
+    if (platform !== "linux-x64") throw requestError("此平台尚未支持签名升级器", 409);
     return Promise.all(["updater.py", "engine.py", "probe.mjs", "install.py", "UPGRADE.md"]
       .map(async (name) => ({ name: "codey-updater/" + name, data: await readFile(path.join(this.sourceRoot, name)) })));
   }
@@ -377,12 +428,16 @@ export class MachineUpdates {
     if (!NODE_ID.test(nodeId ?? "") || !token || req.headers.cookie) throw requestError("Unauthorized updater", 401);
     const device = (await this.store.read()).data.devices[nodeId];
     if (!device || device.revoked || !sameHash(device.credentialHash, hash(token))) throw requestError("Unauthorized updater", 401);
-    await this.owner(device.ownerId, nodeId);
-    return device;
+    const { node } = await this.owner(device.ownerId, nodeId);
+    return { ...device, platform: nodePlatform(node) };
   }
 
   async poll(device, report, previousLease) {
     const clean = safeAgentReport(report);
+    if (device.platform && clean.platform !== device.platform &&
+        !(clean.platform === "unsupported" && clean.layout === "unsupported")) {
+      throw requestError("升级器上报的平台与所属节点不一致", 409);
+    }
     const state = (await this.store.read()).data;
     const job = state.jobs.find((item) => item.nodeId === device.nodeId && item.ownerId === device.ownerId && !terminal.has(item.state));
     let selected = null;
@@ -460,6 +515,9 @@ export class MachineUpdates {
         throw requestError("Upgrade was not verified", 409);
       }
       job.state = input.state; job.code = input.code; job.updatedAt = this.clock();
+      // A valid, owner-bound progress report is also a liveness heartbeat during
+      // downloads/staging/model checks. It does not invent component versions.
+      currentDevice.lastSeen = this.clock();
       job.leaseExpiresAt = this.clock() + 15 * 60000;
       if (terminal.has(job.state) && job.state !== "succeeded" && data.batches[job.batchId]?.canaryJobId === job.id) {
         for (const other of data.jobs) if (other.batchId === job.batchId && other.state === "queued") {

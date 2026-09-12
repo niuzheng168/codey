@@ -8,6 +8,11 @@ public/downloads/**
 !src/**
 !node-updater/**
 node-updater/**/__pycache__/**
+!packages/codey/lib/update-windows.ps1
+!packages/codey/lib/update-probe.mjs
+!packages/codey/lib/update-files.mjs
+!packages/codey/lib/update-archive.mjs
+!packages/codey/lib/package-info.mjs
 !scripts/build-node-skill.mjs
 !skills/codey-node-onboarding/**
 !skills/config-new-codey-machine/**

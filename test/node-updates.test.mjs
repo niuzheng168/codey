@@ -576,6 +576,189 @@ test("credential rotation does not reset the device anti-downgrade high-water ma
   assert.equal((await f.agent(rotated, "/api/node-updater/poll", { protocol: 1, report: report() })).status, 409);
 });
 
+async function importedNative(f, platform = "windows-x64") {
+  const id = `n-${randomBytes(12).toString("hex")}`;
+  const coordinates = { tunnelId: "codey-" + platform + "-updater", clusterId: "jpe1" };
+  const connect = ["e30", Buffer.from(JSON.stringify({
+    ...coordinates, scp: "connect", exp: Math.floor(Date.now() / 1000) + 72000,
+  })).toString("base64url"), "c2ln"].join(".");
+  await f.policy.importMachine("owner-a", {
+    id, name: platform.startsWith("macos-") ? "fixture-mac" : "CPC-Windows", region: "Test", platform, networkMode: "devtunnel", devTunnel: coordinates,
+    tlsServerName: `${id}.nodes.codey.internal`, fingerprint: "fixture", ca: "fixture",
+  }, {
+    clientSigningKey: randomBytes(32).toString("base64url"), workspaceSsoKey: randomBytes(32).toString("base64url"),
+    tunnelUpdateKey: randomBytes(32).toString("base64url"), updaterCredential: randomBytes(32).toString("base64url"),
+    workspaceSubject: "m-" + "c".repeat(24), workspaceUsername: platform.startsWith("macos-") ? "macowner" : "windowsowner",
+  }, connect);
+  return id;
+}
+
+test("Windows explicit bootstrap contains only its native agent and retains owner/platform/sequence binding", async t => {
+  const f = await fixture(t), id = await importedNative(f);
+  const response = await f.request(`/api/settings/updates/bootstrap/${id}`, {
+    method: "POST", body: { confirmation: "enable-node-updater" },
+  });
+  assert.equal(response.status, 200);
+  const zip = Buffer.from(await response.arrayBuffer());
+  const config = JSON.parse(zipEntry(zip, "codey-updater/config.json"));
+  assert.equal(config.platform, "windows-x64");
+  assert.equal(config.minimumSequence, 0);
+  assert.equal(config.ownerId, "m-" + "c".repeat(24));
+  assert.equal(config.username, "windowsowner");
+  assert.match(zipEntry(zip, "codey-updater/install.ps1").toString(), /Register-UpdaterTask/);
+  assert.match(zipEntry(zip, "codey-updater/agent.mjs").toString(), /class Agent/);
+  assert.throws(() => zipEntry(zip, "codey-updater/install.py"), /missing/);
+  const files = JSON.parse(zipEntry(zip, "codey-updater/agent-files.json")).files;
+  for (const [name, expected] of Object.entries(files)) assert.equal(sha(zipEntry(zip, "codey-updater/" + name)), expected);
+  const windowsReport = report({ platform: "windows-x64", layout: "npm", highestSequence: 7,
+    components: { codey: { version: "0.1.4", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24 } } });
+  await f.heartbeat(config, windowsReport);
+  assert.equal((await f.agent(config, "/api/node-updater/poll", { protocol: 1, report: report() })).status, 409,
+    "A Windows credential cannot masquerade as a Linux agent.");
+  const status = (await (await f.request("/api/settings/updates")).json()).nodes.find(node => node.id === id);
+  assert.equal(status.updaterSupported, true);
+  assert.equal(status.connected, true);
+  assert.equal(status.report.components.codey.version, "0.1.4");
+  assert.equal(status.reason, "no_release", "Linux-only catalog does not mean Windows agent support is missing.");
+  const rotatedStream = await f.updates.bootstrap("owner-a", id, true);
+  const bytes = [];
+  for await (const chunk of rotatedStream) bytes.push(chunk);
+  const rotated = JSON.parse(zipEntry(Buffer.concat(bytes), "codey-updater/config.json"));
+  assert.equal(rotated.minimumSequence, 7);
+  assert.equal((await f.agent(config, "/api/node-updater/poll", { protocol: 1, report: windowsReport })).status, 401);
+});
+
+test("Windows signed jobs use the normal owner plan/confirmation/lease pipeline without replacing Linux's latest release", async t => {
+  const f = await fixture(t), id = await importedNative(f);
+  const config = await f.enroll(id);
+  const windowsReport = report({ platform: "windows-x64", layout: "npm",
+    components: { codey: { version: "0.1.4", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24 } } });
+  await f.heartbeat(config, windowsReport);
+  const linux = await f.enroll("alpha");
+  await f.heartbeat(linux);
+  const bytes = Buffer.from("Windows fixture artifact; never executed");
+  const release = { ...f.built.release, id: "codey-windows-fixture", sequence: 2, platform: "windows-x64",
+    components: { codey: { version: "0.1.5", commit: "b".repeat(40), file: "codey-0.1.5.tgz",
+      sha256: sha(bytes), size: bytes.length, entrySha256: "b".repeat(64), lockSha256: "c".repeat(64), nodeMajors: [24] } } };
+  const payload = Buffer.from(JSON.stringify(release));
+  const envelope = { payload: payload.toString("base64"), signature: sign(null, payload, keys.privateKey).toString("base64url") };
+  await mkdir(path.join(f.catalogRoot, "releases", release.id));
+  await writeFile(path.join(f.catalogRoot, "releases", release.id, release.components.codey.file), bytes);
+  await writeFile(path.join(f.catalogRoot, "catalog.json"), JSON.stringify({ schema: 1, releases: [envelope, f.built.envelope] }));
+  const listed = await (await f.request("/api/settings/updates")).json();
+  assert.equal(listed.nodes.find(node => node.id === "alpha").eligible, true);
+  assert.equal(listed.nodes.find(node => node.id === id).eligible, true);
+  const wrong = await f.updates.plan("owner-a", [id], f.built.release.id);
+  assert.equal(wrong.targets[0].eligible, false);
+  const preview = await f.updates.plan("owner-a", [id], release.id);
+  assert.equal(preview.targets[0].eligible, true);
+  assert.equal((await f.heartbeat(config, windowsReport)).job, null, "Preview alone must not enqueue.");
+  const enqueued = await f.updates.enqueue("owner-a", preview.id);
+  assert.equal(enqueued.length, 1);
+  const job = (await f.heartbeat(config, windowsReport)).job;
+  assert.equal(job.releaseId, release.id);
+  await f.advance(config, job, "downloading");
+  const download = await f.agent(config, `/api/node-updater/releases/${release.id}/${release.components.codey.file}`);
+  assert.equal(download.status, 200);
+  assert.deepEqual(Buffer.from(await download.arrayBuffer()), bytes);
+  for (const state of ["staging", "waiting_idle", "applying", "verifying"]) await f.advance(config, job, state);
+  f.clock.now += 80000;
+  await f.advance(config, job, "verifying");
+  f.clock.now += 20000;
+  const active = (await f.updates.list("owner-a")).nodes.find(node => node.id === id);
+  assert.equal(active.connected, true, "Authenticated progress keeps a long verification live.");
+  await f.advance(config, job, "succeeded");
+});
+
+test("Mac bootstrap is owner-bound, architecture-specific and complete without Windows/systemd executables", async t => {
+  for (const platform of ["macos-arm64", "macos-x64"]) {
+    const f = await fixture(t), id = await importedNative(f, platform);
+    assert.equal((await f.request(`/api/settings/updates/bootstrap/${id}`, {
+      cookie: f.cookieB, method: "POST", body: { confirmation: "enable-node-updater" },
+    })).status, 404);
+    const response = await f.request(`/api/settings/updates/bootstrap/${id}`, {
+      method: "POST", body: { confirmation: "enable-node-updater" },
+    });
+    assert.equal(response.status, 200);
+    const zip = Buffer.from(await response.arrayBuffer());
+    const config = JSON.parse(zipEntry(zip, "codey-updater/config.json"));
+    assert.equal(config.platform, platform);
+    assert.equal(config.ownerId, "m-" + "c".repeat(24));
+    assert.equal(config.username, "macowner");
+    assert.equal(config.minimumSequence, 0);
+    assert.match(zipEntry(zip, "codey-updater/install.py").toString(), /com\.codey\.node-updater\./);
+    assert.match(zipEntry(zip, "codey-updater/macos/native.py").toString(), /bootout/);
+    for (const forbidden of ["install.ps1", "install.sh", "updater.py", "windows/native.ps1", "windows/host.cs"]) {
+      assert.throws(() => zipEntry(zip, "codey-updater/" + forbidden), /missing/);
+    }
+    const manifest = JSON.parse(zipEntry(zip, "codey-updater/agent-files.json"));
+    assert.equal(manifest.platform, platform);
+    for (const [name, expected] of Object.entries(manifest.files)) {
+      assert.equal(sha(zipEntry(zip, "codey-updater/" + name)), expected);
+    }
+    const macReport = report({ platform, layout: "npm", highestSequence: 17,
+      components: { codey: { version: "0.1.2", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24 } } });
+    await f.heartbeat(config, macReport);
+    const wrongPlatform = platform === "macos-arm64" ? "macos-x64" : "macos-arm64";
+    assert.equal((await f.agent(config, "/api/node-updater/poll", {
+      protocol: 1, report: { ...macReport, platform: wrongPlatform },
+    })).status, 409);
+    const status = (await f.updates.list("owner-a")).nodes.find(node => node.id === id);
+    assert.equal(status.updaterSupported, true);
+    assert.equal(status.connected, true);
+    assert.equal(status.report.components.codey.version, "0.1.2", "Enrollment must not invent a newly installed version.");
+    assert.equal(status.reason, "no_release");
+    const rotated = await f.updates.bootstrap("owner-a", id, true);
+    const chunks = [];
+    for await (const chunk of rotated) chunks.push(chunk);
+    assert.equal(JSON.parse(zipEntry(Buffer.concat(chunks), "codey-updater/config.json")).minimumSequence, 17);
+    assert.equal((await f.agent(config, "/api/node-updater/poll", { protocol: 1, report: macReport })).status, 401);
+  }
+});
+
+test("Mac owner-confirmed jobs select the latest release for their architecture, never the globally newest other OS", async t => {
+  const f = await fixture(t);
+  const linuxConfig = await f.enroll("alpha");
+  await f.heartbeat(linuxConfig);
+  const machines = [];
+  const envelopes = [f.built.envelope];
+  for (const [index, platform] of ["macos-arm64", "macos-x64"].entries()) {
+    const id = await importedNative(f, platform), config = await f.enroll(id);
+    const macReport = report({ platform, layout: "npm",
+      components: { codey: { version: "0.1.2", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24 } } });
+    await f.heartbeat(config, macReport);
+    const bytes = Buffer.from("Shared Mac test bytes, never executed.");
+    const release = { ...f.built.release, id: "codey-" + platform + "-fixture", platform, sequence: index + 2,
+      components: { codey: { version: "0.1.5", commit: "b".repeat(40), file: "codey-0.1.5.tgz",
+        sha256: sha(bytes), size: bytes.length, entrySha256: "b".repeat(64), lockSha256: "c".repeat(64), nodeMajors: [24] } } };
+    const payload = Buffer.from(JSON.stringify(release));
+    envelopes.push({ payload: payload.toString("base64"), signature: sign(null, payload, keys.privateKey).toString("base64url") });
+    await mkdir(path.join(f.catalogRoot, "releases", release.id));
+    await writeFile(path.join(f.catalogRoot, "releases", release.id, release.components.codey.file), bytes);
+    machines.push({ id, config, report: macReport, release });
+  }
+  await writeFile(path.join(f.catalogRoot, "catalog.json"), JSON.stringify({ schema: 1, releases: envelopes }));
+  const list = await f.updates.list("owner-a");
+  for (const id of ["alpha", ...machines.map(machine => machine.id)]) {
+    assert.equal(list.nodes.find(node => node.id === id).eligible, true);
+  }
+  const arm = machines[0], intel = machines[1];
+  const mixed = await f.updates.plan("owner-a", [arm.id, intel.id, "alpha"], arm.release.id);
+  assert.deepEqual(mixed.targets.filter(row => row.eligible).map(row => row.nodeId), [arm.id]);
+  const plan = await f.updates.plan("owner-a", [arm.id], arm.release.id);
+  assert.equal((await f.heartbeat(arm.config, arm.report)).job, null);
+  await f.updates.enqueue("owner-a", plan.id);
+  const assigned = (await f.heartbeat(arm.config, arm.report)).job;
+  assert.equal(assigned.releaseId, arm.release.id);
+  assert.equal((await f.heartbeat(intel.config, intel.report)).job, null);
+  await f.advance(arm.config, assigned, "downloading");
+  assert.equal((await f.agent(arm.config,
+    `/api/node-updater/releases/${arm.release.id}/${arm.release.components.codey.file}`)).status, 200);
+  for (const state of ["staging", "waiting_idle", "applying", "verifying", "succeeded"]) {
+    await f.advance(arm.config, assigned, state);
+  }
+});
+
 test("unchanged signed packages can be verified while the user is busy, but cannot skip verification", async (t) => {
   const f = await fixture(t);
   const config = await f.enroll();

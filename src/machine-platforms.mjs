@@ -10,25 +10,27 @@ export const MACHINE_PLATFORMS = Object.freeze([
   }),
   Object.freeze({
     id: "windows-x64", name: "Windows", entrypoint: "scripts/install.ps1",
-    nodeSuffix: "win-x64.zip", updater: false, implemented: false, registrationSupported: true,
+    // Keep legacy registration independent of agent enrollment; existing owners
+    // explicitly opt in through Settings, without reinstalling/re-registering.
+    nodeSuffix: "win-x64.zip", updater: false, portalUpdater: true, implemented: false, registrationSupported: true,
     tunnel: true, privateNetwork: true, dataRelay: true,
-    description: "支持导入 Windows 安装器生成的注册文件；完整 npm 安装包尚未开放下载",
+    description: "支持导入 Windows 注册文件并单独接入 Portal 升级代理；新机完整安装入口仍独立管理",
     files: ["scripts/install.ps1", "scripts/windows-common.ps1", "scripts/windows-process.cs",
       "scripts/windows-service.ps1", "scripts/windows-runtime.mjs", "scripts/windows-command.ps1",
       "templates/a100-models.json"],
   }),
   Object.freeze({
     id: "macos-arm64", name: "macOS · Apple Silicon", entrypoint: null,
-    nodeSuffix: "darwin-arm64.tar.gz", updater: false, implemented: false, registrationSupported: true,
+    nodeSuffix: "darwin-arm64.tar.gz", updater: false, portalUpdater: true, implemented: false, registrationSupported: true,
     tunnel: true, privateNetwork: true, dataRelay: true,
-    description: "支持导入 macOS 本机生成的注册文件；新的一键安装器与自动升级尚未开放",
+    description: "支持导入 macOS 注册文件并单独接入 Portal 升级代理；不以升级器替代新机安装或旧布局迁移",
     files: [],
   }),
   Object.freeze({
     id: "macos-x64", name: "macOS · Intel", entrypoint: null,
-    nodeSuffix: "darwin-x64.tar.gz", updater: false, implemented: false, registrationSupported: true,
+    nodeSuffix: "darwin-x64.tar.gz", updater: false, portalUpdater: true, implemented: false, registrationSupported: true,
     tunnel: true, privateNetwork: true, dataRelay: true,
-    description: "支持导入 macOS 本机生成的注册文件；新的一键安装器与自动升级尚未开放",
+    description: "支持导入 macOS 注册文件并单独接入 Portal 升级代理；不以升级器替代新机安装或旧布局迁移",
     files: [],
   }),
 ]);
