@@ -102,6 +102,20 @@ Open a new Bash terminal afterward, or run `export PATH="$HOME/.local/bin:$PATH"
 in the current one; the installer cannot change its parent shell's environment.
 Installing the npm package alone or using `--check` does not edit shell profiles.
 
+### Linux DevTunnel renewal fix in 0.1.7
+
+The Linux installer and generated renewal script accept the DevTunnel CLI's
+welcome banner before its JSON output. Invalid/trailing output and failed CLI
+commands still fail closed, without printing credential-bearing parse errors.
+The new-machine Skill and its embedded npm installer must both contain this fix.
+
+An ordinary `codey update` preserves the already-generated
+`~/.local/share/codey-machine/renew-devtunnel.sh`; upgrading the application alone
+does **not** repair that file on an existing node. Existing affected nodes need a
+separate owner-scoped script repair and successful token renewal. Do not rerun
+`codey setup` for this bug: setup also replaces service/model configuration and
+stops existing Codex processes.
+
 `machine:build` embeds only public Portal configuration (origin and updater public
 key), with `platform: "auto"` so the application artifact is not tied to the Linux
 installer. Linux managed setup resolves that public configuration to `linux-x64`.
