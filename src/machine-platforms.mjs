@@ -19,16 +19,16 @@ export const MACHINE_PLATFORMS = Object.freeze([
   }),
   Object.freeze({
     id: "macos-arm64", name: "macOS · Apple Silicon", entrypoint: null,
-    nodeSuffix: "darwin-arm64.tar.gz", updater: false, implemented: false,
+    nodeSuffix: "darwin-arm64.tar.gz", updater: false, implemented: false, registrationSupported: true,
     tunnel: true, privateNetwork: true, dataRelay: true,
-    description: "尚未迁移到新的精简一键流程",
+    description: "支持导入 macOS 本机生成的注册文件；新的一键安装器与自动升级尚未开放",
     files: [],
   }),
   Object.freeze({
     id: "macos-x64", name: "macOS · Intel", entrypoint: null,
-    nodeSuffix: "darwin-x64.tar.gz", updater: false, implemented: false,
+    nodeSuffix: "darwin-x64.tar.gz", updater: false, implemented: false, registrationSupported: true,
     tunnel: true, privateNetwork: true, dataRelay: true,
-    description: "尚未迁移到新的精简一键流程",
+    description: "支持导入 macOS 本机生成的注册文件；新的一键安装器与自动升级尚未开放",
     files: [],
   }),
 ]);

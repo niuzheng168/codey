@@ -162,32 +162,41 @@ test("The same scoped renewal key works after activation but is revoked on remov
   assert.equal((await f.send(f.signed(f.node.id, { ...coordinates, connectToken: token() }))).status, 401);
 });
 
-test("client-generated renewal credentials replace the server-derived key only for the imported node", async t => {
-  const f = await fixture(t);
-  const id = `n-${"c".repeat(24)}`;
-  const client = {
-    clientSigningKey: randomBytes(32).toString("base64url"),
-    workspaceSsoKey: randomBytes(32).toString("base64url"),
-    tunnelUpdateKey: randomBytes(32).toString("base64url"),
-    updaterCredential: randomBytes(32).toString("base64url"),
-    workspaceSubject: `m-${"d".repeat(24)}`,
-    workspaceUsername: "owner",
-  };
-  const machine = {
-    id, name: "Imported", region: "Test", platform: "linux-x64",
-    networkMode: "devtunnel", devTunnel: coordinates,
-    tlsServerName: `${id}.nodes.codey.internal`, fingerprint: "fixture", ca: "fixture",
-  };
-  await f.policy.importMachine("owner-a", machine, client, token());
-  assert.equal(await f.policy.tunnelKeyFor(id), client.tunnelUpdateKey);
-  assert.notEqual(await f.policy.tunnelKeyFor(id), machineTunnelKey(f.master, id));
-  assert.equal((await f.send(f.signed(id, { ...coordinates, connectToken: token() }, {
-    key: machineTunnelKey(f.master, id),
-  }))).status, 401);
-  assert.equal((await f.send(f.signed(id, { ...coordinates, connectToken: token() }, {
-    key: client.tunnelUpdateKey,
-  }))).status, 200);
-});
+for (const platform of ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]) {
+  test(`${platform} client-generated renewal credentials replace only the imported node's server-derived key`, async t => {
+    const f = await fixture(t);
+    const id = `n-${"c".repeat(24)}`;
+    const client = {
+      clientSigningKey: randomBytes(32).toString("base64url"),
+      workspaceSsoKey: randomBytes(32).toString("base64url"),
+      tunnelUpdateKey: randomBytes(32).toString("base64url"),
+      updaterCredential: randomBytes(32).toString("base64url"),
+      workspaceSubject: `m-${"d".repeat(24)}`,
+      workspaceUsername: "owner",
+    };
+    const machine = {
+      id, name: "Imported", region: "Test", platform,
+      networkMode: "devtunnel", devTunnel: coordinates,
+      tlsServerName: `${id}.nodes.codey.internal`, fingerprint: "fixture", ca: "fixture",
+    };
+    await f.policy.importMachine("owner-a", machine, client, token());
+    assert.equal(await f.policy.tunnelKeyFor(id), client.tunnelUpdateKey);
+    assert.notEqual(await f.policy.tunnelKeyFor(id), machineTunnelKey(f.master, id));
+    const renewed = token({}, Date.now() + 60000);
+    assert.equal((await f.send(f.signed(id, { ...coordinates, connectToken: renewed }, {
+      key: machineTunnelKey(f.master, id),
+    }))).status, 401);
+    assert.equal((await f.send(f.signed(id, { ...coordinates, connectToken: renewed }, {
+      key: client.tunnelUpdateKey,
+    }))).status, 200);
+    assert.equal(await f.policy.machineTunnelToken(id), renewed);
+    assert.equal((await f.policy.list("owner-a"))[0].platform, platform);
+    await f.policy.remove("owner-a", id);
+    assert.equal((await f.send(f.signed(id, { ...coordinates, connectToken: renewed }, {
+      key: client.tunnelUpdateKey,
+    }))).status, 401);
+  });
+}
 
 test("an expired staged identity cannot reclaim a tunnel activated by another node", async t => {
   const f = await fixture(t);

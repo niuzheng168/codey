@@ -473,117 +473,141 @@ test("only Linux is currently published and other native launchers never fall ba
 test("native registration support is independent from the installer download gate", () => {
   assert.equal(machinePlatform().id, "linux-x64");
   assert.equal(machineRegistrationPlatform("linux-x64").updater, true);
-  assert.equal(machineRegistrationPlatform("windows-x64").updater, false);
-  assert.throws(() => machinePlatform("windows-x64"), { status: 400 });
-  for (const id of [undefined, null, "", "macos-arm64", "macos-x64", "../linux-x64", "other"]) {
+  for (const id of ["windows-x64", "macos-arm64", "macos-x64"]) {
+    const definition = machineRegistrationPlatform(id);
+    assert.equal(definition.id, id);
+    assert.equal(definition.updater, false);
+    assert.equal(definition.implemented, false);
+    assert.throws(() => machinePlatform(id), { status: 400 });
+  }
+  for (const id of [undefined, null, "", "macos", "darwin", "linux-arm64", "../linux-x64", "other"]) {
     assert.throws(() => machineRegistrationPlatform(id), { status: 400 });
   }
 });
 
-test("Windows registration imports without a published bundle or Linux updater and restores both gateways", async t => {
-  const f = await fixture(t);
-  f.machineSetup.bundleRoot = null;
-  const updates = f.machineSetup.machineUpdates;
-  f.machineSetup.machineUpdates = null;
-  f.machineSetup.selectedBundle = async () => { assert.fail("Registration must not load a download"); };
-  const id = `n-${randomBytes(12).toString("hex")}`;
-  const { privateIp, vmResourceId, ...fields } = await machineFile(f.root, id);
-  const machine = { ...fields, platform: "windows-x64", networkMode: "devtunnel",
-    devTunnel: { tunnelId: "codey-windows-registration", clusterId: "jpe1" } };
-  const value = registration({ platform: "windows-x64", releaseId: "machine-" + "b".repeat(16) }, machine);
-  const post = options => f.request("/api/settings/machines/activate", { method: "POST", value, ...options });
+for (const platform of ["windows-x64", "macos-arm64", "macos-x64"]) {
+  test(`${platform} registration imports without a published bundle or updater and restores both gateways`, async t => {
+    const f = await fixture(t);
+    f.machineSetup.bundleRoot = null;
+    const updates = f.machineSetup.machineUpdates;
+    f.machineSetup.machineUpdates = null;
+    f.machineSetup.selectedBundle = async () => { assert.fail("Registration must not load a download"); };
+    const id = `n-${randomBytes(12).toString("hex")}`;
+    const { privateIp, vmResourceId, ...fields } = await machineFile(f.root, id);
+    const machine = { ...fields, platform, networkMode: "devtunnel",
+      devTunnel: { tunnelId: `codey-${platform}-registration`, clusterId: "jpe1" } };
+    const value = registration({ platform, releaseId: "machine-" + "b".repeat(16) }, machine);
+    const post = options => f.request("/api/settings/machines/activate", { method: "POST", value, ...options });
 
-  assert.equal((await post({ user: "" })).status, 401);
-  assert.equal((await post({ headers: { origin: "https://evil.example" } })).status, 403);
-  assert.equal(f.probes.length, 0);
-  const response = await post();
-  assert.equal(response.status, 201, await response.clone().text());
-  const node = (await response.json()).node;
-  assert.equal(node.id, id);
-  assert.equal(node.platform, "windows-x64");
-  assert.equal(f.tunnelProbes.length, 1);
-  assert.equal(f.probes.length, 1);
-  assert.equal(await f.probes[0].options.getTunnelToken(), value.devTunnelConnectToken);
-  assert.equal(f.probes[0].options.workspaceBinding.key, value.credentials.workspaceSsoKey);
-  assert.equal(await f.policy.keyFor(f.member.id, id), value.credentials.clientSigningKey);
-  assert.equal((await updates.store.read()).data.devices[id], undefined,
-    "Windows must not enroll in the Linux/systemd updater");
-  assert.equal((await f.policy.list(f.credential.principalId)).length, 0);
-  assert.equal((await post({ user: f.admin })).status, 409, "Another owner cannot reclaim the node");
-  assert.equal((await post()).status, 201, "Same-owner retries are idempotent");
-  assert.equal((await f.policy.list(f.member.id)).length, 1);
-  const settings = await (await f.request("/api/settings")).json();
-  assert.equal(settings.machineSetup.platforms.find(p => p.platform === "windows-x64").enabled, false);
-  assert.equal((await f.request("/api/settings/machines/skill?platform=windows-x64", { method: "POST" })).status, 400);
+    assert.equal((await post({ user: "" })).status, 401);
+    assert.equal((await post({ headers: { origin: "https://evil.example" } })).status, 403);
+    assert.equal(f.probes.length, 0);
+    const response = await post();
+    assert.equal(response.status, 201, await response.clone().text());
+    const node = (await response.json()).node;
+    assert.equal(node.id, id);
+    assert.equal(node.platform, platform);
+    assert.equal(f.tunnelProbes.length, 1);
+    assert.equal(f.probes.length, 1);
+    assert.equal(f.probes[0].machine.platform, platform);
+    assert.equal(await f.probes[0].options.getTunnelToken(), value.devTunnelConnectToken);
+    assert.equal(f.probes[0].options.workspaceBinding.key, value.credentials.workspaceSsoKey);
+    assert.equal(await f.policy.keyFor(f.member.id, id), value.credentials.clientSigningKey);
+    assert.equal((await updates.store.read()).data.devices[id], undefined,
+      "Import must not implicitly enroll a non-Linux node in an updater");
+    assert.equal((await f.policy.list(f.credential.principalId)).length, 0);
+    assert.equal((await post({ user: f.admin })).status, 409, "Another owner cannot reclaim the node");
+    assert.equal((await post()).status, 201, "Same-owner retries are idempotent");
+    assert.equal((await f.policy.list(f.member.id)).length, 1);
+    const settings = await (await f.request("/api/settings")).json();
+    assert.equal(settings.nodes.find(n => n.id === id).platform, platform);
+    assert.equal(settings.machineSetup.platforms.find(p => p.platform === platform).enabled, false);
+    for (const format of ["skill", "npm", "installer"]) {
+      assert.equal((await f.request(`/api/settings/machines/${format}?platform=${platform}`, { method: "POST" })).status, 400);
+    }
 
-  // Simulate gateway reconstruction after a Portal restart, not only the initial import.
-  f.workspace.setMachineNodes([]);
-  f.data.setMachineNodes([]);
-  f.machineSetup.gatewayRevision = undefined;
-  await f.machineSetup.refreshGateways();
-  const workspace = f.workspace.match(`/cloudcli/${id}/`);
-  assert.equal(workspace.devTunnel.port, 3001);
-  assert.equal(workspace.healthMonitoring, true);
-  assert.equal(f.data.nodes.get(id).devTunnel.port, 8443);
-  assert.equal(await f.policy.machineTunnelToken(id), value.devTunnelConnectToken);
-});
-
-test("Windows import retains metadata, tunnel, TLS and account checks before any persistence", async t => {
-  const f = await fixture(t);
-  f.machineSetup.bundleRoot = null;
-  f.machineSetup.machineUpdates = null;
-  const id = `n-${randomBytes(12).toString("hex")}`;
-  const { privateIp, vmResourceId, ...fields } = await machineFile(f.root, id);
-  const value = registration({ platform: "windows-x64", releaseId: "machine-" + "c".repeat(16) }, {
-    ...fields, platform: "windows-x64", networkMode: "devtunnel",
-    devTunnel: { tunnelId: "codey-windows-negative", clusterId: "jpe1" },
+    // Simulate gateway reconstruction after a Portal restart, not only the initial import.
+    f.workspace.setMachineNodes([]);
+    f.data.setMachineNodes([]);
+    f.machineSetup.gatewayRevision = undefined;
+    await f.machineSetup.refreshGateways();
+    const workspace = f.workspace.match(`/cloudcli/${id}/`);
+    const data = f.data.nodes.get(id);
+    assert.deepEqual(workspace.devTunnel, { ...machine.devTunnel, port: 3001 });
+    assert.equal(workspace.healthMonitoring, true);
+    assert.deepEqual(data.devTunnel, { ...machine.devTunnel, port: 8443 });
+    assert.equal(workspace.fingerprint, f.probes[0].machine.fingerprint);
+    assert.equal(data.fingerprint, f.probes[0].machine.fingerprint);
+    assert.equal(await workspace.getTunnelToken(), value.devTunnelConnectToken);
+    assert.equal(await data.getTunnelToken(), value.devTunnelConnectToken);
   });
-  const invalid = [
-    { ...value, package: { ...value.package, portalOrigin: "https://other.example.test" } },
-    { ...value, machine: { ...value.machine, platform: "linux-x64" } },
-    { ...value, machine: { ...value.machine, nodeId: `n-${"d".repeat(24)}` } },
-    { ...value, credentials: { ...value.credentials, workspaceSsoKey: value.credentials.clientSigningKey } },
-    { ...value, package: { ...value.package, platform: "macos-arm64" },
-      machine: { ...value.machine, platform: "macos-arm64" } },
-    { ...value, devTunnelConnectToken: connectToken(value.machine.devTunnel, Date.now() - 86400000) },
-  ];
-  for (const document of invalid) {
-    const response = await f.request("/api/settings/machines/activate", { method: "POST", value: document });
-    assert.ok([400, 409, 503].includes(response.status));
-  }
-  assert.equal(f.tunnelProbes.length, 0);
-  assert.equal(f.probes.length, 0);
-  const tunnelProbe = f.machineSetup.verifyTunnel;
-  f.machineSetup.verifyTunnel = async () => { throw new Error("Invalid token at the tunnel service"); };
-  assert.equal((await f.request("/api/settings/machines/activate", { method: "POST", value })).status, 503);
-  assert.equal(f.probes.length, 0, "A valid-looking JWT is not a substitute for tunnel authorization");
-  f.machineSetup.verifyTunnel = tunnelProbe;
-  f.machineSetup.verify = async () => { throw Object.assign(new Error("TLS/SSO proof failed"), { status: 502 }); };
-  assert.equal((await f.request("/api/settings/machines/activate", { method: "POST", value })).status, 502);
-  assert.equal((await f.policy.records()).data.nodes.length, 0);
-  f.machineSetup.verify = async () => {
-    await f.auth.revoke({ headers: { cookie: f.cookie } });
-    return {};
-  };
-  assert.equal((await f.request("/api/settings/machines/activate", { method: "POST", value })).status, 401);
-  assert.equal((await f.policy.records()).data.nodes.length, 0, "Logout during proof must not add a node");
-});
+
+  test(`${platform} import retains metadata, tunnel, TLS and account checks before any persistence`, async t => {
+    const f = await fixture(t);
+    f.machineSetup.bundleRoot = null;
+    f.machineSetup.machineUpdates = null;
+    const id = `n-${randomBytes(12).toString("hex")}`;
+    const { privateIp, vmResourceId, ...fields } = await machineFile(f.root, id);
+    const value = registration({ platform, releaseId: "machine-" + "c".repeat(16) }, {
+      ...fields, platform, networkMode: "devtunnel",
+      devTunnel: { tunnelId: `codey-${platform}-negative`, clusterId: "jpe1" },
+    });
+    const invalid = [
+      [{ ...value, schema: 1 }, 400],
+      [{ ...value, package: { ...value.package, portalOrigin: "https://other.example.test" } }, 409],
+      [{ ...value, package: { ...value.package, releaseId: "not-a-release" } }, 400],
+      [{ ...value, machine: { ...value.machine, platform: "linux-x64" } }, 400],
+      [{ ...value, machine: { ...value.machine, nodeId: `n-${"d".repeat(24)}` } }, 400],
+      [{ ...value, machine: { ...value.machine, privateIp } }, 400],
+      [{ ...value, credentials: { ...value.credentials, workspaceSsoKey: value.credentials.clientSigningKey } }, 400],
+      [{ ...value, package: { ...value.package, platform: "linux-arm64" },
+        machine: { ...value.machine, platform: "linux-arm64" } }, 400],
+      [{ ...value, devTunnelConnectToken: connectToken(value.machine.devTunnel, Date.now() - 86400000) }, 503],
+      [{ ...value, devTunnelConnectToken: connectToken({ ...value.machine.devTunnel, tunnelId: "other-tunnel" }) }, 503],
+    ];
+    for (const [document, status] of invalid) {
+      const response = await f.request("/api/settings/machines/activate", { method: "POST", value: document });
+      assert.equal(response.status, status, await response.text());
+    }
+    assert.equal(f.tunnelProbes.length, 0);
+    assert.equal(f.probes.length, 0);
+    assert.equal((await f.policy.records()).data.nodes.length, 0);
+    const tunnelProbe = f.machineSetup.verifyTunnel;
+    f.machineSetup.verifyTunnel = async () => { throw new Error("Invalid token at the tunnel service"); };
+    assert.equal((await f.request("/api/settings/machines/activate", { method: "POST", value })).status, 503);
+    assert.equal(f.probes.length, 0, "A valid-looking JWT is not a substitute for tunnel authorization");
+    f.machineSetup.verifyTunnel = tunnelProbe;
+    f.machineSetup.verify = async () => { throw Object.assign(new Error("TLS/SSO proof failed"), { status: 502 }); };
+    assert.equal((await f.request("/api/settings/machines/activate", { method: "POST", value })).status, 502);
+    assert.equal((await f.policy.records()).data.nodes.length, 0);
+    f.machineSetup.verify = async () => {
+      await f.auth.revoke({ headers: { cookie: f.cookie } });
+      return {};
+    };
+    assert.equal((await f.request("/api/settings/machines/activate", { method: "POST", value })).status, 401);
+    assert.equal((await f.policy.records()).data.nodes.length, 0, "Logout during proof must not add a node");
+  });
+}
 
 test("registration still requires gateways and, on Linux only, a configured signed updater", async t => {
   const f = await fixture(t);
   f.machineSetup.bundleRoot = null;
-  assert.equal(f.machineSetup.registrationAvailability("windows-x64").enabled, true);
   assert.equal(f.machineSetup.registrationAvailability("linux-x64").enabled, true);
   f.machineSetup.machineUpdates = null;
-  assert.equal(f.machineSetup.registrationAvailability("windows-x64").enabled, true);
   assert.equal(f.machineSetup.registrationAvailability("linux-x64").enabled, false);
   f.machineSetup.machineUpdates = { catalog: { configured: false } };
   assert.equal(f.machineSetup.registrationAvailability("linux-x64").enabled, false);
-  for (const name of ["cloudCliGateway", "nodeDataGateway"]) {
-    const gateway = f.machineSetup[name];
-    f.machineSetup[name] = null;
-    assert.equal(f.machineSetup.registrationAvailability("windows-x64").enabled, false);
-    f.machineSetup[name] = gateway;
+  for (const updater of [null, { catalog: { configured: false } }, { catalog: { configured: true } }]) {
+    f.machineSetup.machineUpdates = updater;
+    for (const platform of ["windows-x64", "macos-arm64", "macos-x64"]) {
+      assert.equal(f.machineSetup.registrationAvailability(platform).enabled, true);
+      for (const name of ["cloudCliGateway", "nodeDataGateway"]) {
+        const gateway = f.machineSetup[name];
+        f.machineSetup[name] = null;
+        assert.equal(f.machineSetup.registrationAvailability(platform).enabled, false);
+        f.machineSetup[name] = gateway;
+      }
+    }
   }
 });
 
@@ -704,7 +728,7 @@ test("client activation is recoverable and idempotent across partial or concurre
     device.credentialHash, "An active updater credential is not replaced by a registration replay");
 });
 
-for (const platform of ["linux-x64", "windows-x64"]) {
+for (const platform of ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]) {
   test(`removed ${platform} registrations restore the original node after setup regenerates TLS`, async t => {
     const f = await fixture(t);
     const id = `n-${randomBytes(12).toString("hex")}`;
@@ -762,7 +786,7 @@ for (const platform of ["linux-x64", "windows-x64"]) {
       assert.equal(await f.policy.machineTunnelToken(id), renewed.devTunnelConnectToken);
       assert.equal(await f.policy.keyFor(f.member.id, id), original.credentials.clientSigningKey);
       assert.deepEqual((await f.machineSetup.machineUpdates.store.read()).data.devices[id], device,
-        "Restoration preserves updater credentials and history, and never enrolls Windows in the Linux updater");
+        "Restoration preserves updater credentials and history, and never implicitly enrolls non-Linux nodes");
       assert.equal((await post(value)).status, 201, "Restoration remains idempotent");
       assert.equal((await f.policy.records()).data.nodes.length, 1);
       assert.deepEqual(await f.policy.list(f.credential.principalId), []);

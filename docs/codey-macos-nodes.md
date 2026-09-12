@@ -1,8 +1,20 @@
 # macOS nodes over private DevTunnel
 
-macOS appears beside Windows and Linux in **Settings → Add node**, with separate
-Apple Silicon and Intel source/runtime manifests. Missing releases remain disabled;
-there is no Linux/Windows fallback and no fabricated Azure VM identity.
+## Registration of existing Macs
+
+**Settings → Add node** accepts a locally generated schema-2
+`codey-machine-registration.json` for both `macos-arm64` (Apple Silicon) and
+`macos-x64` (Intel). Registration and gateway recovery do not require a published
+installer bundle or an updater. The Portal still verifies the bound Portal origin,
+matching package/machine platform, node TLS certificate, private DevTunnel,
+owner credentials, data authentication, Workspace SSO and WebSocket access.
+
+The new macOS managed installer and automatic updater remain unavailable. The
+shared Linux/Windows installation Skill is not a Mac installer; do not relabel a
+Mac registration as Linux or Windows to bypass a platform check.
+
+The personalized installer and schema-1 activation workflow below are legacy
+design notes, not currently published installation instructions.
 
 ## Data path
 
