@@ -67,20 +67,45 @@ function Get-OtherAgentTasks {
     }
     return $result
 }
+function Get-AgentProcessId {
+    Require-Update ($config.ready -and $task.Enabled -and $task.State -eq 4) 'Codey is not running.'
+    $status = Read-UpdateJson (Join-Path $config.stateRoot 'codey.status.json')
+    Require-Update ($status.state -eq 'running' -and $status.pid -gt 0) 'Codey process status is unavailable.'
+    $process = Get-CimInstance Win32_Process -Filter ("ProcessId=" + [int]$status.pid) -ErrorAction Stop
+    $processOwner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
+    Require-Update ($processOwner.Sid -eq $owner.Sid -and $process.ExecutablePath -ieq $config.nodeExe -and
+        $process.CommandLine -match ([regex]::Escape($config.codeyBin) + '"?\s+"?start(?:\s|"|$)')) `
+        'The running Codey process does not match runtime.json.'
+    return [int]$status.pid
+}
+function Assert-AgentBefore {
+    param($Plan)
+    Require-Update ((Get-UpdateHash $configFile) -ceq $Plan.configHash -and
+        $config.codeyDirectory -ceq $Plan.root -and $config.nodeExe -ceq $Plan.node) 'Runtime changed before activation.'
+    Assert-AgentProtected $Plan.protected
+    Require-Update (($Plan.pid -is [int] -or $Plan.pid -is [long]) -and
+        (Get-AgentProcessId) -eq $Plan.pid) 'Original Codey process changed before activation.'
+    $actual = Get-OtherAgentTasks
+    Require-Update (@($Plan.otherTasks.PSObject.Properties).Count -eq 2) 'Other task identities changed.'
+    foreach ($name in @('tunnel', 'renew')) {
+        $expected = $Plan.otherTasks.$name
+        Require-Update ($expected.definition -is [string] -and $actual[$name].definition -ceq $expected.definition -and
+            $expected.enabled -is [bool] -and $actual[$name].enabled -eq $expected.enabled) 'Another task changed before activation.'
+        $currentInstances = @($actual[$name].instances)
+        $previousInstances = @($expected.instances)
+        Require-Update ($currentInstances.Count -eq $previousInstances.Count) 'Other task instances changed.'
+        for ($index = 0; $index -lt $currentInstances.Count; $index++) {
+            Require-Update ($previousInstances[$index] -is [string] -and
+                $currentInstances[$index] -ceq $previousInstances[$index]) 'Another task restarted before activation.'
+        }
+    }
+}
 function Get-AgentSnapshot {
     param([switch]$RequireReady)
     $null = Get-ProtectedHashes $config
     $pidValue = 0
     if ($RequireReady) {
-        Require-Update ($config.ready -and $task.Enabled -and $task.State -eq 4) 'Codey is not running.'
-        $status = Read-UpdateJson (Join-Path $config.stateRoot 'codey.status.json')
-        Require-Update ($status.state -eq 'running' -and $status.pid -gt 0) 'Codey process status is unavailable.'
-        $process = Get-CimInstance Win32_Process -Filter ("ProcessId=" + [int]$status.pid) -ErrorAction Stop
-        $processOwner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
-        Require-Update ($processOwner.Sid -eq $owner.Sid -and $process.ExecutablePath -ieq $config.nodeExe -and
-            $process.CommandLine -match ([regex]::Escape($config.codeyBin) + '"?\s+"?start(?:\s|"|$)')) `
-            'The running Codey process does not match runtime.json.'
-        $pidValue = [int]$status.pid
+        $pidValue = Get-AgentProcessId
         $version = (Read-UpdateJson (Join-Path $config.codeyDirectory 'package.json')).version
         $script:failureCode = 'health_failed'
         Invoke-UpdateProbe $config (Join-Path $PSScriptRoot 'lib') 'health' $version
@@ -165,8 +190,7 @@ try {
                 $result = Recover-AgentTransaction $document $job
             } else {
                 Require-Update ($request.acceptance -eq 'authenticated-health-v1') 'A new health-only request is required.'
-                Require-Update ((Get-UpdateHash $configFile) -eq $request.plan.configHash) 'Runtime changed before activation.'
-                Assert-AgentProtected $request.plan.protected
+                Assert-AgentBefore $request.plan
                 Require-Update ($request.agentConfig -eq (Join-Path $owner.Home '.config\codey-updater\config.json')) `
                     'Agent configuration path changed.'
                 if ($request.changed) {

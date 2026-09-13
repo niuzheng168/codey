@@ -120,4 +120,12 @@ test("real app-only staging reuses the original dependency files and starts both
   t.diagnostic(JSON.stringify({ platform, version: artifact.pkg.version, sha256: artifact.sha256, packageBytes, stagingMs,
     stagingAndSmokeMs: Date.now() - acceptanceStarted,
     dependencyFilesCopied: 0, dependencyBytesCopied: 0, nativeAndHttpPassed: true, modelRequests: 0 }));
+  await t.test("bounded parallel fingerprint checks still reject a changed application file", async () => {
+    const file = path.join(root, "bin", "codey.mjs");
+    const original = await readFile(file);
+    await writeFile(file, Buffer.concat([original, Buffer.from("\n// Changed after extraction.\n")]));
+    await assert.rejects(runtime.verifyPackage(root, artifact), error => error.code === "signature_invalid");
+    await writeFile(file, original);
+    await runtime.verifyPackage(root, artifact);
+  });
 });

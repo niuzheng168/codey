@@ -188,4 +188,70 @@ Check ((Get-OtherAgentTasks | ConvertTo-Json -Depth 8 -Compress) -ne $baseline) 
 $script:otherTask.InstanceGuid = 'same-running-host'
 $script:otherTask.Definition.XmlText = '<Task>changed</Task>'
 Check ((Get-OtherAgentTasks | ConvertTo-Json -Depth 8 -Compress) -ne $baseline) 'Changed task definition was ignored.'
+
+# Exercise the final locked comparison using production process/task validators.
+$script:runtimeHash = 'same'
+$script:protectedDrift = $false
+$script:reportedSid = $script:owner.Sid
+function Get-UpdateHash($File) { return $script:runtimeHash }
+function Assert-AgentProtected($Value) {
+    Check (-not $script:protectedDrift) 'Protected configuration changed.'
+    $script:actions.Add('protected')
+}
+foreach ($entry in @{
+    ready = $true; stateRoot = $Root; codeyDirectory = (Join-Path $Root 'app')
+    codeyBin = (Join-Path $Root 'app\bin\codey.mjs')
+}.GetEnumerator()) {
+    $script:config | Add-Member NoteProperty $entry.Key $entry.Value -Force
+}
+function Get-CimInstance {
+    param($ClassName, $Filter, $ErrorAction)
+    Check ($ClassName -eq 'Win32_Process' -and $Filter -match '^ProcessId=\d+$') 'Unexpected process discovery.'
+    return [pscustomobject]@{ ExecutablePath = $script:config.nodeExe
+        CommandLine = ('"' + $script:config.nodeExe + '" "' + $script:config.codeyBin + '" start') }
+}
+function Invoke-CimMethod {
+    param($InputObject, $MethodName, $ErrorAction)
+    Check ($MethodName -eq 'GetOwnerSid') 'Unexpected process ownership query.'
+    return [pscustomobject]@{ Sid = $script:reportedSid }
+}
+$statusFile = Join-Path $Root 'codey.status.json'
+Write-CodeyJson $statusFile @{ state = 'running'; pid = 201 }
+$before = [pscustomobject]@{ configHash = 'same'; root = $script:config.codeyDirectory; node = $script:config.nodeExe
+    pid = 201; protected = @{}; otherTasks = (Get-OtherAgentTasks | ConvertTo-Json -Depth 8 | ConvertFrom-Json) }
+Assert-AgentBefore $before
+function Expect-BeforeRefusal([string]$Reason) {
+    $refused = $false
+    try { Assert-AgentBefore $before } catch { $refused = $true }
+    Check $refused ($Reason + ' was accepted by the locked preflight.')
+}
+Write-CodeyJson $statusFile @{ state = 'running'; pid = 202 }
+Expect-BeforeRefusal 'Changed original PID'
+Write-CodeyJson $statusFile @{ state = 'running'; pid = 201 }
+$script:runtimeHash = 'changed'
+Expect-BeforeRefusal 'Changed runtime descriptor'
+$script:runtimeHash = 'same'
+$script:config.codeyDirectory = Join-Path $Root 'different-app'
+Expect-BeforeRefusal 'Changed application root'
+$script:config.codeyDirectory = $before.root
+$script:config.nodeExe = Join-Path $Root 'different-node.exe'
+Expect-BeforeRefusal 'Changed Node executable'
+$script:config.nodeExe = $before.node
+$script:protectedDrift = $true
+Expect-BeforeRefusal 'Changed protected configuration'
+$script:protectedDrift = $false
+$script:reportedSid = 'different-owner'
+Expect-BeforeRefusal 'Changed process owner'
+$script:reportedSid = $script:owner.Sid
+$script:otherTask.InstanceGuid = 'replacement-host'
+Expect-BeforeRefusal 'Changed other-task instance'
+$script:otherTask.InstanceGuid = 'same-running-host'
+$xml = $script:otherTask.Definition.XmlText
+$script:otherTask.Definition.XmlText = '<Task>concurrent-change</Task>'
+Expect-BeforeRefusal 'Changed other-task definition'
+$script:otherTask.Definition.XmlText = $xml
+$script:otherTask.Enabled = $false
+Expect-BeforeRefusal 'Disabled other task'
+$script:otherTask.Enabled = $true
+Assert-AgentBefore $before
 @{ passed = $true; nativeServices = $false; modelCalls = 0; hostCompiled = $true; hostEnvironmentVerified = $true } | ConvertTo-Json -Compress

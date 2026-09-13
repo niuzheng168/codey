@@ -77,7 +77,11 @@ export class Agent {
   }
   async once() {
     if (await exists(this.pendingFile)) return this.reconcile(await readJson(this.pendingFile));
-    let report = await this.runtime.report();
+    const lockedWindowsChecks = this.config.platform === "windows-x64";
+    let before;
+    // This snapshot belongs only to this poll. Native Windows rechecks its
+    // identity/configuration under the installer mutex before any switch.
+    let report = await this.runtime.report(lockedWindowsChecks ? { onSnapshot: value => { before = value; } } : undefined);
     if (await exists(this.blockedFile)) report = { ...report, busy: true, blockedReason: "rollback_failed" };
     const response = await this.client.json("/api/node-updater/poll", { protocol: 1, report });
     requireValue(response.protocol === 1, "configuration_changed");
@@ -90,8 +94,7 @@ export class Agent {
     requireValue(!(await exists(this.blockedFile)), "rollback_failed");
     requireValue(/^[a-f0-9]{32}$/.test(assigned.id) && /^[A-Za-z0-9_-]{43}$/.test(assigned.leaseToken) &&
       assigned.state === "claimed", "configuration_changed");
-    let before;
-    try { before = await this.runtime.snapshot(); }
+    try { before ??= await this.runtime.snapshot(); }
     catch {
       await this.client.json("/api/node-updater/report", {
         jobId: assigned.id, leaseToken: assigned.leaseToken, state: "needs_action", code: "configuration_changed",
@@ -126,6 +129,13 @@ export class Agent {
       requireValue(release.migrations.every(name => report.readyMigrations.includes(name)), "model_auth_migration_required");
       await this.runtime.acquireLocal(job.directory);
       localHeld = true;
+      if (lockedWindowsChecks) {
+        const installed = await this.runtime.installed();
+        requireValue(release.sequence >= installed.sequence &&
+          (release.sequence !== installed.sequence || !installed.digest || installed.digest === verified.digest),
+        "signature_invalid");
+        before = { ...before, installed };
+      }
       await save(path.join(job.directory, "before.private.json"), before);
       const changed = ["version", "commit", "entrySha256"].some(key => component[key] !== before.components.codey[key]);
       let candidate = before.root;
@@ -149,7 +159,7 @@ export class Agent {
         }
       }
       await stopHeartbeat();
-      await this.runtime.assertUnchanged(before);
+      if (!lockedWindowsChecks) await this.runtime.assertUnchanged(before);
       requireValue(this.clock() < release.expiresAt, "signature_invalid");
       const request = {
         schema: 1, acceptance: "authenticated-health-v1",

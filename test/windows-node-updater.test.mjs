@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { Agent } from "../node-updater/windows/agent.mjs";
 import { Client, UpdateError, readJson, requireValue, save, sha, validateConfig } from "../node-updater/windows/client.mjs";
 import { Runtime, normalizedGateway, normalizedCodex, checkedReceipt, checkedAcceptanceProof,
-  readAcceptanceProof, objectHash, exists } from "../node-updater/windows/runtime.mjs";
+  readAcceptanceProof, controlEnvironment, objectHash, exists } from "../node-updater/windows/runtime.mjs";
 import { verifyRequest } from "../node-updater/windows/verify.mjs";
 import { verifyNodeRelease } from "../src/node-update-manifest.mjs";
 
@@ -44,6 +44,7 @@ async function fixture(t, options = {}) {
   let clock = now;
   const events = [];
   const counters = { stage: 0, download: 0, apply: 0, verify: 0, recover: 0, commit: 0 };
+  const samples = { pids: [], outsideChecks: 0 };
   const before = {
     kind: "windows-managed", pid: 100, jobsRoot: path.join(home, "runtime/local-updates"),
     root: path.join(home, "runtime/old"), node: process.execPath, nodeId: config.nodeId,
@@ -55,12 +56,23 @@ async function fixture(t, options = {}) {
   const runtime = {
     home, private: path.join(home, ".config/codey-updater"), root: path.join(home, ".local/share/codey-updater"),
     localState: path.join(home, ".local/share/codey-local-update"),
-    async snapshot() { if (options.snapshotFailure) throw new UpdateError("configuration_changed"); return before; },
-    async report() { return { platform: "windows-x64", layout: "npm", components: before.components,
-      highestSequence: before.installed.sequence, currentRelease: null, readyMigrations: ["gateway-api-key-v1"], busy: options.busy || false }; },
+    async snapshot() {
+      if (options.snapshotFailure) throw new UpdateError("configuration_changed");
+      samples.pids.push(before.pid);
+      return structuredClone(before);
+    },
+    async report({ onSnapshot } = {}) {
+      if (!options.snapshotFailure) {
+        const sampled = await this.snapshot();
+        onSnapshot?.(sampled);
+      }
+      return { platform: "windows-x64", layout: "npm", components: before.components,
+        highestSequence: before.installed.sequence, currentRelease: null, readyMigrations: ["gateway-api-key-v1"], busy: options.busy || false };
+    },
+    async installed() { return options.floorAfterPoll ? { sequence: options.floorAfterPoll } : before.installed; },
     acquireLocal: Runtime.prototype.acquireLocal,
     releaseLocal: Runtime.prototype.releaseLocal,
-    async assertUnchanged() { if (options.drift) throw new UpdateError("configuration_changed"); },
+    async assertUnchanged() { samples.outsideChecks++; if (options.drift) throw new UpdateError("configuration_changed"); },
     async stage(file, release, plan, job) {
       events.push("stage"); counters.stage++;
       const candidate = path.join(job, "candidate");
@@ -76,6 +88,7 @@ async function fixture(t, options = {}) {
         return { ok: true, state: options.recoveredState || "rolled_back" };
       }
       assert.ok(["apply", "verify"].includes(action));
+      if (options.drift || options.nativeDrift) throw new UpdateError("configuration_changed");
       counters[action]++; events.push(action);
       const request = await readJson(file);
       assert.equal(request.acceptance, "authenticated-health-v1");
@@ -98,7 +111,7 @@ async function fixture(t, options = {}) {
       if (route.endsWith("/poll")) {
         events.push("poll");
         if (value.report.blockedReason) return { protocol: 1, job: null };
-        const result = { protocol: 1, job: sent ? null : job }; sent = true; return result;
+        const result = { protocol: 1, job: sent || options.noJob ? null : job }; sent = true; return result;
       }
       assert.ok(route.endsWith("/report"));
       events.push("report:" + value.state); reports.push(value);
@@ -111,7 +124,7 @@ async function fixture(t, options = {}) {
   };
   const agent = new Agent(config, { runtime, client, clock: () => clock,
     wait: async milliseconds => { clock += milliseconds; } });
-  return { home, config, signed, agent, runtime, before, events, counters, reports, job };
+  return { home, config, signed, agent, runtime, before, events, counters, samples, reports, job };
 }
 
 test("Windows config requires native platform, a stable HTTPS origin, Ed25519 and a preserved sequence floor", () => {
@@ -158,6 +171,64 @@ test("signed Windows update requires all phases and explicit health-only accepta
   assert.deepEqual(f.counters, { stage: 1, download: 1, apply: 1, verify: 0, recover: 0, commit: 1 });
   assert.equal(await exists(path.join(f.runtime.private, "pending.json")), false);
   assert.equal(await exists(path.join(f.runtime.localState, "active.json")), false);
+  assert.deepEqual(f.samples, { pids: [100], outsideChecks: 0 });
+});
+
+test("report exposes one snapshot only through its callback, not through the Portal report", async t => {
+  const f = await fixture(t), gateway = path.join(f.home, "gateway");
+  await mkdir(gateway);
+  const runtimeFile = path.join(f.home, "runtime.json"), key = "M".repeat(43);
+  await save(runtimeFile, { modelKey: key, environment: { CODEY_MODEL_API_KEY: key, COPILOT_API_HOME: gateway } });
+  await save(path.join(gateway, "config.json"), { auth: { apiKeys: [key] } });
+  let snapshots = 0, captured;
+  const runtime = { platform: "windows-x64", runtimeFile,
+    snapshot: async () => { snapshots++; return f.before; },
+    native: async () => ({ idle: true }), environment: config => config.environment };
+  const report = await Runtime.prototype.report.call(runtime, { onSnapshot: value => { captured = value; } });
+  assert.equal(snapshots, 1);
+  assert.equal(captured, f.before);
+  assert.equal(report.layout, "npm");
+  for (const field of ["root", "pid", "protected", "otherTasks", "snapshot"]) assert.equal(Object.hasOwn(report, field), false);
+});
+
+test("Windows locked PID/config/task drift refuses activation without an outside full snapshot", async t => {
+  for (const nativeDrift of ["pid", "config", "otherTasks"]) {
+    const f = await fixture(t, { nativeDrift });
+    const result = await f.agent.once();
+    assert.equal(result.state, "needs_action");
+    assert.equal(result.code, "configuration_changed");
+    assert.equal(f.counters.apply, 0);
+    assert.equal(f.counters.commit, 0);
+    assert.deepEqual(f.samples, { pids: [100], outsideChecks: 0 });
+  }
+  const native = await readFile(path.join("node-updater", "windows", "native.ps1"), "utf8");
+  assert.ok(native.indexOf("Require-Update $held") < native.indexOf("Assert-AgentBefore $request.plan"));
+  assert.ok(native.indexOf("Assert-AgentBefore $request.plan") < native.indexOf("Set-CodeyTaskState $config"));
+});
+
+test("reusing a report snapshot does not cache the installed sequence floor across claiming", async t => {
+  const f = await fixture(t, { floorAfterPoll: 10 });
+  const result = await f.agent.once();
+  assert.equal(result.code, "signature_invalid");
+  assert.equal(f.counters.stage, 0);
+  assert.equal(f.counters.apply, 0);
+});
+
+test("the next Windows poll always samples afresh after local recovery", async t => {
+  const f = await fixture(t, { noJob: true });
+  assert.equal((await f.agent.once()).state, "polling");
+  const directory = path.join(f.before.jobsRoot, f.job.id);
+  await mkdir(directory);
+  await f.runtime.acquireLocal(directory);
+  await save(path.join(directory, "local-update.json"), { state: "applying" });
+  await save(path.join(f.runtime.private, "pending.json"), { ...f.job, directory });
+  assert.equal((await f.agent.once()).state, "rolled_back");
+  assert.deepEqual(f.samples.pids, [100]);
+  f.before.pid = 222;
+  f.before.components.codey.version = "0.1.6";
+  assert.equal((await f.agent.once()).state, "polling");
+  assert.deepEqual(f.samples.pids, [100, 222]);
+  assert.equal((await readJson(path.join(f.runtime.private, "heartbeat.json"))).version, "0.1.6");
 });
 
 test("invalid signatures, wrong platform and downgrade never download or stop applications", async t => {
@@ -342,13 +413,20 @@ test("Windows acceptance runs only version/native/authenticated health checks; f
   skip: process.platform !== "win32",
 }, async t => {
   const f = await fixture(t);
+  const application = path.resolve("packages/codey");
+  const version = (await readJson(path.join(application, "package.json"))).version;
+  const actualCli = await promisify(execFile)(process.execPath, [path.join(application, "bin/codey.mjs"), "--version"], {
+    env: controlEnvironment(f.home), timeout: 10000,
+  });
+  assert.equal(actualCli.stdout, `codey ${version}\n`);
+  assert.equal(actualCli.stderr, "");
   const root = path.join(f.home, "package");
   await mkdir(root);
-  const build = { name: "codey", version: "0.1.5" };
+  const build = { name: "codey", version };
   await save(path.join(root, "codey-build.json"), build);
   const entrySha256 = sha(await readFile(path.join(root, "codey-build.json")));
   const signed = signedRelease({ components: {
-    codey: { ...f.signed.release.components.codey, entrySha256 },
+    codey: { ...f.signed.release.components.codey, version, file: `codey-${version}.tgz`, entrySha256 },
   } });
   const { request } = healthReceipt(signed, path.join(f.home, f.job.id));
   await mkdir(request.job);
@@ -365,17 +443,17 @@ test("Windows acceptance runs only version/native/authenticated health checks; f
       assert.equal(args[0], path.join(root, "bin/codey.mjs"));
       if (args[1] === "--version") {
         assert.equal(args.length, 2);
-        calls.push("version"); return "0.1.5";
+        calls.push("version"); return actualCli.stdout;
       }
       assert.deepEqual(args.slice(1), ["doctor", "--json"]);
       calls.push("native");
       return JSON.stringify({ ok: true, name: "codey", platform: "windows-x64", modelRequests: false,
-        serviceChanges: false, version: "0.1.5", entrySha256, lockSha256: signed.release.components.codey.lockSha256,
+        serviceChanges: false, version, entrySha256, lockSha256: signed.release.components.codey.lockSha256,
         sourceCommit: signed.release.components.codey.commit, nodeMajor: Number(process.versions.node.split(".")[0]),
         native: { sqlite: true, bcrypt: true, ripgrep: true, pty: true, codexSdk: true } });
     },
     probe: async (_config, value) => {
-      assert.deepEqual(value, { version: "0.1.5" });
+      assert.deepEqual(value, { version });
       calls.push("authenticated-health"); return { healthy: true, modelRequests: false };
     }, hashes: async () => ({}),
   };
@@ -383,10 +461,20 @@ test("Windows acceptance runs only version/native/authenticated health checks; f
     { probe: async () => { throw new Error("fixture TLS/auth failure"); } },
     { command: async () => "wrong-version" },
     { hashes: async () => ({ config: "changed" }) },
-    { command: async (_node, args) => args[1] === "--version" ? "0.1.5" : '{"ok":true,"native":null}' },
+    { command: async (_node, args) => args[1] === "--version" ? actualCli.stdout : '{"ok":true,"native":null}' },
     { client: { json: async () => { throw new UpdateError("lease_lost"); } } },
   ]) {
     await assert.rejects(verifyRequest(request, { ...options, ...patch }));
+    assert.equal(await exists(path.join(request.job, "health-proof.json")), false);
+  }
+  for (const output of [version, `other ${version}`, `Codey ${version}`, "codey 0.0.0",
+    `codey ${version}-wrong`, `codey ${version}\nextra output`]) {
+    await assert.rejects(verifyRequest(request, { ...options,
+      command: async (_node, args) => {
+        assert.equal(args[1], "--version", "Invalid version output must stop before native/health acceptance");
+        return output;
+      },
+    }), { code: "health_failed" });
     assert.equal(await exists(path.join(request.job, "health-proof.json")), false);
   }
   calls.length = 0;

@@ -43,7 +43,7 @@ export async function verifyRequest(request, {
       env: controlEnvironment(os.homedir()), cwd: root, timeout: 30000,
       log: path.join(request.job, "version.private.log"),
     }).catch(() => { requireValue(false, "health_failed"); });
-    requireValue(version.trim() === component.version, "health_failed");
+    requireValue(version.trim() === `codey ${component.version}`, "health_failed");
     const doctor = JSON.parse(await command(runtimeConfig.nodeExe, [path.join(root, "bin/codey.mjs"), "doctor", "--json"], {
       env: controlEnvironment(os.homedir()), cwd: root, timeout: 90000,
       log: path.join(request.job, "doctor-acceptance.private.log"),

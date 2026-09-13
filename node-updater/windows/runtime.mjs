@@ -187,7 +187,7 @@ export class Runtime {
       configHash: await fileHash(this.runtimeFile), protected: await protectedHashes(this.runtimeFile, this.probePath),
       components, installed, identityMatches: true };
   }
-  async report() {
+  async report({ onSnapshot } = {}) {
     try {
       const before = await this.snapshot();
       const activity = await this.native("idle");
@@ -196,6 +196,7 @@ export class Runtime {
       const keyReady = typeof config.modelKey === "string" && config.modelKey.length >= 32 &&
         this.environment(config).CODEY_MODEL_API_KEY === config.modelKey &&
         Array.isArray(gateway.auth?.apiKeys) && gateway.auth.apiKeys.includes(config.modelKey);
+      onSnapshot?.(before);
       return { platform: this.platform, layout: "npm", components: before.components,
         currentRelease: before.installed.releaseId, highestSequence: before.installed.sequence,
         readyMigrations: keyReady ? ["gateway-api-key-v1"] : [], busy: !activity.idle };
@@ -277,11 +278,16 @@ export class Runtime {
   async verifyPackage(root, artifact) {
     const info = await readPackageInfo(root);
     requireValue(info.entrySha256 === artifact.entrySha256, "signature_invalid");
-    for (const [name, expected] of artifact.files) {
-      const file = path.join(root, name);
-      requireValue(samePath(await realpath(file), path.join(info.root, name)) &&
-        (await stat(file)).isFile() && (await stat(file)).size === expected.size &&
-        await fileHash(file) === expected.sha256, "signature_invalid");
+    const entries = [...artifact.files];
+    for (let offset = 0; offset < entries.length; offset += 8) {
+      const results = await Promise.allSettled(entries.slice(offset, offset + 8).map(async ([name, expected]) => {
+        const file = path.join(root, name);
+        requireValue(samePath(await realpath(file), path.join(info.root, name)), "signature_invalid");
+        const entry = await stat(file);
+        requireValue(entry.isFile() && entry.size === expected.size &&
+          await fileHash(file) === expected.sha256, "signature_invalid");
+      }));
+      for (const result of results) if (result.status === "rejected") throw result.reason;
     }
     await verifyDependencyBinding(root, artifact.lock, { home: this.home });
   }
