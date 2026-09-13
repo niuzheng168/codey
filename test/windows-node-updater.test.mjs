@@ -9,7 +9,9 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { Agent } from "../node-updater/windows/agent.mjs";
 import { Client, UpdateError, readJson, requireValue, save, sha, validateConfig } from "../node-updater/windows/client.mjs";
-import { Runtime, normalizedGateway, normalizedCodex, checkedReceipt, objectHash, exists } from "../node-updater/windows/runtime.mjs";
+import { Runtime, normalizedGateway, normalizedCodex, checkedReceipt, checkedAcceptanceProof,
+  readAcceptanceProof, objectHash, exists } from "../node-updater/windows/runtime.mjs";
+import { verifyRequest } from "../node-updater/windows/verify.mjs";
 import { verifyNodeRelease } from "../src/node-update-manifest.mjs";
 
 const keys = generateKeyPairSync("ed25519", {
@@ -76,6 +78,7 @@ async function fixture(t, options = {}) {
       assert.ok(["apply", "verify"].includes(action));
       counters[action]++; events.push(action);
       const request = await readJson(file);
+      assert.equal(request.acceptance, "authenticated-health-v1");
       assert.equal(verifyNodeRelease(request.envelope, keys.publicKey).digest, signed.digest);
       await client.json("/api/node-updater/report", {
         jobId: request.jobId, leaseToken: request.leaseToken, state: "verifying", code: "ok",
@@ -147,7 +150,7 @@ test("client rejects oversized metadata and corrupt or unassigned package conten
   assert.equal(await exists(path.join(f.home, "bad.tgz")), false);
 });
 
-test("signed Windows update requires all phases and native model completion before success", async t => {
+test("signed Windows update requires all phases and explicit health-only acceptance before success", async t => {
   const f = await fixture(t);
   const result = await f.agent.once();
   assert.equal(result.state, "succeeded");
@@ -186,7 +189,7 @@ test("an unchanged Codey release verifies without download/restart, even while o
   assert.equal(f.counters.apply, 0); assert.equal(f.counters.download, 0); assert.equal(f.counters.verify, 1);
 });
 
-test("model/health failure reports rollback and never records the desired version installed", async t => {
+test("health failure reports rollback and never records the desired version installed", async t => {
   const f = await fixture(t, { rollback: true });
   assert.equal((await f.agent.once()).state, "rolled_back");
   assert.equal(f.counters.commit, 0);
@@ -276,6 +279,123 @@ test("recovery receipts retain the original signature, platform and immutable se
   assert.throws(() => checkedReceipt({ ...request, jobId: "e".repeat(32) }, keys.publicKey));
   assert.throws(() => checkedReceipt(request, keys.publicKey, { now: signed.release.expiresAt + 1 }));
   assert.equal(checkedReceipt(request, keys.publicKey, { now: signed.release.expiresAt + 1, allowExpired: true }).digest, signed.digest);
+});
+
+function healthReceipt(signed, job) {
+  const component = signed.release.components.codey;
+  const request = { ...signed, acceptance: "authenticated-health-v1", job, jobId: path.basename(job),
+    version: component.version, entrySha256: component.entrySha256 };
+  const proof = { schema: 1, acceptance: request.acceptance, passed: true, healthy: true, authenticated: true,
+    modelRequests: false, version: component.version, entrySha256: component.entrySha256,
+    jobId: request.jobId, digest: signed.digest, checkedAt: now };
+  return { request, proof };
+}
+
+test("health receipts bind signed version, entry, job and digest and never substitute historical model proofs", async t => {
+  const f = await fixture(t);
+  const { request, proof } = healthReceipt(f.signed, path.join(f.home, f.job.id));
+  await mkdir(request.job);
+  assert.deepEqual(checkedAcceptanceProof(request, proof), proof);
+  for (const patch of [{ passed: false }, { healthy: false }, { authenticated: false }, { modelRequests: true },
+    { modelRequests: undefined }, { checkedAt: 0 }, { version: "0.1.4" }, { entrySha256: "0".repeat(64) },
+    { digest: "0".repeat(64) }, { jobId: "e".repeat(32) }]) {
+    assert.throws(() => checkedAcceptanceProof(request, { ...proof, ...patch }), { code: "health_failed" });
+  }
+  assert.throws(() => checkedAcceptanceProof({ ...request, version: "0.1.4" }, proof), { code: "signature_invalid" });
+  assert.throws(() => checkedAcceptanceProof({ ...request, acceptance: "unknown" }, proof), { code: "configuration_changed" });
+  const legacy = { ...request }; delete legacy.acceptance;
+  const oldProof = { passed: true, codeyModel: true, codexModel: true, syntheticSessionArchived: true,
+    digest: legacy.digest, jobId: legacy.jobId };
+  assert.deepEqual(checkedAcceptanceProof(legacy, oldProof), oldProof);
+  assert.throws(() => checkedAcceptanceProof(legacy, proof), { code: "model_failed" });
+  assert.throws(() => checkedAcceptanceProof(request, oldProof), { code: "health_failed" });
+  await save(path.join(request.job, "model-proof.json"), oldProof);
+  await assert.rejects(readAcceptanceProof(request), { code: "health_failed" });
+  assert.deepEqual(await readAcceptanceProof(legacy), oldProof);
+});
+
+test("commit requires a real bound health receipt and matching running version before persisting installation", async t => {
+  const f = await fixture(t);
+  const { request, proof } = healthReceipt(f.signed, path.join(f.home, f.job.id));
+  await mkdir(request.job);
+  await save(path.join(request.job, "request.json"), request);
+  const runtime = {
+    config: f.config, platform: f.config.platform, private: f.runtime.private,
+    installed: async () => ({ sequence: 0 }),
+    snapshot: async () => ({ components: { codey: { ...f.signed.release.components.codey } } }),
+  };
+  const commit = () => Runtime.prototype.commit.call(runtime, f.signed.release, f.signed.digest, request.job);
+  await assert.rejects(commit(), { code: "health_failed" });
+  await save(path.join(request.job, "health-proof.json"), { ...proof, authenticated: false });
+  await assert.rejects(commit(), { code: "health_failed" });
+  await save(path.join(request.job, "health-proof.json"), proof);
+  const snapshot = runtime.snapshot;
+  runtime.snapshot = async () => ({ components: { codey: { ...f.signed.release.components.codey, version: "0.1.4" } } });
+  await assert.rejects(commit(), { code: "health_failed" });
+  assert.equal(await exists(path.join(runtime.private, "installed.json")), false);
+  runtime.snapshot = snapshot;
+  await commit();
+  assert.equal((await readJson(path.join(runtime.private, "installed.json"))).digest, f.signed.digest);
+});
+
+test("Windows acceptance runs only version/native/authenticated health checks; failures cannot mint a proof", {
+  skip: process.platform !== "win32",
+}, async t => {
+  const f = await fixture(t);
+  const root = path.join(f.home, "package");
+  await mkdir(root);
+  const build = { name: "codey", version: "0.1.5" };
+  await save(path.join(root, "codey-build.json"), build);
+  const entrySha256 = sha(await readFile(path.join(root, "codey-build.json")));
+  const signed = signedRelease({ components: {
+    codey: { ...f.signed.release.components.codey, entrySha256 },
+  } });
+  const { request } = healthReceipt(signed, path.join(f.home, f.job.id));
+  await mkdir(request.job);
+  request.candidate = root; request.plan = { protected: {} };
+  await save(path.join(root, "package.json"), build);
+  const runtimeConfig = { nodeId: f.config.nodeId, portalOrigin: f.config.portalOrigin,
+    codeyDirectory: root, nodeExe: process.execPath,
+    services: { codey: { environment: { CODEY_PORTAL_PRINCIPAL_ID: f.config.ownerId, CODEY_PORTAL_USERNAME: f.config.username } } } };
+  const calls = [], reports = [];
+  const options = { config: f.config, runtimeConfig,
+    client: { json: async (_route, value) => reports.push(value) },
+    command: async (node, args) => {
+      assert.equal(node, process.execPath);
+      assert.equal(args[0], path.join(root, "bin/codey.mjs"));
+      if (args[1] === "--version") {
+        assert.equal(args.length, 2);
+        calls.push("version"); return "0.1.5";
+      }
+      assert.deepEqual(args.slice(1), ["doctor", "--json"]);
+      calls.push("native");
+      return JSON.stringify({ ok: true, name: "codey", platform: "windows-x64", modelRequests: false,
+        serviceChanges: false, version: "0.1.5", entrySha256, lockSha256: signed.release.components.codey.lockSha256,
+        sourceCommit: signed.release.components.codey.commit, nodeMajor: Number(process.versions.node.split(".")[0]),
+        native: { sqlite: true, bcrypt: true, ripgrep: true, pty: true, codexSdk: true } });
+    },
+    probe: async (_config, value) => {
+      assert.deepEqual(value, { version: "0.1.5" });
+      calls.push("authenticated-health"); return { healthy: true, modelRequests: false };
+    }, hashes: async () => ({}),
+  };
+  for (const patch of [
+    { probe: async () => { throw new Error("fixture TLS/auth failure"); } },
+    { command: async () => "wrong-version" },
+    { hashes: async () => ({ config: "changed" }) },
+    { command: async (_node, args) => args[1] === "--version" ? "0.1.5" : '{"ok":true,"native":null}' },
+    { client: { json: async () => { throw new UpdateError("lease_lost"); } } },
+  ]) {
+    await assert.rejects(verifyRequest(request, { ...options, ...patch }));
+    assert.equal(await exists(path.join(request.job, "health-proof.json")), false);
+  }
+  calls.length = 0;
+  const proof = await verifyRequest(request, options);
+  assert.deepEqual(calls, ["version", "native", "authenticated-health"]);
+  assert.equal(proof.modelRequests, false);
+  assert.equal(proof.authenticated, true);
+  assert.equal(await exists(path.join(request.job, "model-proof.json")), false);
+  assert.ok(reports.every(value => value.state === "verifying" && value.jobId === request.jobId));
 });
 
 test("the independent host uses the existing exact process-tree implementation and a kernel-owned lifetime lock", async () => {

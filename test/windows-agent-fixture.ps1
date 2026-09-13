@@ -7,7 +7,9 @@ foreach ($name in @('native.ps1', 'install.ps1')) {
     $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $Source $name), [ref]$tokens, [ref]$errors)
     Check (-not $errors.Count) ($errors | Out-String)
     foreach ($definition in $ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.FunctionDefinitionAst] }) {
-        . ([scriptblock]::Create($definition.Extent.Text))
+        # AST-created script blocks have no source-file PSScriptRoot.
+        $body = $definition.Extent.Text.Replace('$PSScriptRoot', ("'" + $Source.Replace("'", "''") + "'"))
+        . ([scriptblock]::Create($body))
     }
 }
 # Compile managed declarations only. No Windows Job Object or executable is run.
@@ -79,6 +81,50 @@ Write-CodeyJson (Join-Path $Root 'model-proof.json') @{ passed = $false; digest 
 $refused = $false
 try { $null = Recover-AgentTransaction $journal $Root } catch { $refused = $true }
 Check $refused 'Missing model proof was accepted.'
+
+$request | Add-Member NoteProperty acceptance 'authenticated-health-v1'
+$request | Add-Member NoteProperty entrySha256 ('a' * 64)
+$request | Add-Member NoteProperty release ([pscustomobject]@{ components = [pscustomobject]@{
+    codey = [pscustomobject]@{ version = $request.version; entrySha256 = $request.entrySha256 } } })
+$health = @{ schema = 1; acceptance = $request.acceptance; passed = $true; healthy = $true; authenticated = $true
+    modelRequests = $false; digest = $request.digest; jobId = $request.jobId
+    version = $request.version; entrySha256 = $request.entrySha256; checkedAt = 1000 }
+Write-CodeyJson (Join-Path $Root 'health-proof.json') $health
+$script:actions.Clear()
+$result = Recover-AgentTransaction $journal $Root
+Check ($result.state -eq 'complete' -and -not $script:actions.Contains('rollback')) 'Completed health acceptance was repeated.'
+foreach ($field in @('passed', 'healthy', 'authenticated', 'modelRequests', 'digest', 'jobId', 'version', 'entrySha256', 'checkedAt')) {
+    $bad = $health.Clone()
+    $bad[$field] = if ($field -in @('passed', 'healthy', 'authenticated')) { $false } `
+        elseif ($field -eq 'modelRequests') { $true } elseif ($field -eq 'checkedAt') { 0 } else { 'wrong' }
+    Write-CodeyJson (Join-Path $Root 'health-proof.json') $bad
+    $refused = $false
+    try { $null = Recover-AgentTransaction $journal $Root } catch { $refused = $true }
+    Check $refused ("Invalid health proof accepted: " + $field)
+}
+$journal.state = 'rolled_back'
+$result = Recover-AgentTransaction $journal $Root
+Check ($result.state -eq 'rolled_back') 'A historical rollback was changed to success.'
+
+$script:owner = [pscustomobject]@{ Home = $Root; Sid = 'S-1-5-21-fixture' }
+$script:acceptanceExit = 0
+$script:acceptanceCode = ''
+function Invoke-CodeyProcess {
+    param($Executable, $ArgumentList, $WorkingDirectory, $TimeoutSeconds, [switch]$AllowFailure)
+    Check ($AllowFailure -and (Split-Path -Leaf $ArgumentList[0]) -eq 'verify.mjs' -and
+        $ArgumentList.Count -eq 2) 'Acceptance attempted an unexpected executable or inference command.'
+    $output = if ($script:acceptanceExit -eq 0) { $health } else { @{ passed = $false; code = $script:acceptanceCode } }
+    return [pscustomobject]@{ ExitCode = $script:acceptanceExit; Stdout = ($output | ConvertTo-Json -Compress) }
+}
+Invoke-AgentAcceptance (Join-Path $Root 'request.json') $request
+$script:acceptanceExit = 1
+foreach ($expectedCode in @('health_failed', 'signature_invalid', 'configuration_changed', 'lease_lost')) {
+    $script:acceptanceCode = $expectedCode
+    $actualCode = ''
+    try { Invoke-AgentAcceptance (Join-Path $Root 'request.json') $request }
+    catch { $actualCode = Get-AgentFailureCode $_ }
+    Check ($actualCode -eq $expectedCode) 'Acceptance failure was disguised as a different category.'
+}
 
 # Mock only COM scheduling, not its security assertions.
 $script:owner = [pscustomobject]@{ Sid = 'S-1-5-21-fixture' }

@@ -11,18 +11,21 @@ import re
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import tarfile
 import tempfile
 import time
 import tomllib
 import traceback
+from urllib.parse import urlsplit
 
 PROTOCOL = 1
 RELEASE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 HASH = re.compile(r"^[a-f0-9]{64}$")
 COMPONENTS = ("cloudcli", "copilotApi")
 NPM_COMPONENT = "codey"
+DEPENDENCY_LINK = "codey-dependency-link.json"
 
 
 def component_entry(name):
@@ -263,10 +266,57 @@ def gateway_config_hash(file):
     return hashlib.sha256(encoded(document)).hexdigest()
 
 
+def dependency_graph(lock):
+    packages = lock.get("packages") if isinstance(lock, dict) else None
+    require(isinstance(packages, dict) and isinstance(packages.get(""), dict), "stage_failed")
+    root = packages[""]
+    require(all(root.get(key) is None or isinstance(root[key], dict)
+                for key in ("dependencies", "optionalDependencies")), "stage_failed")
+    return {"dependencies": root.get("dependencies") if root.get("dependencies") is not None else {},
+            "optionalDependencies": root.get("optionalDependencies") if root.get("optionalDependencies") is not None else {},
+            "packages": {name: item for name, item in packages.items() if name}}
+
+
+def dependency_hash(lock):
+    def ordered(value):
+        if isinstance(value, list):
+            return [ordered(item) for item in value]
+        if isinstance(value, dict):
+            keys = sorted(value, key=lambda key: key.encode("utf-16-be", errors="surrogatepass"))
+            # JSON.stringify enumerates integer-index keys before other keys,
+            # even after Object.fromEntries has inserted sorted properties.
+            integers = sorted((key for key in keys if re.fullmatch(r"0|[1-9][0-9]*", key)
+                               and int(key) < 4294967295), key=int)
+            return {key: ordered(value[key]) for key in integers + [key for key in keys if key not in integers]}
+        return value
+    encoded = json.dumps(ordered(dependency_graph(lock)), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def dependency_record(lock, modules, abi):
+    require(isinstance(abi, str) and re.fullmatch(r"[0-9]+", abi), "runtime_incompatible")
+    require(Path(modules).is_absolute(), "stage_failed")
+    return {"schema": 1, "modules": str(modules), "dependencySha256": dependency_hash(lock),
+            "platform": "linux", "arch": "x64", "abi": abi}
+
+
+def validate_dependency_record(value, lock, abi):
+    require(isinstance(value, dict) and type(value.get("schema")) is int and value["schema"] == 1
+            and value.get("dependencySha256") == dependency_hash(lock) and value.get("platform") == "linux"
+            and value.get("arch") == "x64" and value.get("abi") == abi
+            and isinstance(value.get("modules"), str) and Path(value["modules"]).is_absolute(), "stage_failed")
+    return value
+
+
 def install_fingerprint(directory):
     directory = Path(directory)
     package = read(directory / "package.json")
-    result = {"lock": sha(dependency_lock(directory)), "scripts": package.get("scripts", {})}
+    lock = dependency_lock(directory)
+    fingerprint = sha(lock)
+    if package.get("name") == "codey":
+        # Match the local CLI graph; signed lock bytes are checked independently.
+        fingerprint = dependency_hash(read(lock))
+    result = {"lock": fingerprint, "scripts": package.get("scripts", {})}
     for relative in ["scripts/fix-node-pty.js", "scripts/postinstall.js"]:
         file = directory / relative
         if file.is_file():
@@ -468,6 +518,7 @@ class Runtime:
             "cloudcliPid": snapshot["cloudcliPid"], "cloudcliPath": snapshot["cloudcliPath"],
             "probePath": str(self.root / "probe"),
             "model": model_config.get("model"), "effort": model_config.get("model_reasoning_effort"),
+            **({"version": snapshot["components"][NPM_COMPONENT]["version"]} if mode == "health" else {}),
         }
         (self.root / "probe").mkdir(mode=0o700, exist_ok=True)
         result = subprocess.run([snapshot["cloudcliNode"], str(Path(__file__).with_name("probe.mjs"))],
@@ -537,7 +588,37 @@ class Runtime:
         require(good == 200 and json.loads(payload).get("data"), "health_failed")
         if keys:
             require(status(None)[0] == status("invalid-updater-probe")[0] == 401, "health_failed")
+        if snapshot.get("layout") == "npm":
+            require(keys and isinstance(keys[0], str) and len(keys[0]) >= 32, "health_failed")
+            probe_path = self.root / "probe"
+            probe_path.mkdir(mode=0o700, exist_ok=True)
+            proof = self.probe("health", snapshot, probe_path)
+            require(proof.get("healthy") is True and proof.get("authenticated") is True and
+                    proof.get("modelRequests") is False and
+                    proof.get("version") == snapshot["components"][NPM_COMPONENT]["version"], "health_failed")
         return True
+
+    def check_codey(self, candidate, component, before, job):
+        build_home = Path(job) / "build-home"
+        build_home.mkdir(mode=0o700, exist_ok=True)
+        node = before["cloudcliNode"]
+        env = {"HOME": str(build_home), "PATH": str(Path(node).parent) + ":/usr/bin:/bin",
+               "CI": "true", "DATABASE_PATH": ":memory:", "CODEY_MANAGED": "false", "CODEY_PORTAL_SSO": "false"}
+        try:
+            version = run([node, candidate / "bin/codey.mjs", "--version"], cwd=candidate, env=env,
+                          timeout=30, log=Path(job) / "version.private.log")
+            proof = json.loads(run([node, candidate / "bin/codey.mjs", "doctor", "--json"], cwd=candidate, env=env,
+                                   timeout=90, log=Path(job) / "doctor.private.log"))
+            require(version == component["version"] and proof.get("ok") is True and proof.get("name") == "codey"
+                    and proof.get("platform") == "linux-x64" and proof.get("modelRequests") is False
+                    and proof.get("serviceChanges") is False and
+                    all(proof.get(key) == component[key] for key in ("version", "entrySha256", "lockSha256"))
+                    and proof.get("sourceCommit") == component["commit"] and
+                    proof.get("nodeMajor") == before["components"][NPM_COMPONENT]["nodeMajor"] and
+                    all(proof.get("native", {}).get(key) is True for key in
+                        ("sqlite", "bcrypt", "ripgrep", "pty", "codexSdk")), "stage_failed")
+        except (UpdateError, OSError, ValueError, subprocess.TimeoutExpired) as error:
+            raise UpdateError("stage_failed") from error
 
     def model(self, snapshot, job):
         self.probe("verify", snapshot, job)
@@ -583,9 +664,28 @@ class Runtime:
 
     def prepare_dependencies(self, before, candidate, job):
         old = Path(before["cloudcliPath"])
+        reference = None
         if install_fingerprint(old) == install_fingerprint(candidate) and (old / "node_modules").is_dir():
             actual = (old / "node_modules").resolve()
-            if actual.is_relative_to(old) and not Path(before["cloudcliAnchor"]).is_symlink():
+            if before.get("layout") == "npm":
+                lock = read(dependency_lock(candidate))
+                abi = run([before["cloudcliNode"], "-p", "process.versions.modules"], timeout=10)
+                actual = self.checked_dependency_binding(old, read(dependency_lock(old)), abi, allow_installed_link=True)
+                anchor = Path(before["codeyAnchor"])
+                self.checked_dependencies(actual, tree=True)
+                self.check_dependency_versions(actual, lock)
+                require(anchor.resolve() == old and not (candidate / "node_modules").exists()
+                        and not (candidate / "node_modules").is_symlink()
+                        and not (candidate / DEPENDENCY_LINK).exists()
+                        and not (candidate / DEPENDENCY_LINK).is_symlink(), "stage_failed")
+                record = dependency_record(lock, actual, abi)
+                self.write_dependency_record(candidate, record, create=True)
+                reference = {"modules": str(actual), "abi": abi, "dependencySha256": record["dependencySha256"]}
+                if not anchor.is_symlink() and actual.is_relative_to(old):
+                    # Staging uses the live tree. Switch pins the same inode to
+                    # its retained backup location before restarting either service.
+                    reference["relative"] = str(actual.relative_to(old))
+            elif actual.is_relative_to(old) and not Path(before["cloudcliAnchor"]).is_symlink():
                 abi = run([before["cloudcliNode"], "-p", "process.versions.modules"], timeout=10)
                 cache = self.root / "dependencies" / (install_fingerprint(old) + "-" + abi)
                 if not (cache / "ready.json").exists():
@@ -598,6 +698,10 @@ class Runtime:
                     os.rename(staging, cache)
                 actual = cache / "node_modules"
             (candidate / "node_modules").symlink_to(actual, target_is_directory=True)
+            if before.get("layout") == "npm":
+                self.checked_dependency_binding(candidate, lock, abi)
+                require(install_fingerprint(old) == install_fingerprint(candidate), "stage_failed")
+                self.checked_dependency_binding(old, read(dependency_lock(old)), abi, allow_installed_link=True)
         else:
             node = before["cloudcliNode"]
             npm = Path(node).parent.parent / "lib/node_modules/npm/bin/npm-cli.js"
@@ -638,11 +742,177 @@ class Runtime:
                     os.replace(backup, package_file)
                 require(not package_file.is_symlink() and package_file.is_file() and package_file.read_bytes() == original
                         and not lock_file.is_symlink() and lock_file.is_file() and sha(lock_file) == lock_hash, "stage_failed")
+        if before.get("layout") == "npm":
+            return reference
         for name in ["dist", ".codey-bin"]:
             if (old / name).is_dir() and not (candidate / name).exists():
                 shutil.copytree(old / name, candidate / name, symlinks=True)
 
+    def dependency_record_file(self, root):
+        file = Path(root) / DEPENDENCY_LINK
+        require(file.is_absolute() and file.is_relative_to(self.home), "stage_failed")
+        for entry in (file, *file.parents):
+            if not entry.is_relative_to(self.home):
+                break
+            require(not entry.is_symlink(), "stage_failed")
+            if entry.exists():
+                info = entry.stat()
+                require(info.st_uid == os.getuid() and not info.st_mode & 0o022, "stage_failed")
+        require(not file.exists() or file.is_file(), "stage_failed")
+        return file
+
+    def write_dependency_record(self, root, value, *, create=False):
+        file = self.dependency_record_file(root)
+        if create:
+            with file.open("x", encoding="utf-8") as stream:
+                json.dump(value, stream, ensure_ascii=False, separators=(",", ":"))
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            file.chmod(0o600)
+        else:
+            save(file, value)
+
+    def check_installed_codey(self, root, lock):
+        root = Path(root)
+        for name in ("package.json", "codey-build.json", "npm-shrinkwrap.json", "bin/codey.mjs",
+                     "dist-server/server/index.js", "gateway/main.js"):
+            file = root / name
+            require(file.is_file() and not file.is_symlink() and file.resolve(strict=True) == file, "stage_failed")
+        package, build = read(root / "package.json"), read(root / "codey-build.json")
+        root_lock = lock.get("packages", {}).get("")
+        require(isinstance(root_lock, dict) and package.get("name") == "codey" and package.get("type") == "module"
+                and isinstance(package.get("bin"), dict) and package["bin"].get("codey") == "bin/codey.mjs"
+                and lock.get("name") == root_lock.get("name") == "codey" and lock.get("lockfileVersion") == 3
+                and lock.get("version") == root_lock.get("version") == package.get("version"), "stage_failed")
+        for group in ("dependencies", "optionalDependencies"):
+            require(isinstance(package.get(group, {}), dict) and isinstance(root_lock.get(group, {}), dict)
+                    and package.get(group, {}) == root_lock.get(group, {}), "stage_failed")
+        native = build.get("platform") == "linux-x64" and "runtimePlatforms" not in build
+        shared = "platform" not in build and build.get("runtimePlatforms") in (
+            ["linux-x64", "windows-x64"], ["linux-x64", "windows-x64", "macos-arm64"],
+            ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"])
+        require((native or shared) and type(build.get("schema")) is int and build["schema"] == 1 and build.get("name") == "codey"
+                and build.get("version") == package["version"]
+                and re.fullmatch(r"\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?", package["version"])
+                and re.fullmatch(r"[a-f0-9]{40}", build.get("sourceCommit", ""))
+                and ("os" not in package or native and package["os"] == ["linux"])
+                and ("cpu" not in package or native and package["cpu"] == ["x64"]), "stage_failed")
+        for name, field in (("npm-shrinkwrap.json", "lockSha256"),
+                            ("dist-server/server/index.js", "workspaceEntrySha256"), ("gateway/main.js", "gatewayEntrySha256")):
+            file = root / name
+            require(file.is_file() and not file.is_symlink() and sha(file) == build.get(field), "stage_failed")
+        for item in dependency_graph(lock)["packages"].values():
+            try:
+                url = urlsplit(item.get("resolved", ""))
+                valid = (url.scheme == "https" and url.hostname == "registry.npmjs.org" and url.port in (None, 443)
+                         and not url.username and not url.password and not url.query and not url.fragment)
+            except (ValueError, TypeError):
+                valid = False
+            require(valid and not item.get("link") and
+                    re.match(r"^sha(?:1|256|384|512)-[A-Za-z0-9+/]+={0,2}(?:\s|$)", item.get("integrity", "")), "stage_failed")
+
+    def checked_dependency_binding(self, root, lock, abi, *, allow_installed_link=False):
+        modules = Path(root) / "node_modules"
+        file = self.dependency_record_file(root)
+        if not modules.is_symlink():
+            require(modules.is_dir() and not file.exists(), "stage_failed")
+            return self.checked_dependencies(modules)
+        if allow_installed_link and not file.exists():
+            # Only a verified existing installation may migrate a historical
+            # bare link. New candidates and recovered bindings stay strict.
+            self.check_installed_codey(root, lock)
+            actual = self.checked_dependencies(modules.resolve(strict=True), tree=True)
+            self.check_dependency_versions(actual, lock)
+            return actual
+        require(file.is_file(), "stage_failed")
+        value = validate_dependency_record(read(file), lock, abi)
+        retained = Path(value["modules"])
+        require(str(retained.resolve(strict=True)) == value["modules"] and not retained.is_symlink()
+                and modules.resolve(strict=True) == retained, "stage_failed")
+        return self.checked_dependencies(retained)
+
+    def check_dependency_versions(self, modules, lock):
+        for name, item in dependency_graph(lock)["packages"].items():
+            require(name.startswith("node_modules/") and not re.search(r"[\\:\x00-\x1f]", name)
+                    and all(part and part not in (".", "..") for part in name.split("/"))
+                    and isinstance(item, dict), "stage_failed")
+            file = modules / name[len("node_modules/"):] / "package.json"
+            if not file.exists() and any(item.get(key) for key in ("optional", "dev", "devOptional")):
+                continue
+            require(file.is_file() and read(file).get("version") == item.get("version"), "stage_failed")
+
+    def checked_dependencies(self, directory, *, tree=False):
+        directory = Path(directory).resolve(strict=True)
+        require(directory.is_relative_to(self.home) and directory.is_dir(), "stage_failed")
+        def check(file):
+            info = file.lstat()
+            require(info.st_uid == os.getuid() and (file.is_symlink() or not info.st_mode & 0o022), "stage_failed")
+            require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode),
+                    "stage_failed")
+            if file.is_symlink():
+                target = file.resolve(strict=True)
+                require(target.is_relative_to(self.home) and target.stat().st_uid == os.getuid(), "stage_failed")
+                require(target.is_relative_to(directory) and not Path(os.readlink(file)).is_absolute(), "stage_failed")
+        for entry in (directory, *directory.parents):
+            if not entry.is_relative_to(self.home):
+                break
+            check(entry)
+        if tree:
+            for root, folders, files in os.walk(directory, followlinks=False):
+                for name in folders + files:
+                    check(Path(root) / name)
+        return directory
+
+    def dependency_reference(self, item, *, transition=False):
+        reference = item.get("dependencies")
+        if reference is None:
+            return
+        require(item.get("component") == NPM_COMPONENT, "configuration_changed")
+        source = retained = Path(reference["modules"])
+        if "relative" in reference:
+            require(item["kind"] == "directory", "configuration_changed")
+            relative = Path(reference["relative"])
+            require(not relative.is_absolute() and relative.parts and ".." not in relative.parts, "configuration_changed")
+            require(source == Path(item["previousTarget"]) / relative, "configuration_changed")
+            retained = Path(item["backup"]) / relative
+        link = Path(item["target"]) / "node_modules"
+        require(all(file.is_absolute() and file.is_relative_to(self.home) for file in (source, retained, link))
+                and link.is_symlink() and link.lstat().st_uid == os.getuid()
+                and os.readlink(link) in (str(source), str(retained)), "configuration_changed")
+        lock = read(dependency_lock(item["target"]))
+        value = validate_dependency_record(read(self.dependency_record_file(item["target"])), lock, reference["abi"])
+        require(value["dependencySha256"] == reference["dependencySha256"] and
+                value["modules"] in (str(source), str(retained)) and
+                (transition or value["modules"] == os.readlink(link)), "configuration_changed")
+        if not transition:
+            self.checked_dependency_binding(item["target"], lock, reference["abi"])
+        return source, retained, link, value
+
+    def rebind_dependencies(self, item, *, restore=False):
+        reference = self.dependency_reference(item, transition=True)
+        if reference is None:
+            return
+        source, retained, link, record = reference
+        destination = source if restore else retained
+        self.checked_dependencies(destination)
+        if os.readlink(link) == str(destination) and record["modules"] == str(destination):
+            self.checked_dependency_binding(item["target"], read(dependency_lock(item["target"])), record["abi"])
+            return
+        temporary = link.with_name(".node_modules.updater-next")
+        if temporary.is_symlink():
+            require(temporary.lstat().st_uid == os.getuid() and os.readlink(temporary) in (str(source), str(retained)),
+                    "configuration_changed")
+            temporary.unlink()
+        require(not temporary.exists(), "configuration_changed")
+        temporary.symlink_to(destination, target_is_directory=True)
+        os.replace(temporary, link)
+        self.write_dependency_record(item["target"], {**record, "modules": str(destination)})
+        self.checked_dependency_binding(item["target"], read(dependency_lock(item["target"])), record["abi"])
+
     def switch(self, anchors, job):
+        for item in anchors:
+            self.dependency_reference(item)
         save(Path(job) / "transaction.json", {"state": "applying", "anchors": anchors})
         units = transaction_units(anchors)
         run(["systemctl", "--user", "stop", *units], timeout=35, log=Path(job) / "stop.private.log")
@@ -657,6 +927,7 @@ class Runtime:
                 os.rename(anchor, backup)
             else:
                 require(anchor.is_symlink() and str(anchor.resolve()) == item["previousTarget"], "configuration_changed")
+            self.rebind_dependencies(item)
             temporary = anchor.with_name(anchor.name + ".updater-next")
             require(not temporary.exists() and not temporary.is_symlink(), "configuration_changed")
             temporary.symlink_to(target, target_is_directory=True)
@@ -720,6 +991,7 @@ class Runtime:
     def rollback(self, anchors, job):
         # Check ownership before stopping anything, including during crash recovery.
         for item in anchors:
+            self.dependency_reference(item, transition=True)
             anchor, target, backup = Path(item["anchor"]), Path(item["target"]), Path(item["backup"])
             require(anchor.parent.resolve().is_relative_to(self.home) and target.resolve().is_relative_to(self.home)
                     and backup.resolve().is_relative_to(Path(job).resolve())
@@ -752,6 +1024,7 @@ class Runtime:
                 os.rename(backup, anchor)
             else:
                 require(anchor.exists() and str(anchor.resolve()) == item["previousTarget"], "rollback_failed")
+            self.rebind_dependencies(item, restore=True)
         self.check_metadata_rollback(job, restore=True)
         run(["systemctl", "--user", "start", *units], timeout=35)
         save(Path(job) / "transaction.json", {"state": "rolled_back", "anchors": anchors})
@@ -765,6 +1038,7 @@ class Upgrade:
         runtime, job = self.runtime, Path(job)
         job.mkdir(mode=0o700, parents=True, exist_ok=True)
         before = runtime.snapshot()
+        health_only = set(manifest["components"]) == {NPM_COMPONENT}
         save(job / "before.private.json", before)
         require(manifest["sequence"] >= before["highestSequence"], "signature_invalid")
         if manifest["sequence"] == before["highestSequence"] and before["highestSequence"] > 0:
@@ -786,12 +1060,18 @@ class Upgrade:
             # No application is stopped for an unchanged package. Verification can
             # coexist with user work; idle is mandatory only before a real switch.
             self.notify("verifying", "ok")
+            if health_only:
+                runtime.check_codey(Path(before["cloudcliPath"]), manifest["components"][NPM_COMPONENT], before, job)
             runtime.health(before)
-            runtime.model(before, job)
+            if not health_only:
+                runtime.model(before, job)
             runtime.assert_unchanged(before)
+            if health_only:
+                self.health_proof(manifest, digest, before, job)
             save(runtime.private / "installed.json", {"releaseId": manifest["id"], "sequence": manifest["sequence"],
                  "digest": digest, "components": before["components"], "updatedAt": int(time.time() * 1000)})
-            save(job / "transaction.json", {"state": "succeeded", "anchors": []})
+            save(job / "transaction.json", {"state": "succeeded", "anchors": [],
+                 **({"acceptance": "authenticated-health-v1", "digest": digest} if health_only else {})})
             self.notify("succeeded", "up_to_date")
             return {"state": "succeeded", "changed": []}
         require(shutil.disk_usage(runtime.root).free > 1024 ** 3, "stage_failed")
@@ -817,9 +1097,12 @@ class Upgrade:
                         and all((candidate / file).is_file() for file in
                                 ["bin/codey.mjs", "dist-server/server/index.js", "gateway/main.js"]),
                         "signature_invalid")
+            dependencies = None
             if name in {"cloudcli", NPM_COMPONENT}:
                 require(sha(dependency_lock(candidate)) == component["lockSha256"], "signature_invalid")
-                runtime.prepare_dependencies(before, candidate, job)
+                dependencies = runtime.prepare_dependencies(before, candidate, job)
+            if name == NPM_COMPONENT:
+                runtime.check_codey(candidate, component, before, job)
             save(candidate / "codey-release.json", {"release": manifest["id"], "sourceCommit": component["commit"]})
             anchor = Path(before["codeyAnchor" if name == NPM_COMPONENT
                                  else "cloudcliAnchor" if name == "cloudcli" else "copilotAnchor"])
@@ -829,7 +1112,8 @@ class Upgrade:
                             "service": "codey-cloudcli.service" if name in {"cloudcli", NPM_COMPONENT}
                                        else before["copilotService"],
                             **({"services": ["codey-cloudcli.service", before["copilotService"]]}
-                               if name == NPM_COMPONENT else {})})
+                               if name == NPM_COMPONENT else {}),
+                            **({"dependencies": dependencies} if dependencies else {})})
         runtime.assert_unchanged(before)
         self.notify("waiting_idle", "busy")
         deadline = time.monotonic() + 120
@@ -871,13 +1155,17 @@ class Upgrade:
             runtime.assert_unchanged(before, after, package_paths=False)
             for name in changed:
                 require(after["components"][name]["entrySha256"] == manifest["components"][name]["entrySha256"], "health_failed")
-            runtime.model(after, job)
-            # Both probes must preserve configuration and the just-verified package/runtime.
+            if not health_only:
+                runtime.model(after, job)
+            # Acceptance must preserve configuration and the verified package/runtime.
             runtime.assert_unchanged(after)
+            if health_only:
+                self.health_proof(manifest, digest, after, job)
             save(runtime.private / "installed.json", {"releaseId": manifest["id"], "sequence": manifest["sequence"],
                  "digest": digest, "components": after["components"], "updatedAt": int(time.time() * 1000)})
-            save(job / "transaction.json", {"state": "succeeded", "anchors": anchors})
-        except Exception:
+            save(job / "transaction.json", {"state": "succeeded", "anchors": anchors,
+                 **({"acceptance": "authenticated-health-v1", "digest": digest} if health_only else {})})
+        except Exception as original:
             diagnostic = job / "failure.private.log"
             diagnostic.write_text(traceback.format_exc())
             diagnostic.chmod(0o600)
@@ -886,7 +1174,19 @@ class Upgrade:
                 runtime.health(runtime.snapshot())
             except Exception:
                 raise UpdateError("rollback_failed") from None
-            self.notify("rolled_back", "health_failed")
+            code = original.code if isinstance(original, UpdateError) else "health_failed"
+            self.notify("rolled_back", code)
             return {"state": "rolled_back", "changed": changed}
         self.notify("succeeded", "ok")
         return {"state": "succeeded", "changed": changed}
+
+    def health_proof(self, manifest, digest, snapshot, job):
+        component = manifest["components"][NPM_COMPONENT]
+        require(all(snapshot["components"][NPM_COMPONENT][key] == component[key]
+                    for key in ("version", "commit", "entrySha256")), "health_failed")
+        save(job / "health-proof.json", {
+            "schema": 1, "acceptance": "authenticated-health-v1", "passed": True,
+            "healthy": True, "authenticated": True, "modelRequests": False,
+            "digest": digest, "jobId": job.name, "version": component["version"],
+            "entrySha256": component["entrySha256"], "checkedAt": int(time.time() * 1000),
+        })

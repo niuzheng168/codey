@@ -49,17 +49,22 @@ Python、工具和服务绑定必须由首次只读检查确认，不能据 Port
   不开新入站管理端口；睡眠、离线或注销期间不能更新。
 - 签名、有效期、平台、Node major、版本指纹和防降级序号在 Portal 与 Mac 双端校验。
   Linux、Windows、Apple Silicon、Intel 不会互相领取发行版。
-- 原 Node/npm 的 `pacote` + `npm ci` 使用锁定依赖，候选目录和原生模块
+- 原 Node/npm 的 `pacote` 暂存应用；相同依赖直接引用保留的依赖树，不整树复制或重装，
+  不同依赖使用锁定的 `npm ci`。候选目录和原生模块
   `codey doctor` 验证通过后，才有可能停应用；不对同名公共 npm 项目做更新。
-- 原安装 `install.lock` 贯穿切换、健康检查和模型验证。切换前再次验证全部包文件、
+- 原安装 `install.lock` 贯穿切换和健康检查。切换前再次验证全部包文件、
   配置、真实 worker/Codey 进程和任务定义。只更新 runtime.json 的包路径/指纹/
   release ID，并重启原 Codey LaunchAgent，保留旧包供回滚。
 - 活动 Codey 会话、模型连接、无法证明空闲的外部 Codex/Desktop 进程均阻止切换。
   请先结束任务并关闭该 Mac 本机 Codex/Desktop；没有 force 或批量强杀。
-- 成功必须有已鉴权本机健康检查、一次独立 Codey 真调用、一次只读临时 Codex CLI
-  真调用及合成会话归档。不会把计划版本直接填进当前版本栏。
+- 成功必须有目标版本、启动状态、原生模块和已鉴权本机健康检查；**不自动发送模型请求、
+  创建合成会话或运行 `codex exec`**，同包任务也如此。新请求使用
+  `authenticated-health-v1`，健康证明绑定任务/签名摘要/版本/入口哈希，记录 `modelRequests: false`。
+  不会把计划版本直接填进当前版本栏，也不会写假模型成功证明。
 - 完成先落盘再确认 Portal。断网/丢失回执只补确认，不重复安装或模型请求。
   崩溃先做本地恢复；新用户工作或配置漂移会阻止回退并要求检查，不循环停服务。
+- 历史请求没有新标记时，完成恢复仍须原有真实模型证明；旧未完成事务只安全回退，
+  不重新推理，不把已失败/回退任务改为成功。
 
 **此 Portal 升级器只更新 Codey。** Mac 的 Codex CLI/app-server/Desktop、
 DevTunnel、Node、Python 不在本次自动更新范围；Linux/Windows 本地工具更新命令
@@ -104,11 +109,11 @@ Intel 使用 `--platform macos-x64` 和下一个全局序号。Node majors 是�
 签名说明会强制标注 `[macOS CANARY: native acceptance pending]`，不写假 doctor。
 发布本身不创建升级任务；先由 owner 在 Portal 选择一台 Mac 确认测试。
 代理仍须在**停止 Codey 之前**完成暂存包、锁定依赖和原生 doctor 检查，保留空闲检查、
-健康/模型验收和代码回滚。已发布包和签名 ID 不可覆盖；后续正式授权需要新的发行 ID/
+已鉴权健康验收和代码回滚，不自动测试模型。已发布包和签名 ID 不可覆盖；后续正式授权需要新的发行 ID/
 全局序号以及真实原生报告，不把 canary 记录改写成已验收。
 
 不能手写假 doctor 成功报告绕过门槛。原生模块通过也不代替 canary 上真实的
-launchd 切换、模型响应、回滚以及睡眠/注销后恢复验收；先一台 Mac，再扩大范围。
+launchd 切换、已鉴权健康、回滚以及睡眠/注销后恢复验收；先一台 Mac，再扩大范围。
 原包、私有运行日志和事务记录保留。具体手工恢复命令见接入包的 `UPGRADE.md`。
 
 ## 回归检查

@@ -364,8 +364,18 @@ class Native:
         return result
 
     def js(self, cfg, script, args, *, input=None, timeout=90):
-        output = self.run([cfg["nodeExe"], script, *args], input=input, timeout=timeout).stdout
-        return json.loads(output)
+        result = self.run([cfg["nodeExe"], script, *args], input=input, timeout=timeout, check=False)
+        fallback = "health_failed" if Path(script).name == "verify.mjs" else "configuration_changed"
+        if Path(script).name == "agent.mjs" and args and args[0] in ("receipt", "receipt-expired", "candidate"):
+            fallback = "signature_invalid"
+        if result.returncode:
+            try:
+                code = json.loads(result.stdout).get("code")
+            except (ValueError, AttributeError):
+                code = None
+            raise UpdateError(code if code in ("signature_invalid", "unsupported_platform", "configuration_changed",
+                                              "health_failed", "lease_lost") else fallback)
+        return json.loads(result.stdout)
 
     def protected(self, cfg):
         return self.js(cfg, HERE / "agent.mjs", ["hashes", self.file, self.updater_root / "probe"])
@@ -528,10 +538,27 @@ class Native:
                 time.sleep(1)
 
     def proof(self, request):
-        value = read(Path(request["job"]) / "model-proof.json")
-        require(value.get("passed") is True and value.get("codeyModel") is True and value.get("codexModel") is True
-                and value.get("syntheticSessionArchived") is True and value.get("digest") == request["digest"]
-                and value.get("jobId") == request["jobId"], "model_failed")
+        health_only = "acceptance" in request
+        require(not health_only or request["acceptance"] == "authenticated-health-v1")
+        code = "health_failed" if health_only else "model_failed"
+        try:
+            value = read(Path(request["job"]) / ("health-proof.json" if health_only else "model-proof.json"))
+        except (OSError, ValueError) as error:
+            raise UpdateError(code) from error
+        require(value.get("passed") is True and value.get("digest") == request["digest"]
+                and value.get("jobId") == request["jobId"], code)
+        if health_only:
+            component = request["release"]["components"]["codey"]
+            require(request.get("version") == component["version"] and
+                    request.get("entrySha256") == component["entrySha256"], "signature_invalid")
+            require(value.get("schema") == 1 and value.get("acceptance") == request["acceptance"] and
+                    value.get("healthy") is True and value.get("authenticated") is True and
+                    value.get("modelRequests") is False and value.get("version") == component["version"] and
+                    value.get("entrySha256") == component["entrySha256"] and
+                    type(value.get("checkedAt")) is int and value["checkedAt"] > 0, code)
+        else:
+            require(value.get("codeyModel") is True and value.get("codexModel") is True and
+                    value.get("syntheticSessionArchived") is True, code)
 
     def rollback(self, journal, request):
         job = Path(request["job"])
@@ -561,6 +588,7 @@ class Native:
         with lock_file(checked_path(self.config_root / "install.lock", self.home)):
             request = self.request(file)
             require(request.get("changed") is changed)
+            require(request.get("acceptance") == "authenticated-health-v1")
             job = Path(request["job"])
             require(not (job / "local-update.json").exists())
             self.unchanged(request["plan"])
@@ -610,8 +638,10 @@ class Native:
                     # Verification-only cannot justify a restart or rollback.
                     journal["state"] = "aborted"
                     save(job / "local-update.json", journal)
-                    raise UpdateError("model_failed") from original
-                return self.rollback(journal, request)
+                    raise
+                result = self.rollback(journal, request)
+                result["code"] = original.code if isinstance(original, UpdateError) else "health_failed"
+                return result
 
     def recover(self, file):
         with lock_file(checked_path(self.config_root / "install.lock", self.home)):

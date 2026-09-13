@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readJson, requireValue } from "../windows/client.mjs";
-import { verifyRequest } from "../windows/verify.mjs";
+import { verifyRequest, verificationCode } from "../windows/verify.mjs";
 import { Runtime, validateConfig } from "./runtime.mjs";
 
 async function main() {
@@ -21,5 +21,10 @@ async function main() {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch(() => { console.error("model_failed"); process.exitCode = 1; });
+  main().catch(error => {
+    const code = verificationCode(error);
+    console.log(JSON.stringify({ passed: false, code, modelRequests: false }));
+    console.error(code);
+    process.exitCode = 1;
+  });
 }

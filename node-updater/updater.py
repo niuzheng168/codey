@@ -147,7 +147,20 @@ class Agent:
             self.pending.unlink()
             return {"state": "rolled_back"}
         if transaction and transaction["state"] == "succeeded":
-            self.runtime.health(self.runtime.snapshot())
+            snapshot = self.runtime.snapshot()
+            self.runtime.health(snapshot)
+            if "acceptance" in transaction:
+                require(transaction["acceptance"] == "authenticated-health-v1", "configuration_changed")
+                proof = read(work / "health-proof.json")
+                component = snapshot["components"].get("codey", {})
+                require(proof.get("schema") == 1 and proof.get("acceptance") == transaction["acceptance"]
+                        and proof.get("passed") is True and proof.get("healthy") is True
+                        and proof.get("authenticated") is True and proof.get("modelRequests") is False
+                        and proof.get("digest") == transaction.get("digest") == job.get("digest")
+                        and proof.get("jobId") == job["id"]
+                        and type(proof.get("checkedAt")) is int and proof["checkedAt"] > 0
+                        and all(proof.get(key) == component.get(key) for key in ("version", "entrySha256")),
+                        "health_failed")
             notify("succeeded", "ok")
             self.pending.unlink()
             return {"state": "succeeded"}

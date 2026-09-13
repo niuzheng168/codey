@@ -310,7 +310,7 @@ if (root) {
       $("plan-note").textContent = `Codey ${plan.components.codey.version}：按各机器平台匹配同一应用包。\n${plan.warning}`;
       $("plan-targets").replaceChildren();
       for (const node of plan.targets) $("plan-targets").append(element("p",
-        `${node.name}${node.platform ? ` · ${platformLabel(node.platform)}` : ""}：${node.eligible ? `${node.verificationOnly ? "Codey 包未变化，仅验收模型，不重启" : "更新 Codey 整包"}${node.deferred ? "（等待上线）" : ""}` : labels[node.reason] || node.reason}${node.notes ? ` · ${node.notes}` : ""}`));
+        `${node.name}${node.platform ? ` · ${platformLabel(node.platform)}` : ""}：${node.eligible ? `${node.verificationOnly ? "Codey 包未变化，仅检查版本与健康状态，不重启" : "更新 Codey 应用包，复用未变化的依赖"}${node.deferred ? "（等待上线）" : ""}` : labels[node.reason] || node.reason}${node.notes ? ` · ${node.notes}` : ""}`));
       $("plan-error").textContent = "";
       $("confirm").showModal();
     } catch (error) { notice(error.message, true); }

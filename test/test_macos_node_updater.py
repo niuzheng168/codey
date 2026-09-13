@@ -68,8 +68,8 @@ class Fixture(native.Native):
         self.domain, self.target = f"gui/{os.getuid()}", target
         self.processes, self.live, self.disabled_jobs = Processes(), {}, set()
         self.mutations, self.events, self.model_calls = [], [], 0
-        self.sessions, self.sockets, self.model_failure, self.health_failure = 0, False, False, False
-        self.reject_signature, self.crash_start, self.crash_model, self.bootstrap_failure = False, False, False, False
+        self.sessions, self.sockets, self.acceptance_failure, self.health_failure = 0, False, False, False
+        self.reject_signature, self.crash_start, self.crash_acceptance, self.bootstrap_failure = False, False, False, False
         self.next_pid = 400
         self.after_stop = None
         for directory in (self.root, self.config_root, self.private, self.updater_root, self.local_state, self.jobs):
@@ -235,15 +235,17 @@ class Fixture(native.Native):
             native.require(not self.reject_signature, "signature_invalid")
             return {"verified": True}
         if str(script).endswith("/verify.mjs"):
-            self.model_calls += 1
-            if self.model_failure:
-                raise native.UpdateError("model_failed")
+            if self.acceptance_failure:
+                raise native.UpdateError("health_failed")
             request = native.read(args[0])
-            write(Path(request["job"]) / "model-proof.json", {
-                "passed": True, "codeyModel": True, "codexModel": True, "syntheticSessionArchived": True,
+            native.require(request["acceptance"] == "authenticated-health-v1")
+            write(Path(request["job"]) / "health-proof.json", {
+                "schema": 1, "acceptance": request["acceptance"], "passed": True, "healthy": True,
+                "authenticated": True, "modelRequests": False, "checkedAt": 1000,
+                "version": request["version"], "entrySha256": request["entrySha256"],
                 "jobId": request["jobId"], "digest": request["digest"],
             })
-            if self.crash_model:
+            if self.crash_acceptance:
                 raise SimulatedCrash()
             return {"passed": True}
         raise AssertionError((script, args))
@@ -254,9 +256,12 @@ class Fixture(native.Native):
         candidate = self.package(job / "app/node_modules/codey", "0.1.5") if changed else Path(self.initial["codeyDirectory"])
         request = {
             "schema": 1, "job": str(job), "jobId": job.name, "agentConfig": str(self.private / "config.json"),
+            "acceptance": "authenticated-health-v1",
+            "version": "0.1.5" if changed else "0.1.2", "entrySha256": native.digest(candidate / "codey-build.json"),
             "plan": self.snapshot(), "candidate": str(candidate), "changed": changed, "digest": "f" * 64,
             "release": {"id": "codey-macos-fixture", "sequence": 9,
-                        "components": {"codey": {"version": "0.1.5", "entrySha256": native.digest(candidate / "codey-build.json")}}},
+                        "components": {"codey": {"version": "0.1.5" if changed else "0.1.2",
+                                                "entrySha256": native.digest(candidate / "codey-build.json")}}},
         }
         write(job / "request.json", request)
         write(self.local_state / "active.json", {"job": str(job)})
@@ -367,24 +372,24 @@ class MacUpdaterTests(unittest.TestCase):
         current = native.read(self.native.file)
         changes = {key for key in current if current[key] != before[key]}
         self.assertEqual(changes, {"codeyDirectory", "codeyBin", "codeyEntrySha256", "releaseId"})
-        self.assertEqual(self.native.model_calls, 1)
+        self.assertEqual(self.native.model_calls, 0)
         actions = list(self.native.mutations)
         self.assertEqual([action for action, _ in actions], ["stop", "start"])
         self.assertTrue(all(name.endswith(".codey") for _, name in actions))
         self.assertEqual(self.native.recover(job / "local-update.json")["state"], "complete")
-        self.assertEqual(self.native.model_calls, 1)
+        self.assertEqual(self.native.model_calls, 0)
         self.assertEqual(self.native.mutations, actions)
         self.assertIn("receipt-expired", self.native.events)
         self.assertEqual(self.native.protected(current), request["plan"]["protected"])
 
-    def test_model_failure_rolls_back_without_restoring_databases_or_changing_tunnel(self):
+    def test_acceptance_failure_rolls_back_without_restoring_databases_or_changing_tunnel(self):
         before = self.native.file.read_bytes()
         job, _ = self.native.job()
-        self.native.model_failure = True
+        self.native.acceptance_failure = True
         self.assertEqual(self.native.activate(job / "request.json")["state"], "rolled_back")
         self.assertEqual(self.native.file.read_bytes(), before)
         self.assertTrue(all(name.endswith(".codey") for _, name in self.native.mutations))
-        self.assertEqual(self.native.model_calls, 1)
+        self.assertEqual(self.native.model_calls, 0)
 
     def test_candidate_health_failure_rolls_back_before_a_model_call(self):
         job, _ = self.native.job()
@@ -427,17 +432,17 @@ class MacUpdaterTests(unittest.TestCase):
         self.assertEqual(native.read(self.native.file), self.native.initial)
         self.assertEqual(self.native.model_calls, 0)
 
-    def test_ambiguous_model_completion_rolls_back_but_never_resends_a_model(self):
+    def test_ambiguous_health_completion_rolls_back_without_models(self):
         job, _ = self.native.job()
-        self.native.crash_model = True
+        self.native.crash_acceptance = True
         with self.assertRaises(SimulatedCrash):
             self.native.activate(job / "request.json")
         self.assertEqual(self.native.recover(job / "local-update.json")["state"], "rolled_back")
-        self.assertEqual(self.native.model_calls, 1)
+        self.assertEqual(self.native.model_calls, 0)
 
     def test_recovery_defers_when_new_desktop_work_exists(self):
         job, _ = self.native.job()
-        self.native.crash_model = True
+        self.native.crash_acceptance = True
         with self.assertRaises(SimulatedCrash):
             self.native.activate(job / "request.json")
         actions = list(self.native.mutations)
@@ -446,17 +451,50 @@ class MacUpdaterTests(unittest.TestCase):
             self.native.recover(job / "local-update.json")
         self.assertEqual(error.exception.code, "busy")
         self.assertEqual(self.native.mutations, actions)
-        self.assertEqual(self.native.model_calls, 1)
+        self.assertEqual(self.native.model_calls, 0)
 
-    def test_completed_journal_requires_bound_model_proof(self):
+    def test_completed_journal_requires_bound_health_proof(self):
         job, _ = self.native.job()
         self.native.activate(job / "request.json")
-        proof = native.read(job / "model-proof.json")
-        write(job / "model-proof.json", {**proof, "digest": "wrong"})
+        proof = native.read(job / "health-proof.json")
         actions = list(self.native.mutations)
+        for change in ({"digest": "wrong"}, {"jobId": "wrong"}, {"version": "wrong"}, {"entrySha256": "wrong"},
+                       {"authenticated": False}, {"healthy": False}, {"passed": False}, {"modelRequests": True},
+                       {"checkedAt": 0}):
+            write(job / "health-proof.json", {**proof, **change})
+            with self.subTest(change=change), self.assertRaises(native.UpdateError):
+                self.native.recover(job / "local-update.json")
+        self.assertEqual(self.native.mutations, actions)
+
+    def test_historical_complete_requires_its_original_model_proof_without_rerunning_inference(self):
+        job, request = self.native.job()
+        self.native.activate(job / "request.json")
+        del request["acceptance"]
+        write(job / "request.json", request)
+        # Simulate an existing, previously completed real-model receipt.
+        proof = {"passed": True, "codeyModel": True, "codexModel": True, "syntheticSessionArchived": True,
+                 "jobId": request["jobId"], "digest": request["digest"]}
+        write(job / "model-proof.json", proof)
+        actions = list(self.native.mutations)
+        self.assertEqual(self.native.recover(job / "local-update.json")["state"], "complete")
+        write(job / "model-proof.json", {**proof, "codeyModel": False})
         with self.assertRaises(native.UpdateError):
             self.native.recover(job / "local-update.json")
+        self.assertEqual(self.native.model_calls, 0)
         self.assertEqual(self.native.mutations, actions)
+
+    def test_unknown_acceptance_and_old_incomplete_requests_never_run_models(self):
+        job, request = self.native.job()
+        for policy in ("unknown", None):
+            if policy is None:
+                request.pop("acceptance", None)
+            else:
+                request["acceptance"] = policy
+            write(job / "request.json", request)
+            with self.assertRaises(native.UpdateError):
+                self.native.activate(job / "request.json")
+        self.assertEqual(self.native.model_calls, 0)
+        self.assertEqual(self.native.mutations, [])
 
     def test_config_changed_after_stop_is_not_overwritten_by_rollback(self):
         job, _ = self.native.job()
@@ -469,7 +507,7 @@ class MacUpdaterTests(unittest.TestCase):
 
     def test_verification_only_failure_does_not_restart_or_change_code(self):
         job, _ = self.native.job(changed=False)
-        self.native.model_failure = True
+        self.native.acceptance_failure = True
         with self.assertRaises(native.UpdateError):
             self.native.activate(job / "request.json", changed=False)
         self.assertEqual(native.read(job / "local-update.json")["state"], "aborted")

@@ -63,11 +63,19 @@ release ID. Node, Python, the Codex CLI/app-server/Desktop, DevTunnel, helpers,
 credentials, auth/session databases and the other LaunchAgents are not updated.
 Rollback never restores an old database or old model keys.
 
-Authenticated local health, one isolated Codey model check, one ephemeral
-read-only Codex CLI check and archival of the synthetic Codey session are required
-before recording success. The updater is independent of the app it restarts.
+Package/version fingerprints, native modules, startup and authenticated local health
+are required before recording success. Whole-Codey updates, including same-package jobs,
+never send model requests, create synthetic sessions or invoke `codex exec`.
+New requests mark `authenticated-health-v1`; `health-proof.json` binds the job, signed
+digest, version and entry hash with `modelRequests: false`, not invented model success.
+Matching dependencies reference the retained owner-checked tree without a full copy,
+reinstall or rebuild. Do not delete referenced old releases/backups.
+The updater is independent of the app it restarts.
 It saves completion before acknowledging Portal; lost acknowledgement/restarts
 never repeat a completed model check or reinstall.
+Historical completed requests without the health-only marker still require their original
+real-model receipt. Incomplete historical transactions roll back; no recovery reruns
+inference or rewrites failed/rolled-back jobs as success.
 
 ## Recovery
 
@@ -96,5 +104,5 @@ an unknown runtime to make recovery succeed. A busy/newly changed node requires
 inspection or completion of its user work. No automatic tool update is included.
 
 This implementation requires target-Mac acceptance (including native modules,
-launchd restart, real models and sleep/login behavior). Passing Linux fixtures
+launchd restart, authenticated health and sleep/login behavior; no automatic model tests). Passing Linux fixtures
 is **not** evidence that those tests ran on `zhn-mac` or an Intel Mac.

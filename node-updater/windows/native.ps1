@@ -8,6 +8,33 @@ $wantedInput = $InputFile
 . (Join-Path $PSScriptRoot 'lib\update-windows.ps1') -Library
 $Operation = $wantedOperation
 $InputFile = $wantedInput
+$script:failureCode = 'configuration_changed'
+
+function Get-AgentFailureCode {
+    param($Failure, [string]$Default = 'health_failed')
+    $code = $Failure.Exception.Data['CodeyUpdateCode']
+    if ($code -in @('signature_invalid', 'unsupported_platform', 'configuration_changed', 'health_failed', 'lease_lost',
+        'model_failed', 'busy', 'rollback_failed')) { return $code }
+    return $Default
+}
+function Assert-AgentProof {
+    param($Request, $Proof)
+    if ($Request.PSObject.Properties['acceptance']) {
+        Require-Update ($Request.acceptance -eq 'authenticated-health-v1') 'Unknown acceptance policy.'
+        $component = $Request.release.components.codey
+        Require-Update ($Request.version -eq $component.version -and $Request.entrySha256 -eq $component.entrySha256 -and
+            $Proof.schema -eq 1 -and $Proof.acceptance -eq $Request.acceptance -and
+            $Proof.passed -eq $true -and $Proof.healthy -eq $true -and $Proof.authenticated -eq $true -and
+            $Proof.modelRequests -is [bool] -and -not $Proof.modelRequests -and
+            $Proof.digest -eq $Request.digest -and $Proof.jobId -eq $Request.jobId -and
+            $Proof.version -eq $component.version -and $Proof.entrySha256 -eq $component.entrySha256 -and
+            $Proof.checkedAt -gt 0) 'Completed authenticated health proof is missing or differs from the release.'
+    } else {
+        Require-Update ($Proof.passed -eq $true -and $Proof.codeyModel -eq $true -and $Proof.codexModel -eq $true -and
+            $Proof.syntheticSessionArchived -eq $true -and $Proof.digest -eq $Request.digest -and
+            $Proof.jobId -eq $Request.jobId) 'Completed historical model proof is missing.'
+    }
+}
 
 function Get-AgentProtectedHashes {
     # Core discovery first validates owner/path/junction bindings.
@@ -55,19 +82,24 @@ function Get-AgentSnapshot {
             'The running Codey process does not match runtime.json.'
         $pidValue = [int]$status.pid
         $version = (Read-UpdateJson (Join-Path $config.codeyDirectory 'package.json')).version
+        $script:failureCode = 'health_failed'
         Invoke-UpdateProbe $config (Join-Path $PSScriptRoot 'lib') 'health' $version
     }
     return @{ ok = $true; kind = 'windows-managed'; root = $config.codeyDirectory; node = $config.nodeExe
         jobsRoot = $jobsRoot; pid = $pidValue; services = @("Codey Machine $($config.nodeId) codey")
         otherTasks = Get-OtherAgentTasks }
 }
-function Invoke-AgentModels {
-    param([string]$RequestFile)
+function Invoke-AgentAcceptance {
+    param([string]$RequestFile, $Request)
     $result = Invoke-CodeyProcess $config.nodeExe @((Join-Path $PSScriptRoot 'verify.mjs'), $RequestFile) `
-        -WorkingDirectory $owner.Home -TimeoutSeconds 240
+        -WorkingDirectory $owner.Home -TimeoutSeconds 240 -AllowFailure
     $proof = $result.Stdout | ConvertFrom-Json
-    Require-Update ($proof.passed -and $proof.codeyModel -and $proof.codexModel -and $proof.syntheticSessionArchived) `
-        'Codey/Codex real-model verification failed.'
+    if ($result.ExitCode -ne 0) {
+        $errorValue = [InvalidOperationException]::new('Codey acceptance failed.')
+        if ($proof.PSObject.Properties['code']) { $errorValue.Data['CodeyUpdateCode'] = $proof.code }
+        throw $errorValue
+    }
+    Assert-AgentProof $Request $proof
 }
 function Recover-AgentTransaction {
     param($Journal, [string]$Job)
@@ -78,10 +110,11 @@ function Recover-AgentTransaction {
         } else {
             Require-Update ((Get-UpdateHash $configFile) -eq $Journal.request.plan.configHash) 'Verified runtime changed.'
         }
+        $script:failureCode = 'health_failed'
         Wait-UpdatedCodey $config $Job $Journal.request.version
-        $proof = Read-UpdateJson (Join-Path $Job 'model-proof.json')
-        Require-Update ($proof.passed -and $proof.codeyModel -and $proof.codexModel -and $proof.syntheticSessionArchived -and
-            $proof.digest -eq $Journal.request.digest -and $proof.jobId -eq $Journal.request.jobId) 'Completed model proof is missing.'
+        $proofFile = if ($Journal.request.PSObject.Properties['acceptance']) { 'health-proof.json' } else { 'model-proof.json' }
+        if ($proofFile -eq 'model-proof.json') { $script:failureCode = 'model_failed' }
+        Assert-AgentProof $Journal.request (Read-UpdateJson (Join-Path $Job $proofFile))
         return @{ ok = $true; state = 'complete' }
     }
     if ($Journal.state -in @('rolled_back', 'aborted')) { return @{ ok = $true; state = $Journal.state } }
@@ -123,24 +156,31 @@ try {
         $mutex = [Threading.Mutex]::new($false, ('Local\CodeyWindowsInstall-' + $owner.Sid))
         $held = $false
         try {
+            $script:failureCode = 'busy'
             try { $held = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $held = $true }
             Require-Update $held 'Another installer or local update is running.'
+            $script:failureCode = 'configuration_changed'
             if ($Operation -eq 'recover') {
+                $script:failureCode = 'rollback_failed'
                 $result = Recover-AgentTransaction $document $job
             } else {
+                Require-Update ($request.acceptance -eq 'authenticated-health-v1') 'A new health-only request is required.'
                 Require-Update ((Get-UpdateHash $configFile) -eq $request.plan.configHash) 'Runtime changed before activation.'
                 Assert-AgentProtected $request.plan.protected
                 Require-Update ($request.agentConfig -eq (Join-Path $owner.Home '.config\codey-updater\config.json')) `
                     'Agent configuration path changed.'
                 if ($request.changed) {
+                    $script:failureCode = 'busy'
                     Assert-ExternalUpdate
                     Invoke-UpdateProbe $config $job 'idle'
                     Assert-ModelIdle
                     # Recheck every staged application file while holding the
                     # shared installer mutex, immediately before any service stop.
+                    $script:failureCode = 'signature_invalid'
                     $null = Invoke-CodeyProcess $config.nodeExe @((Join-Path $PSScriptRoot 'agent.mjs'),
                         'candidate', $InputFile) -WorkingDirectory $owner.Home -TimeoutSeconds 60
                 }
+                $script:failureCode = 'signature_invalid'
                 $candidate = Assert-CodeyPath $request.candidate $config.runtimeRoot
                 $build = Read-UpdateJson (Join-Path $candidate 'codey-build.json')
                 Require-Update ((Get-UpdateHash (Join-Path $candidate 'codey-build.json')) -eq $request.entrySha256 -and
@@ -148,6 +188,7 @@ try {
                 $journal = [pscustomobject]@{ schema = 1; kind = 'windows-managed'; state = 'applying'
                     request = $request; changed = [bool]$request.changed; beforeHash = $null; afterHash = $null }
                 if ($request.changed) {
+                    $script:failureCode = 'configuration_changed'
                     $beforeFile = Join-Path $job 'runtime-before.json'
                     [IO.File]::WriteAllBytes($beforeFile, [IO.File]::ReadAllBytes($configFile))
                     Protect-CodeyPath $beforeFile
@@ -159,26 +200,32 @@ try {
                     Require-Update ($journal.beforeHash -eq $request.plan.configHash) 'Concurrent runtime modification.'
                 }
                 Write-CodeyJson (Join-Path $job 'local-update.json') $journal
+                $script:failureCode = 'configuration_changed'
                 try {
                     if ($request.changed) {
                         Set-CodeyTaskState $config $configFile @('codey')
                         Wait-CodeyStopped
                         Require-Update ((Get-UpdateHash $configFile) -eq $journal.beforeHash) 'Runtime changed during stop.'
                         Write-CodeyFile $configFile ([IO.File]::ReadAllText($afterFile, [Text.Encoding]::UTF8))
+                        $script:failureCode = 'health_failed'
                         Set-CodeyTaskState $next $configFile @('codey') -Start
                         Wait-UpdatedCodey $next $job $request.version
                     }
-                    Invoke-AgentModels $InputFile
+                    $script:failureCode = 'health_failed'
+                    Invoke-AgentAcceptance $InputFile $request
+                    $script:failureCode = 'configuration_changed'
                     Assert-AgentProtected $request.plan.protected
                     $expectedHash = if ($request.changed) { $journal.afterHash } else { $request.plan.configHash }
-                    Require-Update ((Get-UpdateHash $configFile) -eq $expectedHash) 'Runtime changed during model checks.'
+                    Require-Update ((Get-UpdateHash $configFile) -eq $expectedHash) 'Runtime changed during acceptance checks.'
                     $journal.state = 'complete'
                     Write-CodeyJson (Join-Path $job 'local-update.json') $journal
                     $result = @{ ok = $true; state = 'complete' }
                 } catch {
+                    $code = Get-AgentFailureCode $_ $script:failureCode
                     if ($request.changed) {
+                        $script:failureCode = 'rollback_failed'
                         Restore-LocalUpdate $journal $job
-                        $result = @{ ok = $true; state = 'rolled_back'; code = 'health_failed' }
+                        $result = @{ ok = $true; state = 'rolled_back'; code = $code }
                     } else {
                         $journal.state = 'aborted'
                         Write-CodeyJson (Join-Path $job 'local-update.json') $journal
@@ -191,5 +238,5 @@ try {
     $result | ConvertTo-Json -Depth 18 -Compress
 } catch {
     # No credentials, process command lines, raw model output or runtime JSON.
-    @{ ok = $false; code = 'configuration_changed' } | ConvertTo-Json -Compress
+    @{ ok = $false; code = (Get-AgentFailureCode $_ $script:failureCode) } | ConvertTo-Json -Compress
 }

@@ -69,6 +69,7 @@ async function fixture(t, options = {}) {
       return { ok: true, state: options.recoveryState || "rolled_back" };
     }
     const request = await readJson(file);
+    assert.equal(request.acceptance, "authenticated-health-v1");
     assert.equal(checkedReceipt(request, config.releasePublicKey, { platform: config.platform }).digest, signed.digest);
     const state = options.rollback ? "rolled_back" : "complete";
     await save(path.join(request.job, "local-update.json"), { state, request, kind: "macos-managed" });
@@ -131,7 +132,7 @@ test("wrong-architecture signatures, invalid signatures and replayed release seq
   }
 });
 
-test("busy or changed Mac stops before activation, while health/model failure cannot record installation", async t => {
+test("busy or changed Mac stops before activation, while health failure cannot record installation", async t => {
   for (const options of [{ busy: true }, { drift: true }, { rollback: true }]) {
     const f = await fixture(t, options);
     const result = await f.agent.once();

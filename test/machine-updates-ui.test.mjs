@@ -231,7 +231,7 @@ test("single-machine action only previews its node; no job is sent until explici
   assert.equal(p.requests.filter((row) => row.url.endsWith("/jobs")).length, 0);
   assert.ok(p.get("plan-targets").textContent.includes("<img src=x onerror=evil()>"));
   assert.match(p.get("plan-note").textContent, /Codey 0\.2\.0/);
-  assert.match(p.get("plan-targets").textContent, /更新 Codey 整包/);
+  assert.match(p.get("plan-targets").textContent, /更新 Codey 应用包，复用未变化的依赖/);
   assert.doesNotMatch(p.get("plan-targets").textContent, /cloudcli|copilotApi/);
   await p.get("apply").click();
   const jobs = p.requests.filter((row) => row.url.endsWith("/jobs"));

@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readPackageInfo, runtimePlatform } from "./package-info.mjs";
 import { inspectUpdateArchive } from "./update-archive.mjs";
-import { copyDependencies, EXTRACT_PACKAGE, reusableDependencies, verifyDependencyTree } from "./update-dependencies.mjs";
+import { EXTRACT_PACKAGE, linkDependencies, relocateDependencyLink, reusableDependencies, verifyDependencyBinding, verifyDependencyTree } from "./update-dependencies.mjs";
 import {
   atomicWrite, buildEnvironment, controlEnvironment, execute, exists, fileHash, findNpm, inside, ownedPath, privateDirectory, readInstalledPackageInfo, readJson,
 } from "./update-files.mjs";
@@ -22,8 +22,8 @@ export const UPDATE_HELP = `Usage: codey update PACKAGE.tgz [--check] [--offline
 Select exactly one component. The original PACKAGE.tgz syntax updates only Codey.
 Uses the existing Node/npm and locked dependencies. Never calls setup, installs
 Node/Python, changes model configuration, or contacts a model.
-Identical dependency locks reuse a private copy of the installed dependencies,
-without registry access or install hooks. --offline requires this reuse path;
+Identical dependency locks directly reuse the installed dependencies, without
+copying their files, registry access or install hooks. --offline requires this reuse path;
 otherwise changed dependency locks use the normal npm installation path.
 Named tool updates require Codey >=0.1.3, an existing owner-managed installation,
 and a reviewed native distribution wrapped in a checksummed tool-update.json.
@@ -190,7 +190,7 @@ async function compatibility(archive, plan, command, home) {
   return { npm, nodeVersion };
 }
 
-export async function verifyStagedPackage(root, artifact) {
+export async function verifyStagedPackage(root, artifact, { home = os.homedir() } = {}) {
   const info = await readPackageInfo(root);
   if (info.entrySha256 !== artifact.entrySha256 || info.pkg.version !== artifact.pkg.version) throw new Error("Installed package differs from the reviewed archive.");
   for (const [name, expected] of artifact.files) {
@@ -202,10 +202,11 @@ export async function verifyStagedPackage(root, artifact) {
       throw new Error(`Installed Codey file differs from the archive: ${name}`);
     }
   }
+  await verifyDependencyBinding(root, artifact.lock, { home });
   return info;
 }
 
-export async function stagePackage(artifact, plan, job, { command = execute, npm, reuseDependencies = false } = {}) {
+export async function stagePackage(artifact, plan, job, { command = execute, npm, reuseDependencies = false, ownerHome = os.homedir() } = {}) {
   const home = path.join(job, "build-home");
   await mkdir(home, { mode: 0o700 });
   const env = buildEnvironment(home, plan.node);
@@ -218,10 +219,11 @@ export async function stagePackage(artifact, plan, job, { command = execute, npm
     env.npm_config_cache, "sha256-" + Buffer.from(artifact.sha256, "hex").toString("base64")], {
     env, cwd: job, log: path.join(job, "npm-extract.private.log"), timeout: 120000,
   });
-  await verifyStagedPackage(root, artifact);
+  await verifyStagedPackage(root, artifact, { home: ownerHome });
   if (reuseDependencies) {
-    await copyDependencies(plan.root, root, artifact.lock);
-    await verifyStagedPackage(root, artifact);
+    const reuse = await linkDependencies(plan.root, root, artifact.lock, { home: ownerHome });
+    await atomicWrite(path.join(job, "dependency-mode.json"), reuse);
+    await verifyStagedPackage(root, artifact, { home: ownerHome });
     await command(plan.node, [path.join(root, "bin/codey.mjs"), "doctor", "--json"], {
       env, cwd: home, log: path.join(job, "doctor.private.log"), timeout: 60000,
     });
@@ -240,11 +242,11 @@ export async function stagePackage(artifact, plan, job, { command = execute, npm
   await command(plan.node, [...npmArgs, "ci", "--prefix", root, "--ignore-scripts", ...flags], {
     env, cwd: root, log: path.join(job, "npm-install.private.log"), timeout: 1200000,
   });
-  await verifyStagedPackage(root, artifact);
+  await verifyStagedPackage(root, artifact, { home: ownerHome });
   await command(plan.node, [...npmArgs, "rebuild", "--prefix", root, ...flags], {
     env, cwd: root, log: path.join(job, "npm-rebuild.private.log"), timeout: 1200000,
   });
-  await verifyStagedPackage(root, artifact);
+  await verifyStagedPackage(root, artifact, { home: ownerHome });
   await command(plan.node, [path.join(root, "bin/codey.mjs"), "doctor", "--json"], {
     env, cwd: home, log: path.join(job, "doctor.private.log"), timeout: 60000,
   });
@@ -271,6 +273,7 @@ export async function activateStandalone(request, { home, idle = assertStandalon
   await recordState(job, journal, "applying");
   try {
     await rename(plan.root, backup);
+    await relocateDependencyLink(candidate, plan.root, backup, { home });
     await rename(candidate, plan.root);
     const after = await readPackageInfo(plan.root);
     if (after.entrySha256 !== request.entrySha256) throw new Error("Activated package fingerprint mismatch.");
@@ -412,7 +415,7 @@ export async function runUpdate(root, args, {
   if (options.offline && !reuseDependencies) {
     throw new Error("--offline requires installed dependencies matching the new package lock; nothing was installed or changed.");
   }
-  if (reuseDependencies) await verifyDependencyTree(root, artifact.lock);
+  if (reuseDependencies) await verifyDependencyTree(root, artifact.lock, { home, allowInstalledLink: true });
   if (plan.kind === "npm") {
     for (const name of ["CODEX_HOME", "COPILOT_API_HOME", "DATABASE_PATH"]) {
       const value = process.env[name];
@@ -427,7 +430,7 @@ export async function runUpdate(root, args, {
     layout: plan.kind, fromVersion: current.pkg.version, toVersion: artifact.pkg.version,
     sha256: artifact.sha256, node: plan.node, nodeVersion: tools.nodeVersion, services: plan.services,
     unchanged: artifact.entrySha256 === current.entrySha256, modelRequests: false,
-    dependencyMode: reuseDependencies ? "reuse-installed-offline" : "npm-install",
+    dependencyMode: reuseDependencies ? "reuse-installed-linked" : "npm-install",
   };
   if (options.check || report.unchanged) {
     log(JSON.stringify({ ...report, serviceChanges: false }));
@@ -461,8 +464,8 @@ export async function runUpdate(root, args, {
     if (plan.kind === "linux-managed") {
       for (const name of ["engine.py", "probe.mjs"]) await copyFile(path.join(root, "updater", name), path.join(job, name));
     }
-    const candidate = await stage(artifact, plan, job, { command, npm: tools.npm, reuseDependencies });
-    await verifyStagedPackage(candidate, artifact);
+    const candidate = await stage(artifact, plan, job, { command, npm: tools.npm, reuseDependencies, ownerHome: home });
+    await verifyStagedPackage(candidate, artifact, { home });
     if (interrupted) throw new Error("Update cancelled before activation; the old package is still installed.");
     const request = {
       schema: 1, plan, job, candidate, version: artifact.pkg.version, entrySha256: artifact.entrySha256,

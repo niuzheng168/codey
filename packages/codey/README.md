@@ -129,18 +129,23 @@ and session files. Merely installing the npm package never invokes setup.
 
 ## Update only Codey from a local npm package
 
-Starting with **0.1.6**, identical dependency locks automatically reuse a private
-copy of the installed dependency tree. Neither the package nor this update path
-includes/downloads Node or dependency archives. No npm registry request, native
-rebuild or install hook runs on this path. Native probes still verify the copied
-modules against the existing Node before activation. Changed locks use the normal
-npm path; add `--offline` to refuse that path rather than attempt a download.
+Routine updates directly reuse the installed dependency tree when dependency
+locks match, using a Windows directory junction or a Linux directory link.
+Only the Codey application is unpacked: no dependency files are copied, no Node
+or dependency archives are downloaded, and no npm install/rebuild hooks run.
+Owner, dependency graph, link target and Node ABI checks bind the retained tree;
+native probes still verify it before activation. Changed locks use the normal npm
+path; add `--offline` to refuse that path rather than attempt a download.
+Keep referenced old dependency directories: updates retain them for reuse and
+rollback, and never modify their contents. The 0.1.6/0.1.7 CLI's earlier copy-based
+implementation remains unchanged in those immutable published packages.
 
 For a one-time offline bootstrap from an older CLI, use the new release's installer
 with `--check --reuse-from /absolute/path/to/existing/node_modules/codey`, then run
 the resulting new CLI with `update PACKAGE.tgz --offline --installed-root OLD_ROOT`.
-`--check` leaves PATH and services untouched. The old dependency tree is copied,
-not moved or linked, so both activation and rollback remain independent.
+`--check` leaves PATH and services untouched. This explicit independent bootstrap
+copies dependencies so the separate installation does not depend on the donor's
+lifetime; normal `codey update` does not perform that copy.
 Do not use plain `npm install` for offline dependency reuse: normal npm installation
 still resolves the declared runtime dependencies. A fresh machine must supply its
 dependencies separately; a 7 MB application-only archive cannot replace them.

@@ -135,15 +135,42 @@ class FakeNpmRuntime(FakeRuntime):
             anchor.symlink_to(directory, target_is_directory=True)
         self.anchors = {"cloudcli": anchor, "copilotApi": anchor}
         self.profile = {"layout": "npm", "copilotService": "codey-copilot-api.service"}
+        self.native_checks = 0
+        self.health_failure = False
+
+    def check_codey(self, candidate, component, before, job):
+        self.native_checks += 1
+        engine.require(engine.sha(candidate / "codey-build.json") == component["entrySha256"], "stage_failed")
+
+    def health(self, snapshot):
+        if self.health_failure and snapshot["components"]["codey"]["version"] != "1.0.0":
+            (self.data / "user-data.txt").write_text("new user data written during verification")
+            raise engine.UpdateError("health_failed")
+        return True
+
+    def model(self, snapshot, job):
+        self.model_calls += 1
+        raise AssertionError("Whole-Codey updates must never invoke inference")
+
+    def runner(self, arguments, **options):
+        if arguments == ["/fixture/node", "-p", "process.versions.modules"]:
+            return "137"
+        return super().runner(arguments, **options)
 
     @staticmethod
     def npm_package(directory, version, commit):
         directory.mkdir(parents=True)
         engine.save(directory / "package.json", {
             "name": "codey", "version": version, "type": "module", "scripts": {},
+            "bin": {"codey": "bin/codey.mjs"}, "dependencies": {"fixture": "1.0.0"},
         })
         engine.save(directory / "npm-shrinkwrap.json", {
             "name": "codey", "version": version, "lockfileVersion": 3,
+            "packages": {
+                "": {"name": "codey", "version": version, "dependencies": {"fixture": "1.0.0"}},
+                "node_modules/fixture": {"version": "1.0.0", "integrity": "sha512-fixture", "optional": False,
+                                        "resolved": "https://registry.npmjs.org/fixture/-/fixture-1.0.0.tgz"},
+            },
         })
         for entry in ["bin/codey.mjs", "dist-server/server/index.js", "gateway/main.js"]:
             file = directory / entry
@@ -152,6 +179,9 @@ class FakeNpmRuntime(FakeRuntime):
         engine.save(directory / "codey-build.json", {
             "schema": 1, "name": "codey", "version": version, "sourceCommit": commit,
             "lockSha256": engine.sha(directory / "npm-shrinkwrap.json"),
+            "workspaceEntrySha256": engine.sha(directory / "dist-server/server/index.js"),
+            "gatewayEntrySha256": engine.sha(directory / "gateway/main.js"),
+            "runtimePlatforms": ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"],
             "cloudcli": {"version": version, "commit": commit},
             "copilotApi": {"version": version, "commit": commit},
         })
@@ -1009,13 +1039,21 @@ fs.writeFileSync(process.argv[3],key.publicKey.export({type:'spki',format:'pem'}
             ["systemctl", "--user", "start", "codey-cloudcli.service", "codey-copilot-api.service"],
         ])
         self.assertEqual((runtime.data / "config.json").read_bytes(), runtime.before_data)
+        self.assertEqual(runtime.model_calls, 0)
+        self.assertEqual(runtime.native_checks, 1)
+        proof = engine.read(job / "health-proof.json")
+        self.assertFalse(proof["modelRequests"])
+        self.assertEqual(proof["version"], "2.0.0")
+        self.assertEqual(proof["entrySha256"], manifest["components"]["codey"]["entrySha256"])
+        self.assertEqual((proof["jobId"], proof["digest"]), (job.name, "d" * 64))
 
     def test_npm_rollback_restores_the_whole_package_and_pin_without_restoring_stale_user_data(self):
-        runtime = FakeNpmRuntime(self.root / "home", model_failure=True)
+        runtime = FakeNpmRuntime(self.root / "home", directory_anchor=True)
+        runtime.health_failure = True
         before = runtime.snapshot()
         manifest, download = self.npm_release(runtime)
         job = runtime.root / "jobs" / ("a" * 32)
-        with patch.object(engine, "run", side_effect=runtime.runner):
+        with patch.object(engine, "run", side_effect=runtime.runner), patch("engine.time.monotonic", side_effect=[0, 0, 100]):
             result = engine.Upgrade(runtime, lambda *_: None, download).execute(manifest, "d" * 64, job)
         self.assertEqual(result["state"], "rolled_back")
         after = runtime.snapshot()
@@ -1025,6 +1063,330 @@ fs.writeFileSync(process.argv[3],key.publicKey.export({type:'spki',format:'pem'}
         self.assertEqual((runtime.data / "portal-build.json").read_bytes(), runtime.before_pin)
         self.assertEqual((runtime.data / "user-data.txt").read_text(), "new user data written during verification")
         self.assertTrue(all(len(action) == 5 for action in runtime.actions))
+        self.assertEqual(runtime.model_calls, 0)
+        self.assertFalse((job / "health-proof.json").exists())
+
+    def test_unchanged_npm_release_requires_native_and_health_checks_but_no_download_restart_or_models(self):
+        runtime = FakeNpmRuntime(self.root / "home", directory_anchor=True)
+        manifest, _ = self.npm_release(runtime)
+        before = runtime.snapshot()
+        manifest["components"]["codey"].update({key: before["components"]["codey"][key]
+                                               for key in ("version", "commit", "entrySha256")})
+        job = runtime.root / "jobs" / ("a" * 32)
+        with patch.object(runtime, "health", wraps=runtime.health) as health:
+            result = engine.Upgrade(runtime, lambda *_: None, lambda *_: self.fail("No download allowed")).execute(
+                manifest, "d" * 64, job)
+        self.assertEqual(result, {"state": "succeeded", "changed": []})
+        self.assertEqual(runtime.native_checks, 1)
+        health.assert_called_once()
+        self.assertEqual(runtime.model_calls, 0)
+        self.assertEqual(runtime.actions, [])
+        self.assertFalse(engine.read(job / "health-proof.json")["modelRequests"])
+
+    def test_npm_native_check_failures_never_stop_or_infer(self):
+        runtime = FakeNpmRuntime(self.root / "home", directory_anchor=True)
+        manifest, download = self.npm_release(runtime)
+        with patch.object(runtime, "check_codey", side_effect=engine.UpdateError("stage_failed")), \
+                self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
+            engine.Upgrade(runtime, lambda *_: None, download).execute(
+                manifest, "d" * 64, runtime.root / "jobs" / ("a" * 32))
+        self.assertEqual(runtime.actions, [])
+        self.assertEqual(runtime.model_calls, 0)
+
+    def test_npm_completed_recovery_requires_bound_health_proof_and_never_runs_models(self):
+        runtime = FakeNpmRuntime(self.root / "home", directory_anchor=True)
+        manifest, _ = self.npm_release(runtime)
+        before = runtime.snapshot()
+        manifest["components"]["codey"].update({key: before["components"]["codey"][key]
+                                               for key in ("version", "commit", "entrySha256")})
+        job = {"id": "a" * 32, "leaseToken": "b" * 43, "releaseId": manifest["id"], "state": "verifying",
+               "digest": "d" * 64}
+        work = runtime.root / "jobs" / job["id"]
+        engine.Upgrade(runtime, lambda *_: None, lambda *_: self.fail("No download")).execute(manifest, job["digest"], work)
+        proof = engine.read(work / "health-proof.json")
+        events = []
+        class Api:
+            def json(self, url, value):
+                if url.endswith("/poll"):
+                    return {"job": job}
+                events.append(value)
+                return {}
+        for change in ({"digest": "wrong"}, {"jobId": "wrong"}, {"version": "wrong"}, {"entrySha256": "wrong"},
+                       {"authenticated": False}, {"modelRequests": True}):
+            engine.save(runtime.private / "pending.json", job)
+            engine.save(work / "health-proof.json", {**proof, **change})
+            with patch.object(runtime, "report", return_value={}), self.subTest(change=change), \
+                    self.assertRaisesRegex(engine.UpdateError, "health_failed"):
+                Agent({}, runtime, Api()).once()
+        engine.save(work / "health-proof.json", proof)
+        with patch.object(runtime, "report", return_value={}):
+            self.assertEqual(Agent({}, runtime, Api()).once(), {"state": "succeeded"})
+        self.assertEqual(runtime.model_calls, 0)
+        self.assertEqual(runtime.native_checks, 1)
+        self.assertEqual(runtime.actions, [])
+        self.assertEqual([(entry["state"], entry["code"]) for entry in events], [("succeeded", "ok")])
+
+    def test_npm_native_doctor_requires_all_five_checks_and_signed_version_without_service_environment(self):
+        runtime = FakeNpmRuntime(self.root / "home", directory_anchor=True)
+        before = runtime.snapshot()
+        root = Path(before["cloudcliPath"])
+        component = {**before["components"]["codey"], "lockSha256": engine.sha(root / "npm-shrinkwrap.json")}
+        job = runtime.root / "jobs/native"
+        job.mkdir(parents=True)
+        proof = {**component, "ok": True, "name": "codey", "platform": "linux-x64",
+                 "sourceCommit": component["commit"], "modelRequests": False, "serviceChanges": False,
+                 "native": {key: True for key in ("sqlite", "bcrypt", "ripgrep", "pty", "codexSdk")}}
+        def runner(args, **options):
+            self.assertEqual(args[0], before["cloudcliNode"])
+            self.assertEqual(options["env"]["HOME"], str(job / "build-home"))
+            self.assertNotIn("CODEX_HOME", options["env"])
+            self.assertNotIn("--package-only", args)
+            self.assertNotIn("exec", args)
+            return component["version"] if args[-1] == "--version" else json.dumps(proof)
+        with patch("engine.run", side_effect=runner):
+            engine.Runtime.check_codey(runtime, root, component, before, job)
+            for name in proof["native"]:
+                proof["native"][name] = False
+                with self.subTest(native=name), self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
+                    engine.Runtime.check_codey(runtime, root, component, before, job)
+                proof["native"][name] = True
+
+    def npm_dependencies(self):
+        previous_umask = os.umask(0o077)
+        self.addCleanup(os.umask, previous_umask)
+        runtime = FakeNpmRuntime(self.root / "home", directory_anchor=True)
+        before = runtime.snapshot()
+        old = Path(before["cloudcliPath"])
+        modules = old / "node_modules"
+        modules.mkdir()
+        (modules / "fixture.js").write_text("same dependency inode")
+        engine.save(modules / "fixture/package.json", {"name": "fixture", "version": "1.0.0"})
+        candidate = runtime.root / "releases/reuse/codey"
+        FakeNpmRuntime.npm_package(candidate, "2.0.0", "b" * 40)
+        job = runtime.root / "jobs/reuse"
+        job.mkdir(parents=True)
+        command = patch("engine.run", side_effect=runtime.runner)
+        command.start()
+        self.addCleanup(command.stop)
+        return runtime, before, candidate, job, modules
+
+    def test_npm_dependency_fingerprint_ignores_only_app_and_root_lock_version_metadata(self):
+        old, candidate = self.root / "old", self.root / "candidate"
+        FakeNpmRuntime.npm_package(old, "0.1.6", "a" * 40)
+        FakeNpmRuntime.npm_package(candidate, "0.1.8", "b" * 40)
+        paths = [root / name for root in (old, candidate) for name in ("package.json", "npm-shrinkwrap.json")]
+        original = {file: file.read_bytes() for file in paths}
+        self.assertNotEqual(engine.sha(old / "npm-shrinkwrap.json"), engine.sha(candidate / "npm-shrinkwrap.json"))
+        self.assertEqual(engine.install_fingerprint(old), engine.install_fingerprint(candidate))
+        self.assertEqual({file: file.read_bytes() for file in paths}, original)
+        baseline = engine.read(candidate / "npm-shrinkwrap.json")
+        for key, value in (("version", "2.0.0"), ("integrity", "sha512-other"), ("optional", True)):
+            changed = copy.deepcopy(baseline)
+            changed["packages"]["node_modules/fixture"][key] = value
+            engine.save(candidate / "npm-shrinkwrap.json", changed)
+            with self.subTest(dependency_field=key):
+                self.assertNotEqual(engine.install_fingerprint(old), engine.install_fingerprint(candidate))
+        changed = copy.deepcopy(baseline)
+        changed["packages"][""]["dependencies"]["fixture"] = "2.0.0"
+        engine.save(candidate / "npm-shrinkwrap.json", changed)
+        self.assertNotEqual(engine.install_fingerprint(old), engine.install_fingerprint(candidate))
+        engine.save(candidate / "npm-shrinkwrap.json", baseline)
+        package = engine.read(candidate / "package.json")
+        engine.save(candidate / "package.json", {**package, "scripts": {"postinstall": "node changed-hook.js"}})
+        self.assertNotEqual(engine.install_fingerprint(old), engine.install_fingerprint(candidate))
+
+    def test_legacy_dependency_fingerprint_keeps_exact_lock_version_checks(self):
+        old, candidate = self.root / "old", self.root / "candidate"
+        for root, version in ((old, "0.1.6"), (candidate, "0.1.8")):
+            FakeRuntime.package(root, "cloudcli", version, "fixture", "a" * 40)
+            engine.save(root / "package-lock.json", {"lockfileVersion": 3, "version": version, "packages": {}})
+        self.assertNotEqual(engine.install_fingerprint(old), engine.install_fingerprint(candidate))
+
+    def test_linux_dependency_record_requires_the_cli_graph_platform_arch_and_abi(self):
+        lock = {"packages": {"": {"dependencies": {"fixture": "1.0.0"}},
+                             "node_modules/fixture": {"version": "1.0.0", "integrity": "sha512-fixture"}}}
+        record = engine.dependency_record(lock, self.root / "physical/node_modules", "137")
+        self.assertEqual(set(record), {"schema", "modules", "dependencySha256", "platform", "arch", "abi"})
+        self.assertEqual(engine.validate_dependency_record(record, lock, "137"), record)
+        for change in ({"schema": True}, {"abi": "127"}, {"abi": 137}, {"platform": "win32"},
+                       {"arch": "arm64"}, {"dependencySha256": "wrong"}, {"modules": "relative"}):
+            with self.subTest(change=change), self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
+                engine.validate_dependency_record({**record, **change}, lock, "137")
+        changed = copy.deepcopy(lock)
+        changed["packages"]["node_modules/fixture"]["version"] = "2.0.0"
+        with self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
+            engine.validate_dependency_record(record, changed, "137")
+
+    def test_legacy_link_adoption_checks_original_installed_package_and_lock(self):
+        runtime = FakeNpmRuntime(self.root / "home", directory_anchor=True)
+        root = runtime.anchors["cloudcli"]
+        lock = engine.read(root / "npm-shrinkwrap.json")
+        runtime.check_installed_codey(root, lock)
+        package = engine.read(root / "package.json")
+        engine.save(root / "package.json", {**package, "dependencies": {"fixture": "2.0.0"}})
+        with self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
+            runtime.check_installed_codey(root, lock)
+        engine.save(root / "package.json", package)
+        for change in ({"version": "wrong"}, {"runtimePlatforms": ["windows-x64"]}, {"lockSha256": "wrong"}):
+            original = engine.read(root / "codey-build.json")
+            engine.save(root / "codey-build.json", {**original, **change})
+            with self.subTest(change=change), self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
+                runtime.check_installed_codey(root, lock)
+            engine.save(root / "codey-build.json", original)
+        entry = root / "gateway/main.js"
+        entry.write_text("changed installed gateway")
+        with self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
+            runtime.check_installed_codey(root, lock)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX ownership and atomic directory symlinks")
+    def test_npm_matching_dependencies_use_no_copy_and_survive_anchor_moves_and_rollback(self):
+        runtime, before, candidate, job, modules = self.npm_dependencies()
+        inode = (modules / "fixture.js").stat().st_ino
+        with patch("engine.run", side_effect=runtime.runner) as command:
+            reference = engine.Runtime.prepare_dependencies(runtime, before, candidate, job)
+        command.assert_called_once_with([before["cloudcliNode"], "-p", "process.versions.modules"], timeout=10)
+        self.assertEqual(reference, {"relative": "node_modules", "modules": str(modules), "abi": "137",
+                                    "dependencySha256": engine.dependency_hash(engine.read(candidate / "npm-shrinkwrap.json"))})
+        self.assertEqual((candidate / "node_modules").resolve(), modules)
+        self.assertEqual(engine.read(candidate / engine.DEPENDENCY_LINK)["modules"], str(modules))
+        item = {"component": "codey", "anchor": before["codeyAnchor"], "target": str(candidate),
+                "kind": "directory", "previousTarget": before["cloudcliPath"], "backup": str(job / "backup/codey"),
+                "service": "codey-cloudcli.service", "services": ["codey-cloudcli.service", "codey-copilot-api.service"],
+                "dependencies": reference}
+        with patch("engine.run", side_effect=runtime.runner):
+            runtime.switch([item], job)
+            retained = job / "backup/codey/node_modules"
+            self.assertEqual((candidate / "node_modules").resolve(), retained)
+            self.assertEqual(engine.read(candidate / engine.DEPENDENCY_LINK)["modules"], str(retained))
+            self.assertEqual((retained / "fixture.js").stat().st_ino, inode)
+            self.assertEqual((candidate / "node_modules/fixture.js").read_text(), "same dependency inode")
+            runtime.rollback([item], job)
+        self.assertEqual((candidate / "node_modules").resolve(), modules)
+        self.assertEqual(engine.read(candidate / engine.DEPENDENCY_LINK)["modules"], str(modules))
+        self.assertEqual((modules / "fixture.js").stat().st_ino, inode)
+        self.assertFalse((runtime.root / "dependencies").exists())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX ownership and atomic directory symlinks")
+    def test_npm_linked_anchor_pins_actual_retained_dependencies_not_the_mutable_anchor(self):
+        runtime, before, candidate, job, modules = self.npm_dependencies()
+        reference = engine.Runtime.prepare_dependencies(runtime, before, candidate, job)
+        item = {"component": "codey", "anchor": before["codeyAnchor"], "target": str(candidate),
+                "kind": "directory", "previousTarget": before["cloudcliPath"], "backup": str(job / "backup/codey"),
+                "service": "codey-cloudcli.service", "services": ["codey-cloudcli.service", "codey-copilot-api.service"],
+                "dependencies": reference}
+        with patch("engine.run", side_effect=runtime.runner):
+            runtime.switch([item], job)
+        second = runtime.root / "releases/second/codey"
+        FakeNpmRuntime.npm_package(second, "3.0.0", "c" * 40)
+        source_record = (candidate / engine.DEPENDENCY_LINK).read_bytes()
+        with patch("engine.run", side_effect=runtime.runner) as command:
+            reference = engine.Runtime.prepare_dependencies(runtime, runtime.snapshot(), second, job)
+        command.assert_called_once_with(["/fixture/node", "-p", "process.versions.modules"], timeout=10)
+        self.assertNotIn("relative", reference)
+        self.assertEqual((candidate / engine.DEPENDENCY_LINK).read_bytes(), source_record)
+        self.assertEqual((second / "node_modules").resolve(), job / "backup/codey/node_modules")
+        self.assertEqual(engine.read(second / engine.DEPENDENCY_LINK)["modules"], str(job / "backup/codey/node_modules"))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX ownership and atomic directory symlinks")
+    def test_npm_interrupted_directory_move_recovers_dependency_references_without_copy(self):
+        runtime, before, candidate, job, modules = self.npm_dependencies()
+        reference = engine.Runtime.prepare_dependencies(runtime, before, candidate, job)
+        item = {"component": "codey", "anchor": before["codeyAnchor"], "target": str(candidate),
+                "kind": "directory", "previousTarget": before["cloudcliPath"], "backup": str(job / "backup/codey"),
+                "service": "codey-cloudcli.service", "services": ["codey-cloudcli.service", "codey-copilot-api.service"],
+                "dependencies": reference}
+        class Crash(BaseException):
+            pass
+        with patch("engine.run", side_effect=runtime.runner), \
+                patch.object(runtime, "rebind_dependencies", side_effect=Crash), self.assertRaises(Crash):
+            runtime.switch([item], job)
+        with patch("engine.run", side_effect=runtime.runner):
+            runtime.rollback(engine.read(job / "transaction.json")["anchors"], job)
+        self.assertTrue((candidate / "node_modules/fixture.js").is_file())
+        self.assertEqual((candidate / "node_modules").resolve(), modules)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX ownership and atomic dependency symlinks")
+    def test_interruption_between_dependency_pointer_and_record_relocation_is_recoverable(self):
+        runtime, before, candidate, job, modules = self.npm_dependencies()
+        reference = engine.Runtime.prepare_dependencies(runtime, before, candidate, job)
+        item = {"component": "codey", "anchor": before["codeyAnchor"], "target": str(candidate),
+                "kind": "directory", "previousTarget": before["cloudcliPath"], "backup": str(job / "backup/codey"),
+                "service": "codey-cloudcli.service", "services": ["codey-cloudcli.service", "codey-copilot-api.service"],
+                "dependencies": reference}
+        class Crash(BaseException):
+            pass
+        with patch.object(runtime, "write_dependency_record", side_effect=Crash), self.assertRaises(Crash):
+            runtime.switch([item], job)
+        self.assertEqual(os.readlink(candidate / "node_modules"), str(job / "backup/codey/node_modules"))
+        self.assertEqual(engine.read(candidate / engine.DEPENDENCY_LINK)["modules"], str(modules))
+        runtime.rollback(engine.read(job / "transaction.json")["anchors"], job)
+        self.assertEqual(os.readlink(candidate / "node_modules"), str(modules))
+        self.assertEqual(engine.read(candidate / engine.DEPENDENCY_LINK)["modules"], str(modules))
+        self.assertEqual(runtime.checked_dependency_binding(candidate, engine.read(candidate / "npm-shrinkwrap.json"), "137"),
+                         modules)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX ownership and dependency symlinks")
+    def test_npm_reuse_refuses_foreign_ownership_and_links_that_would_dangle_after_move(self):
+        runtime, before, candidate, job, modules = self.npm_dependencies()
+        with patch("engine.os.getuid", return_value=os.getuid() + 1), self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
+            engine.Runtime.prepare_dependencies(runtime, before, candidate, job)
+        (modules / "absolute-link").symlink_to(modules / "fixture.js")
+        with self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
+            engine.Runtime.prepare_dependencies(runtime, before, candidate, job)
+        self.assertFalse((candidate / "node_modules").exists())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX ownership and dependency symlinks")
+    def test_linux_stage_verifies_existing_cli_record_and_flattens_its_physical_target(self):
+        runtime, before, candidate, job, modules = self.npm_dependencies()
+        retained = runtime.home / "retained-modules"
+        os.rename(modules, retained)
+        modules.symlink_to(retained, target_is_directory=True)
+        old = Path(before["cloudcliPath"])
+        record = engine.dependency_record(engine.read(old / "npm-shrinkwrap.json"), retained, "137")
+        with self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
+            runtime.checked_dependency_binding(old, engine.read(old / "npm-shrinkwrap.json"), "137")
+        for change in ({"abi": "127"}, {"dependencySha256": "wrong"}, {"platform": "win32"}, {"arch": "arm64"},
+                       {"modules": str(runtime.home / "wrong-donor")}):
+            engine.save(old / engine.DEPENDENCY_LINK, {**record, **change})
+            with self.subTest(change=change), self.assertRaises((engine.UpdateError, OSError)):
+                engine.Runtime.prepare_dependencies(runtime, before, candidate, job)
+        engine.save(old / engine.DEPENDENCY_LINK, record)
+        original = (old / engine.DEPENDENCY_LINK).read_bytes()
+        reference = engine.Runtime.prepare_dependencies(runtime, before, candidate, job)
+        self.assertNotIn("relative", reference)
+        self.assertEqual(os.readlink(candidate / "node_modules"), str(retained))
+        self.assertEqual(engine.read(candidate / engine.DEPENDENCY_LINK), record)
+        self.assertEqual((old / engine.DEPENDENCY_LINK).read_bytes(), original)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX ownership and dependency symlinks")
+    def test_linux_adopts_only_guarded_historical_source_links_and_always_records_candidates(self):
+        runtime, before, candidate, job, modules = self.npm_dependencies()
+        retained = runtime.home / "retained-modules"
+        os.rename(modules, retained)
+        modules.symlink_to(retained, target_is_directory=True)
+        old = Path(before["cloudcliPath"])
+        lock = engine.read(old / "npm-shrinkwrap.json")
+        with self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
+            runtime.checked_dependency_binding(old, lock, "137")
+        installed = retained / "fixture/package.json"
+        engine.save(installed, {"name": "fixture", "version": "2.0.0"})
+        with self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
+            engine.Runtime.prepare_dependencies(runtime, before, candidate, job)
+        engine.save(installed, {"name": "fixture", "version": "1.0.0"})
+        unsafe = retained / "external-link"
+        unsafe.symlink_to(runtime.home / "anchors", target_is_directory=True)
+        with self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
+            engine.Runtime.prepare_dependencies(runtime, before, candidate, job)
+        unsafe.unlink()
+        reference = engine.Runtime.prepare_dependencies(runtime, before, candidate, job)
+        self.assertEqual(reference["modules"], str(retained))
+        self.assertFalse((old / engine.DEPENDENCY_LINK).exists())
+        self.assertEqual(engine.read(candidate / engine.DEPENDENCY_LINK), engine.dependency_record(lock, retained, "137"))
+        self.assertEqual(runtime.checked_dependency_binding(candidate, engine.read(candidate / "npm-shrinkwrap.json"), "137"),
+                         retained)
+        (candidate / engine.DEPENDENCY_LINK).unlink()
+        with self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
+            runtime.checked_dependency_binding(candidate, engine.read(candidate / "npm-shrinkwrap.json"), "137")
 
     def test_npm_node_refuses_legacy_component_release_before_any_download_or_service_change(self):
         runtime = FakeNpmRuntime(self.root / "home")

@@ -152,7 +152,8 @@ export class Agent {
       await this.runtime.assertUnchanged(before);
       requireValue(this.clock() < release.expiresAt, "signature_invalid");
       const request = {
-        schema: 1, job: job.directory, plan: before, candidate, changed, release, envelope: job.envelope,
+        schema: 1, acceptance: "authenticated-health-v1",
+        job: job.directory, plan: before, candidate, changed, release, envelope: job.envelope,
         digest: verified.digest, jobId: job.id, leaseToken: job.leaseToken,
         agentConfig: path.join(this.runtime.private, "config.json"), version: component.version,
         entrySha256: component.entrySha256, sha256: component.sha256, packageName: component.file,
@@ -178,7 +179,7 @@ export class Agent {
         const journal = await readJson(journalFile);
         if (journal.state === "complete") {
           // Verification succeeded locally; an unavailable acknowledgement must
-          // not downgrade or repeat a real model call. Reconcile on the next poll.
+          // not downgrade or repeat acceptance. Reconcile on the next poll.
           throw error;
         }
         if (!["rolled_back", "aborted"].includes(journal.state)) {

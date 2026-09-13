@@ -117,6 +117,7 @@ export async function inspectUpdateArchive(filename, expectedSha256) {
           parts.some(part => !part || part === "." || part === ".." || /[ .]$/.test(part) ||
             /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)) ||
           parts.includes("node_modules") || parts.includes(".git") || parts.includes(".npmrc") ||
+          parts.includes("codey-dependency-link.json") ||
           names.has(name.toLowerCase())) fail("unsafe or duplicate archive path");
       names.add(name.toLowerCase());
       if (type === "5") {

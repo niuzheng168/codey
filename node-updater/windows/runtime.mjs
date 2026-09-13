@@ -15,7 +15,7 @@ export const libraryRoot = await stat(fileURLToPath(bundled)).then(() => path.jo
 const files = await import(pathToFileURL(path.join(libraryRoot, "update-files.mjs")));
 const { readPackageInfo } = await import(pathToFileURL(path.join(libraryRoot, "package-info.mjs")));
 const { inspectUpdateArchive } = await import(pathToFileURL(path.join(libraryRoot, "update-archive.mjs")));
-const { copyDependencies, EXTRACT_PACKAGE, reusableDependencies } =
+const { linkDependencies, EXTRACT_PACKAGE, reusableDependencies, verifyDependencyBinding } =
   await import(pathToFileURL(path.join(libraryRoot, "update-dependencies.mjs")));
 const manifestPath = await files.exists(path.join(directory, "lib/node-update-manifest.mjs"))
   ? path.join(directory, "lib/node-update-manifest.mjs") : path.resolve(directory, "../../src/node-update-manifest.mjs");
@@ -34,6 +34,35 @@ export function checkedReceipt(request, publicKey, { allowExpired = false, now =
     /^[a-f0-9]{32}$/.test(request.jobId) && path.basename(request.job) === request.jobId,
   "signature_invalid");
   return verified;
+}
+
+export function checkedAcceptanceProof(request, proof) {
+  if (!Object.hasOwn(request, "acceptance")) {
+    // Historical completed requests retain their original real-model receipt.
+    requireValue(proof.passed === true && proof.codeyModel === true && proof.codexModel === true &&
+      proof.syntheticSessionArchived === true && proof.digest === request.digest && proof.jobId === request.jobId,
+    "model_failed");
+    return proof;
+  }
+  requireValue(request.acceptance === "authenticated-health-v1", "configuration_changed");
+  const component = request.release.components.codey;
+  requireValue(Object.keys(request.release.components).length === 1 &&
+    request.version === component.version && request.entrySha256 === component.entrySha256, "signature_invalid");
+  requireValue(proof.schema === 1 && proof.acceptance === request.acceptance && proof.passed === true &&
+    proof.healthy === true && proof.authenticated === true && proof.modelRequests === false &&
+    proof.digest === request.digest && proof.jobId === request.jobId &&
+    proof.version === component.version && proof.entrySha256 === component.entrySha256 &&
+    Number.isSafeInteger(proof.checkedAt) && proof.checkedAt > 0, "health_failed");
+  return proof;
+}
+
+export async function readAcceptanceProof(request) {
+  requireValue(!Object.hasOwn(request, "acceptance") || request.acceptance === "authenticated-health-v1",
+    "configuration_changed");
+  const healthOnly = request.acceptance === "authenticated-health-v1";
+  const proof = await readJson(path.join(request.job, healthOnly ? "health-proof.json" : "model-proof.json"))
+    .catch(() => { throw new UpdateError(healthOnly ? "health_failed" : "model_failed"); });
+  return checkedAcceptanceProof(request, proof);
 }
 
 export function normalizedCodex(value, probePath) {
@@ -228,7 +257,8 @@ export class Runtime {
     await this.verifyPackage(candidate, artifact);
     const reuse = await reusableDependencies(before.root, artifact.lock);
     if (reuse) {
-      await copyDependencies(before.root, candidate, artifact.lock);
+      const reused = await linkDependencies(before.root, candidate, artifact.lock, { home: this.home });
+      await save(path.join(job, "dependency-mode.json"), reused);
     } else {
       const flags = ["--prefix", candidate, "--omit=dev", "--no-audit", "--no-fund",
         "--engine-strict", "--umask=0077", "--strict-ssl=true", "--registry=https://registry.npmjs.org"];
@@ -238,7 +268,7 @@ export class Runtime {
       await this.command(before.node, [npm, "rebuild", ...flags],
         { env, cwd: candidate, timeout: 1200000, log: path.join(job, "npm-rebuild.private.log") });
     }
-    await save(path.join(job, "dependency-mode.json"), { mode: reuse ? "reuse-installed-offline" : "npm-ci" });
+    if (!reuse) await save(path.join(job, "dependency-mode.json"), { mode: "npm-ci" });
     await this.verifyPackage(candidate, artifact);
     await this.command(before.node, [path.join(candidate, "bin/codey.mjs"), "doctor", "--json"],
       { env, cwd: home, timeout: 60000, log: path.join(job, "doctor.private.log") });
@@ -253,19 +283,20 @@ export class Runtime {
         (await stat(file)).isFile() && (await stat(file)).size === expected.size &&
         await fileHash(file) === expected.sha256, "signature_invalid");
     }
+    await verifyDependencyBinding(root, artifact.lock, { home: this.home });
   }
   async commit(manifest, digest, job) {
     const request = await readJson(path.join(job, "request.json"));
     const signed = checkedReceipt(request, this.config.releasePublicKey, { allowExpired: true, platform: this.platform });
     requireValue(signed.digest === digest && objectHash(manifest) === objectHash(signed.release), "signature_invalid");
-    const proof = await readJson(path.join(job, "model-proof.json"));
-    requireValue(proof.passed && proof.codeyModel && proof.codexModel && proof.syntheticSessionArchived &&
-      proof.digest === digest && proof.jobId === request.jobId, "model_failed");
+    requireValue(path.resolve(request.job) === path.resolve(job), "signature_invalid");
+    await readAcceptanceProof(request);
     const installed = await this.installed();
     requireValue(manifest.sequence >= installed.sequence &&
       (manifest.sequence !== installed.sequence || !installed.digest || installed.digest === digest), "signature_invalid");
     const snapshot = await this.snapshot();
-    requireValue(snapshot.components.codey.entrySha256 === manifest.components.codey.entrySha256, "health_failed");
+    requireValue(["version", "commit", "entrySha256"].every(key =>
+      snapshot.components.codey[key] === manifest.components.codey[key]), "health_failed");
     await save(path.join(this.private, "installed.json"), {
       nodeId: this.config.nodeId, ownerId: this.config.ownerId, platform: this.platform,
       releaseId: manifest.id, sequence: manifest.sequence, digest, components: snapshot.components,

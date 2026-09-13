@@ -26,6 +26,20 @@ export async function waitForCloudCliReady(request, {
   }
 }
 
+export async function probeCloudCliHealth(request, version, runningSessions) {
+  assert.ok(typeof version === 'string' && version.length > 0);
+  let rejected = false;
+  try {
+    await request('/api/auth/status', 'GET', undefined, false);
+  } catch (error) {
+    assert.equal(error.message, 'HTTP 401');
+    rejected = true;
+  }
+  assert.ok(rejected, 'Workspace authentication changed');
+  assert.equal((await request('/health')).version, version);
+  return { healthy: true, authenticated: true, version, runningSessions, modelRequests: false };
+}
+
 export function nativeProbeEnvironment(config, input, {
   platform = process.platform, arch = process.arch, home = os.homedir(), node = process.execPath,
 } = {}) {
@@ -53,7 +67,7 @@ async function main() {
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const input = JSON.parse(Buffer.concat(chunks).toString());
-assert.ok(['idle', 'verify'].includes(input.mode));
+assert.ok(['idle', 'health', 'verify'].includes(input.mode));
 let environ;
 if (input.runtimeFile) {
   const config = JSON.parse((await readFile(input.runtimeFile, 'utf8')).replace(/^\uFEFF/, ''));
@@ -97,12 +111,13 @@ function headers(method, pathname) {
   };
 }
 
-function request(pathname, method = 'GET', body) {
+function request(pathname, method = 'GET', body, signed = true) {
   return new Promise((resolve, reject) => {
     const content = body === undefined ? null : Buffer.from(JSON.stringify(body));
     const req = https.request({
       ...connection, path: pathname, method,
-      headers: { ...headers(method, pathname), ...(content ? { 'Content-Length': content.length } : {}) },
+      headers: { ...(signed ? headers(method, pathname) : { Origin: input.portalOrigin }),
+        ...(content ? { 'Content-Length': content.length } : {}) },
     }, (response) => {
       const chunks = [];
       let size = 0;
@@ -127,6 +142,8 @@ const running = (await waitForCloudCliReady(() => request('/api/providers/sessio
 assert.ok(Array.isArray(running));
 if (input.mode === 'idle') {
   console.log(JSON.stringify({ runningSessions: running.length }));
+} else if (input.mode === 'health') {
+  console.log(JSON.stringify(await probeCloudCliHealth(request, input.version, running.length)));
 } else {
   const { WebSocket } = createRequire(path.join(input.cloudcliPath, 'package.json'))('ws');
   const marker = 'CODEY_NODE_UPDATE_OK';
