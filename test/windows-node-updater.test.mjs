@@ -285,6 +285,8 @@ test("the independent host uses the existing exact process-tree implementation a
   assert.match(host, /FileAccess.ReadWrite, FileShare.Read/);
   assert.match(host, /CodeyBackgroundProcess/);
   assert.match(host, /EnvironmentVariables.Clear/);
+  assert.match(host, /"COMPUTERNAME"/);
+  assert.match(host, /CreateStartInfo\(args\[0\], root, expected, home, nonce\)/);
   assert.match(host, /CODEY_UPDATER_HOST_TOKEN/);
 });
 
@@ -311,6 +313,7 @@ test("native agent transactions and installer Task Scheduler rules parse and run
     "-Source", path.resolve("node-updater/windows")], { timeout: 29000, maxBuffer: 1024 * 1024 });
   const proof = JSON.parse(result.stdout);
   assert.equal(proof.passed, true);
+  assert.equal(proof.hostEnvironmentVerified, true);
   assert.equal(proof.nativeServices, false);
   assert.equal(proof.modelCalls, 0);
 });

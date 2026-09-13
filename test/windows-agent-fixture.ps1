@@ -13,6 +13,32 @@ foreach ($name in @('native.ps1', 'install.ps1')) {
 # Compile managed declarations only. No Windows Job Object or executable is run.
 Add-Type -Path @((Join-Path $Source 'host.cs'), (Join-Path $Source 'process-tree.cs'))
 Check ([bool]('CodeyUpdaterHost' -as [type])) 'Host did not compile.'
+$environmentBefore = @{}
+foreach ($name in @('COMPUTERNAME', 'NODE_OPTIONS', 'CODEY_MODEL_API_KEY', 'PSModulePath')) {
+    $environmentBefore[$name] = [Environment]::GetEnvironmentVariable($name)
+}
+try {
+    [Environment]::SetEnvironmentVariable('COMPUTERNAME', 'Codey-Fixture-PC')
+    foreach ($name in @('NODE_OPTIONS', 'CODEY_MODEL_API_KEY', 'PSModulePath')) {
+        [Environment]::SetEnvironmentVariable($name, 'must-not-reach-agent')
+    }
+    $factory = [CodeyUpdaterHost].GetMethod('CreateStartInfo', [Reflection.BindingFlags]'NonPublic,Static')
+    $startInfo = $factory.Invoke($null, @('C:\original\node.exe', 'C:\private-agent',
+        'C:\owner\.config\codey-updater\config.json', 'C:\owner', 'fixture-nonce'))
+    Check ($startInfo.EnvironmentVariables['COMPUTERNAME'] -ceq 'Codey-Fixture-PC') `
+        'Background agent lost the machine identity needed by Initialize-LocalWindows.'
+    foreach ($name in @('NODE_OPTIONS', 'CODEY_MODEL_API_KEY', 'PSModulePath')) {
+        Check (-not $startInfo.EnvironmentVariables.ContainsKey($name)) 'Host leaked a forbidden environment variable.'
+    }
+    Check ($startInfo.EnvironmentVariables['HOME'] -eq 'C:\owner' -and
+        $startInfo.EnvironmentVariables['CODEY_UPDATER_HOST_TOKEN'] -eq 'fixture-nonce' -and
+        $startInfo.FileName -eq 'C:\original\node.exe' -and $startInfo.WorkingDirectory -eq 'C:\private-agent') `
+        'Host changed the original Node, owner home, agent directory or lifetime binding.'
+} finally {
+    foreach ($name in $environmentBefore.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $environmentBefore[$name])
+    }
+}
 function Require-Update($Value, [string]$Message) { Check $Value $Message }
 function Read-UpdateJson($File) { Get-Content -LiteralPath $File -Raw | ConvertFrom-Json }
 function Write-CodeyJson($File, $Value) { $Value | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $File }
@@ -101,4 +127,4 @@ $script:definition.Actions[0].Path = 'C:\unrelated.exe'
 $refused = $false
 try { Assert-UpdaterTask $registered $binding } catch { $refused = $true }
 Check $refused 'Unrelated task was adopted.'
-@{ passed = $true; nativeServices = $false; modelCalls = 0; hostCompiled = $true } | ConvertTo-Json -Compress
+@{ passed = $true; nativeServices = $false; modelCalls = 0; hostCompiled = $true; hostEnvironmentVerified = $true } | ConvertTo-Json -Compress

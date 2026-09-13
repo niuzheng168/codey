@@ -12,6 +12,25 @@ public static class CodeyUpdaterHost
             throw new ArgumentException("Invalid updater argument.");
         return "\"" + value + "\"";
     }
+    private static ProcessStartInfo CreateStartInfo(string node, string root, string config, string home, string nonce)
+    {
+        var info = new ProcessStartInfo(node, Quote(Path.Combine(root, "agent.mjs")) +
+            " run --config " + Quote(config));
+        info.WorkingDirectory = root;
+        info.EnvironmentVariables.Clear();
+        foreach (string key in new string[] { "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT",
+            "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "USERNAME", "OS",
+            "COMPUTERNAME", "PROCESSOR_ARCHITECTURE", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY" })
+        {
+            string value = Environment.GetEnvironmentVariable(key);
+            if (value != null) info.EnvironmentVariables[key] = value;
+        }
+        info.EnvironmentVariables["HOME"] = home;
+        info.EnvironmentVariables["PATH"] = Path.GetDirectoryName(node) + ";" +
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32");
+        info.EnvironmentVariables["CODEY_UPDATER_HOST_TOKEN"] = nonce;
+        return info;
+    }
     public static int Main(string[] args)
     {
         try
@@ -31,21 +50,7 @@ public static class CodeyUpdaterHost
                 lease.SetLength(0);
                 lease.Write(data, 0, data.Length);
                 lease.Flush(true);
-                var info = new ProcessStartInfo(args[0], Quote(Path.Combine(root, "agent.mjs")) +
-                    " run --config " + Quote(expected));
-                info.WorkingDirectory = root;
-                info.EnvironmentVariables.Clear();
-                foreach (string key in new string[] { "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT",
-                    "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "USERNAME", "OS",
-                    "PROCESSOR_ARCHITECTURE", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY" })
-                {
-                    string value = Environment.GetEnvironmentVariable(key);
-                    if (value != null) info.EnvironmentVariables[key] = value;
-                }
-                info.EnvironmentVariables["HOME"] = home;
-                info.EnvironmentVariables["PATH"] = Path.GetDirectoryName(args[0]) + ";" +
-                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32");
-                info.EnvironmentVariables["CODEY_UPDATER_HOST_TOKEN"] = nonce;
+                var info = CreateStartInfo(args[0], root, expected, home, nonce);
                 // The same reviewed Job Object implementation as the existing
                 // service host, compiled into a SEPARATE executable. A crashed
                 // host cannot leave a duplicate/orphan updater transaction.
