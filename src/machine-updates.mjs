@@ -32,6 +32,10 @@ const hash = (value) => createHash("sha256").update(value).digest("hex");
 const nodePlatform = node => node.platform ?? node.machine?.platform ?? "linux-x64";
 const sameHash = (left, right) => HEX.test(left ?? "") && HEX.test(right ?? "") &&
   timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
+const sameCodeyPackage = (left, right) => left?.components.codey && right?.components.codey &&
+  Object.keys(left.components).length === 1 && Object.keys(right.components).length === 1 &&
+  ["version", "file", "size", "sha256", "commit", "entrySha256", "lockSha256"]
+    .every(key => left.components.codey[key] === right.components.codey[key]);
 
 function send(res, status, value) {
   const body = Buffer.from(JSON.stringify(value));
@@ -249,7 +253,7 @@ export class MachineUpdates {
         ...["agent.mjs", "client.mjs", "runtime.mjs", "verify.mjs"]
           .map(name => ["windows/" + name, path.join(this.sourceRoot, "windows", name)]),
         ["windows/lib/node-update-manifest.mjs", path.resolve(this.sourceRoot, "../src/node-update-manifest.mjs")],
-        ...["update-probe.mjs", "update-files.mjs", "update-archive.mjs", "package-info.mjs"]
+        ...["update-probe.mjs", "update-files.mjs", "update-archive.mjs", "update-dependencies.mjs", "package-info.mjs"]
           .map(name => ["windows/lib/" + name, path.resolve(this.sourceRoot, "../packages/codey/lib", name)]),
       ];
       const entries = await Promise.all(mapping.map(async ([name, file]) => ({
@@ -266,7 +270,7 @@ export class MachineUpdates {
         ["probe.mjs", path.join(this.sourceRoot, "probe.mjs")],
         ["process-tree.cs", path.join(this.sourceRoot, "windows/process-tree.cs")],
         ["lib/node-update-manifest.mjs", path.resolve(this.sourceRoot, "../src/node-update-manifest.mjs")],
-        ...["update-windows.ps1", "update-probe.mjs", "update-files.mjs", "update-archive.mjs", "package-info.mjs"]
+        ...["update-windows.ps1", "update-probe.mjs", "update-files.mjs", "update-archive.mjs", "update-dependencies.mjs", "package-info.mjs"]
           .map(name => ["lib/" + name, path.resolve(this.sourceRoot, "../packages/codey/lib", name)]),
       ];
       const entries = await Promise.all(mapping.map(async ([name, file]) => ({
@@ -367,12 +371,19 @@ export class MachineUpdates {
     // Validate every owner before persisting any part of a batch.
     const owned = await Promise.all(nodeIds.map((nodeId) => this.owner(principalId, nodeId)));
     const selected = await this.catalog.get(releaseId);
+    const releases = await this.catalog.list();
     const data = (await this.store.read()).data;
     const targets = owned.map(({ node }) => {
       const device = data.devices[node.id];
-      const check = eligibility(node, device?.ownerId === principalId ? device : null, selected.release);
+      const matching = !sameCodeyPackage(selected.release, selected.release) || selected.release.platform === nodePlatform(node) ? selected
+        : releases.find(row => row.release.platform === nodePlatform(node) && sameCodeyPackage(row.release, selected.release));
+      const check = matching ? eligibility(node, device?.ownerId === principalId ? device : null, matching.release)
+        : { eligible: false, reason: "release_platform_unavailable" };
       const busy = data.jobs.some((job) => job.nodeId === node.id && !terminal.has(job.state));
-      return { nodeId: node.id, name: node.name, ...check, ...(busy ? { eligible: false, reason: "job_active" } : {}),
+      return { nodeId: node.id, name: node.name, platform: nodePlatform(node),
+        releaseId: matching?.release.id ?? null, digest: matching?.digest ?? null,
+        notes: matching?.release.notes ?? "", migrations: matching?.release.migrations ?? [],
+        ...check, ...(busy ? { eligible: false, reason: "job_active" } : {}),
         deferred: Boolean(device && this.clock() - (device.lastSeen || 0) >= HEARTBEAT_TIMEOUT_MS) };
     });
     const result = { id: id(), releaseId, digest: selected.digest, targets, expiresAt: this.clock() + 300000,
@@ -391,7 +402,11 @@ export class MachineUpdates {
     if (!plan || plan.ownerId !== principalId) throw requestError("升级计划不存在", 404);
     if (plan.expiresAt < this.clock()) throw requestError("升级计划已过期，请重新预览", 409);
     await Promise.all(plan.targets.map((target) => this.owner(principalId, target.nodeId)));
-    const { release } = await this.catalog.get(plan.releaseId, plan.digest);
+    await this.catalog.get(plan.releaseId, plan.digest);
+    const releases = new Map(await Promise.all(plan.targets.filter(target => target.eligible).map(async target => {
+      const row = await this.catalog.get(target.releaseId ?? plan.releaseId, target.digest ?? plan.digest);
+      return [target.nodeId, row];
+    })));
     return this.mutate((data) => {
       const current = data.plans[planId];
       if (!current || current.expiresAt < this.clock()) throw requestError("升级计划已过期，请重新预览", 409);
@@ -403,7 +418,9 @@ export class MachineUpdates {
       }
       for (const target of targets) {
         const device = data.devices[target.nodeId];
-        if (device?.ownerId !== principalId || device.revoked || !eligibility({ id: target.nodeId }, device, release).eligible) {
+        const { release } = releases.get(target.nodeId);
+        if (device?.ownerId !== principalId || device.revoked ||
+            !eligibility({ id: target.nodeId, platform: target.platform ?? release.platform }, device, release).eligible) {
           throw requestError("机器状态已改变，请重新预览", 409);
         }
       }
@@ -413,7 +430,7 @@ export class MachineUpdates {
       data.batches[batchId] = { id: batchId, ownerId: principalId, canaryJobId: null };
       const jobs = targets.map((target) => ({
         id: id(), batchId, nodeId: target.nodeId, ownerId: principalId,
-        releaseId: release.id, digest: current.digest, state: "queued", code: null,
+        releaseId: releases.get(target.nodeId).release.id, digest: releases.get(target.nodeId).digest, state: "queued", code: null,
         createdAt: this.clock(), updatedAt: this.clock(), attempts: 0,
       }));
       data.jobs.push(...jobs);

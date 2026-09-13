@@ -28,21 +28,23 @@ function data() {
   ] };
 }
 
-async function page({ failPlan = false, pendingPlan = null, initialData, planComponents, downloadStatus = 200, tamperDownload = false } = {}) {
+async function page({ failPlan = false, pendingPlan = null, initialData, planComponents, downloadStatus = 200, tamperDownload = false,
+  readStatus } = {}) {
   const { document, elements, downloads } = settingsDom();
   const requests = [];
   const timers = [];
   const redirects = [];
   const status = initialData ?? data();
   runInNewContext(source, {
-    document, clearTimeout() {}, crypto: webcrypto, Blob,
+    document, clearTimeout(id) { if (timers[id - 1]) timers[id - 1].cancelled = true; }, crypto: webcrypto, Blob,
     window: { confirm: () => true, location: { replace: (url) => redirects.push(url) },
       setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; } },
     URL: { createObjectURL: () => "blob:fixture", revokeObjectURL() {} },
     fetch: async (url, options) => {
       const body = options.body && JSON.parse(options.body);
       requests.push({ url, options, body });
-      if (url === "/api/settings/updates") return { ok: true, status: 200, json: async () => status };
+      if (url === "/api/settings/updates") return readStatus ? readStatus(status)
+        : { ok: true, status: 200, json: async () => structuredClone(status) };
       if (url.endsWith("/codey.tgz")) return {
         ok: downloadStatus === 200, status: downloadStatus,
         json: async () => ({ error: "download unavailable" }),
@@ -58,7 +60,8 @@ async function page({ failPlan = false, pendingPlan = null, initialData, planCom
         return { ok: true, status: 200, json: async () => ({
           id: "plan-one", releaseId: body.releaseId, notes: release.notes, warning: "Review this plan",
           components: planComponents ?? release.components,
-          targets: body.nodeIds.map((id) => ({ nodeId: id, name: id, eligible: true, changed: ["codey"], deferred: id === "beta" })),
+          targets: body.nodeIds.map((id) => ({ nodeId: id, name: id, eligible: true, changed: ["codey"],
+            notes: release.notes, deferred: id === "beta" })),
         }) };
       }
       if (url.endsWith("/jobs")) {
@@ -70,6 +73,12 @@ async function page({ failPlan = false, pendingPlan = null, initialData, planCom
   });
   await tick(); await tick();
   return { elements, requests, timers, redirects, status, document, downloads,
+    async poll() {
+      const timer = timers.findLast(item => !item.cancelled);
+      assert.ok(timer, "A read-only refresh must remain scheduled");
+      timer.cancelled = true;
+      await timer.callback(); await tick();
+    },
     get: (suffix) => document.querySelector("#node-update-" + suffix) };
 }
 
@@ -157,11 +166,15 @@ test("a split-component preview response cannot be confirmed as a Codey update",
 
 test("changing the selected Codey release recomputes eligibility and status from the installed package", async () => {
   const status = data();
-  status.releases.push({ ...status.releases[0], id: "release-two", sequence: 2 });
+  status.releases.push({ ...status.releases[0], id: "release-two", sequence: 2, components: {
+    codey: { ...status.releases[0].components.codey, version: "0.3.0", sha256: "c".repeat(64) },
+  } });
   status.nodes[0].report = { ...status.nodes[0].report, highestSequence: 1, currentRelease: "release-one", components: {
     codey: { ...status.releases[0].components.codey, nodeMajor: 24 },
   } };
   const p = await page({ initialData: status });
+  p.get("release").value = "release-one";
+  p.get("release").dispatch("change");
   assert.match(p.get("list").children[0].textContent, /已是目标版本/);
   assert.equal(p.get("list").children[0].querySelector("input").disabled, true);
   p.get("release").value = "release-two";
@@ -170,23 +183,23 @@ test("changing the selected Codey release recomputes eligibility and status from
   assert.doesNotMatch(p.get("list").children[0].textContent, /已是目标版本/);
 });
 
-test("Windows and Linux releases remain explicit, with native bootstrap controls and no cross-platform batch", async () => {
+test("one shared version automatically matches Windows and Linux without a platform selector", async () => {
   const status = data();
   status.releases.push({ ...status.releases[0], id: "windows-release", platform: "windows-x64", sequence: 2 });
   status.nodes[1] = { ...status.nodes[1], platform: "windows-x64", updaterSupported: true,
     report: { ...status.nodes[1].report, platform: "windows-x64" } };
   status.nodes[2] = { ...status.nodes[2], platform: "windows-x64", updaterSupported: true };
   const p = await page({ initialData: status });
-  assert.match(p.get("release").textContent, /Linux x64/);
-  assert.match(p.get("release").textContent, /Windows x64/);
-  assert.match(p.get("list").children[1].textContent, /对应平台/);
+  assert.equal(p.get("release").children.length, 1);
+  assert.equal(p.get("release").textContent, "Codey 0.2.0");
+  assert.match(p.get("download-info").textContent, /Linux x64/);
+  assert.match(p.get("download-info").textContent, /Windows x64/);
+  assert.doesNotMatch(p.get("list").textContent, /对应平台/);
   assert.ok(p.get("list").children[2].querySelectorAll("button").some(button => button.textContent === "接入升级器"));
-  p.get("release").value = "windows-release";
-  p.get("release").dispatch("change");
-  assert.equal(p.get("list").children[0].querySelector("input").disabled, true);
+  assert.equal(p.get("list").children[0].querySelector("input").disabled, false);
   assert.equal(p.get("list").children[1].querySelector("input").disabled, false);
   await p.get("all").click();
-  assert.deepEqual(p.requests.at(-1).body.nodeIds, ["beta"]);
+  assert.deepEqual(p.requests.at(-1).body.nodeIds, ["alpha", "beta"]);
 });
 
 test("Mac ARM/Intel releases and unreported enrollment stay explicit instead of silently choosing Linux", async () => {
@@ -198,17 +211,16 @@ test("Mac ARM/Intel releases and unreported enrollment stay explicit instead of 
     report: { ...status.nodes[1].report, platform: "macos-arm64" } };
   status.nodes[2] = { ...status.nodes[2], platform: "macos-x64", updaterSupported: true };
   const p = await page({ initialData: status });
-  assert.match(p.get("release").textContent, /macOS Apple Silicon/);
-  assert.match(p.get("release").textContent, /macOS Intel/);
+  assert.equal(p.get("release").children.length, 1);
+  assert.match(p.get("download-info").textContent, /macOS Apple Silicon/);
+  assert.match(p.get("download-info").textContent, /macOS Intel/);
   const unpaired = p.get("list").children[2];
   assert.match(unpaired.textContent, /Codey 版本未上报/);
   assert.ok(unpaired.querySelectorAll("button").some(button => button.textContent === "接入升级器"));
-  p.get("release").value = "macos-arm64-release";
-  p.get("release").dispatch("change");
-  assert.equal(p.get("list").children[0].querySelector("input").disabled, true);
+  assert.equal(p.get("list").children[0].querySelector("input").disabled, false);
   assert.equal(p.get("list").children[1].querySelector("input").disabled, false);
   await p.get("all").click();
-  assert.deepEqual(p.requests.at(-1).body.nodeIds, ["beta"]);
+  assert.deepEqual(p.requests.at(-1).body.nodeIds, ["alpha", "beta"]);
 });
 
 test("single-machine action only previews its node; no job is sent until explicit confirmation", async () => {
@@ -217,7 +229,7 @@ test("single-machine action only previews its node; no job is sent until explici
   assert.equal(p.get("confirm").open, true);
   assert.deepEqual(p.requests.filter((row) => row.url.endsWith("/plans"))[0].body.nodeIds, ["alpha"]);
   assert.equal(p.requests.filter((row) => row.url.endsWith("/jobs")).length, 0);
-  assert.ok(p.get("plan-note").textContent.includes("<img src=x onerror=evil()>"));
+  assert.ok(p.get("plan-targets").textContent.includes("<img src=x onerror=evil()>"));
   assert.match(p.get("plan-note").textContent, /Codey 0\.2\.0/);
   assert.match(p.get("plan-targets").textContent, /更新 Codey 整包/);
   assert.doesNotMatch(p.get("plan-targets").textContent, /cloudcli|copilotApi/);
@@ -338,4 +350,80 @@ test("polling retains a maintenance menu's keyboard focus, while Escape closes i
   assert.equal(refreshed.open, false);
   assert.equal(p.document.activeElement, refreshed.querySelector("summary"));
   assert.ok(p.requests.every((request) => request.options.method === "GET"));
+});
+
+test("idle pages keep polling and terminal jobs never invent the installed version before the next heartbeat", async () => {
+  const p = await page();
+  assert.equal(p.timers.at(-1).delay, 10000);
+  p.status.jobs = [{ id: "job", nodeId: "alpha", releaseId: "release-one", state: "verifying", updatedAt: 1000 }];
+  await p.poll();
+  assert.equal(p.timers.at(-1).delay, 5000);
+  p.status.jobs[0] = { ...p.status.jobs[0], state: "succeeded", updatedAt: 2000 };
+  p.status.nodes[0].lastSeen = 2000;
+  await p.poll();
+  assert.match(p.get("list").children[0].textContent, /Codey 0\.1\.0/);
+  assert.match(p.get("list").children[0].textContent, /等待版本心跳刷新/);
+  assert.equal(p.timers.at(-1).delay, 10000);
+  p.status.nodes[0].report = { ...p.status.nodes[0].report, currentRelease: "release-one", highestSequence: 1,
+    components: { codey: { ...p.status.releases[0].components.codey, nodeMajor: 24 } } };
+  p.status.nodes[0].lastSeen = 3000;
+  await p.poll();
+  assert.match(p.get("list").children[0].textContent, /Codey 0\.2\.0.*已是目标版本/);
+  assert.doesNotMatch(p.get("list").children[0].textContent, /等待版本心跳刷新/);
+  assert.ok(p.requests.every(row => row.options.method === "GET"));
+});
+
+test("local updates without Portal jobs also refresh; failed jobs keep their actual version and visible error", async () => {
+  const p = await page();
+  p.status.nodes[0].report = { ...p.status.nodes[0].report, components: {
+    codey: { ...p.status.nodes[0].report.components.codey, version: "0.1.7" },
+  } };
+  p.status.jobs = [{ nodeId: "alpha", state: "needs_action", code: "configuration_changed", updatedAt: 1000 }];
+  await p.poll();
+  assert.match(p.get("list").children[0].textContent, /Codey 0\.1\.7.*需要人工处理.*节点配置已改变/);
+  assert.doesNotMatch(p.get("list").children[0].textContent, /升级成功/);
+});
+
+test("unsupported version platforms stay explicit; different tarballs with the same version never collapse", async () => {
+  const status = data();
+  status.nodes[1] = { ...status.nodes[1], platform: "windows-x64",
+    report: { ...status.nodes[1].report, platform: "windows-x64" } };
+  const p = await page({ initialData: status });
+  assert.match(p.get("list").children[1].textContent, /此版本尚未向该平台开放/);
+  assert.equal(p.get("list").children[1].querySelector("input").disabled, true);
+  status.releases.push({ ...status.releases[0], id: "different-bytes", platform: "windows-x64", sequence: 2,
+    components: { codey: { ...status.releases[0].components.codey, sha256: "c".repeat(64) } } });
+  await p.poll();
+  assert.equal(p.get("release").children.length, 2);
+  assert.match(p.get("release").textContent, /cccccccccccc/);
+  assert.equal(p.get("list").children[1].querySelector("input").disabled, true,
+    "The original selected artifact was retained, not replaced with a same-version different package");
+});
+
+test("refresh requests are deduplicated, pause in hidden tabs and do not change a confirmation in progress", async () => {
+  let releaseRead, reads = 0;
+  const p = await page({ readStatus: async status => {
+    reads++;
+    if (reads === 2) await new Promise(resolve => { releaseRead = resolve; });
+    return { status: 200, ok: true, json: async () => structuredClone(status) };
+  } });
+  const first = p.get("refresh").click();
+  const second = p.get("refresh").click();
+  assert.equal(reads, 2);
+  releaseRead();
+  await Promise.all([first, second]);
+  await p.get("all").click();
+  const before = reads, note = p.get("plan-note").textContent;
+  await p.poll();
+  assert.equal(reads, before);
+  assert.equal(p.get("plan-note").textContent, note);
+  await p.get("cancel").click();
+  p.document.hidden = true;
+  p.document.dispatchEvent(new Event("visibilitychange"));
+  assert.ok(p.timers.every(timer => timer.cancelled));
+  p.document.hidden = false;
+  p.document.dispatchEvent(new Event("visibilitychange"));
+  await tick(); await tick();
+  assert.equal(reads, before + 1);
+  assert.ok(!p.requests.some(row => row.url.endsWith("/jobs")));
 });

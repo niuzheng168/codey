@@ -34,7 +34,9 @@ function Get-OtherAgentTasks {
         $bytes = [Text.Encoding]::UTF8.GetBytes([string]$task.Definition.XmlText)
         $hash = [Security.Cryptography.SHA256]::Create()
         try { $digest = -join ($hash.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) } finally { $hash.Dispose() }
-        $result[$name] = @{ definition = $digest; lastRun = $task.LastRunTime.ToUniversalTime().Ticks.ToString(); enabled = $task.Enabled }
+        # Retry triggers advance LastRunTime even when the same host keeps running.
+        $result[$name] = @{ definition = $digest; enabled = $task.Enabled
+            instances = @($task.GetInstances(0) | ForEach-Object { $_.InstanceGuid } | Sort-Object) }
     }
     return $result
 }

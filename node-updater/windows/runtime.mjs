@@ -15,6 +15,8 @@ export const libraryRoot = await stat(fileURLToPath(bundled)).then(() => path.jo
 const files = await import(pathToFileURL(path.join(libraryRoot, "update-files.mjs")));
 const { readPackageInfo } = await import(pathToFileURL(path.join(libraryRoot, "package-info.mjs")));
 const { inspectUpdateArchive } = await import(pathToFileURL(path.join(libraryRoot, "update-archive.mjs")));
+const { copyDependencies, EXTRACT_PACKAGE, reusableDependencies } =
+  await import(pathToFileURL(path.join(libraryRoot, "update-dependencies.mjs")));
 const manifestPath = await files.exists(path.join(directory, "lib/node-update-manifest.mjs"))
   ? path.join(directory, "lib/node-update-manifest.mjs") : path.resolve(directory, "../../src/node-update-manifest.mjs");
 const { verifyNodeRelease } = await import(pathToFileURL(manifestPath));
@@ -220,20 +222,23 @@ export class Runtime {
     const env = buildEnvironment(home, before.node);
     const npm = await files.findNpm(before.node);
     const candidate = path.join(job, "app/node_modules/codey");
-    const unpack = `const p=require('node:module').createRequire(process.argv[1])('pacote');
-      p.extract(process.argv[2],process.argv[3],{cache:process.argv[4],ignoreScripts:true,umask:0o077,
-      integrity:process.argv[5]}).catch(()=>process.exitCode=1);`;
-    await this.command(before.node, ["--input-type=commonjs", "-e", unpack, npm, file, candidate,
+    await this.command(before.node, ["--input-type=commonjs", "-e", EXTRACT_PACKAGE, npm, file, candidate,
       env.npm_config_cache, "sha256-" + Buffer.from(artifact.sha256, "hex").toString("base64")],
     { env, cwd: job, timeout: 120000, log: path.join(job, "extract.private.log") });
     await this.verifyPackage(candidate, artifact);
-    const flags = ["--prefix", candidate, "--omit=dev", "--no-audit", "--no-fund",
-      "--engine-strict", "--umask=0077", "--strict-ssl=true", "--registry=https://registry.npmjs.org"];
-    await this.command(before.node, [npm, "ci", "--ignore-scripts", ...flags],
-      { env, cwd: candidate, timeout: 1200000, log: path.join(job, "npm-ci.private.log") });
-    await this.verifyPackage(candidate, artifact);
-    await this.command(before.node, [npm, "rebuild", ...flags],
-      { env, cwd: candidate, timeout: 1200000, log: path.join(job, "npm-rebuild.private.log") });
+    const reuse = await reusableDependencies(before.root, artifact.lock);
+    if (reuse) {
+      await copyDependencies(before.root, candidate, artifact.lock);
+    } else {
+      const flags = ["--prefix", candidate, "--omit=dev", "--no-audit", "--no-fund",
+        "--engine-strict", "--umask=0077", "--strict-ssl=true", "--registry=https://registry.npmjs.org"];
+      await this.command(before.node, [npm, "ci", "--ignore-scripts", ...flags],
+        { env, cwd: candidate, timeout: 1200000, log: path.join(job, "npm-ci.private.log") });
+      await this.verifyPackage(candidate, artifact);
+      await this.command(before.node, [npm, "rebuild", ...flags],
+        { env, cwd: candidate, timeout: 1200000, log: path.join(job, "npm-rebuild.private.log") });
+    }
+    await save(path.join(job, "dependency-mode.json"), { mode: reuse ? "reuse-installed-offline" : "npm-ci" });
     await this.verifyPackage(candidate, artifact);
     await this.command(before.node, [path.join(candidate, "bin/codey.mjs"), "doctor", "--json"],
       { env, cwd: home, timeout: 60000, log: path.join(job, "doctor.private.log") });

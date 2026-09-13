@@ -127,4 +127,19 @@ $script:definition.Actions[0].Path = 'C:\unrelated.exe'
 $refused = $false
 try { Assert-UpdaterTask $registered $binding } catch { $refused = $true }
 Check $refused 'Unrelated task was adopted.'
+$script:otherTask = [pscustomobject]@{ Definition = [pscustomobject]@{ XmlText = '<Task>unchanged</Task>' }
+    Enabled = $true; LastRunTime = [DateTime]::Now; InstanceGuid = 'same-running-host' }
+$script:otherTask | Add-Member ScriptMethod GetInstances { param($Flags)
+    return [pscustomobject]@{ InstanceGuid = $this.InstanceGuid }
+}
+$folder | Add-Member ScriptMethod GetTask { param($Name) return $script:otherTask }
+function Assert-CodeyTask { param($Task, $Config, $File, $Name) }
+$baseline = Get-OtherAgentTasks | ConvertTo-Json -Depth 8 -Compress
+$script:otherTask.LastRunTime = $script:otherTask.LastRunTime.AddMinutes(1)
+Check ((Get-OtherAgentTasks | ConvertTo-Json -Depth 8 -Compress) -eq $baseline) 'Retry trigger looked like a service restart.'
+$script:otherTask.InstanceGuid = 'new-host'
+Check ((Get-OtherAgentTasks | ConvertTo-Json -Depth 8 -Compress) -ne $baseline) 'Actual host restart was ignored.'
+$script:otherTask.InstanceGuid = 'same-running-host'
+$script:otherTask.Definition.XmlText = '<Task>changed</Task>'
+Check ((Get-OtherAgentTasks | ConvertTo-Json -Depth 8 -Compress) -ne $baseline) 'Changed task definition was ignored.'
 @{ passed = $true; nativeServices = $false; modelCalls = 0; hostCompiled = $true; hostEnvironmentVerified = $true } | ConvertTo-Json -Compress

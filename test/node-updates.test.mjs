@@ -702,6 +702,62 @@ test("Windows signed jobs use the normal owner plan/confirmation/lease pipeline 
   await f.advance(config, job, "succeeded");
 });
 
+test("a unified package preview pins platform-specific signatures and enqueues one owner-confirmed cross-platform canary batch", async t => {
+  const f = await fixture(t), windowsId = await importedNative(f);
+  const windows = await f.enroll(windowsId), linux = await f.enroll("alpha");
+  const installed = { version: "0.1.6", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24 };
+  const linuxReport = report({ layout: "npm", components: { codey: installed } });
+  const windowsReport = { ...linuxReport, platform: "windows-x64" };
+  await f.heartbeat(linux, linuxReport);
+  await f.heartbeat(windows, windowsReport);
+  const artifact = Buffer.from("one identical shared Codey package");
+  const component = { version: "0.1.7", commit: "b".repeat(40), file: "codey-0.1.7.tgz",
+    sha256: sha(artifact), size: artifact.length, entrySha256: "b".repeat(64), lockSha256: "c".repeat(64), nodeMajors: [24] };
+  const linuxRelease = { ...f.built.release, id: "codey-shared-linux", sequence: 2, components: { codey: component } };
+  const windowsRelease = { ...linuxRelease, id: "codey-shared-windows", sequence: 3, platform: "windows-x64",
+    notes: "Windows-specific acceptance notes" };
+  const envelope = release => {
+    const bytes = Buffer.from(JSON.stringify(release));
+    return { payload: bytes.toString("base64"), signature: sign(null, bytes, keys.privateKey).toString("base64url") };
+  };
+  const publish = win => writeFile(path.join(f.catalogRoot, "catalog.json"),
+    JSON.stringify({ schema: 1, releases: [envelope(win), envelope(linuxRelease)] }));
+  await publish({ ...windowsRelease, components: { codey: { ...component, sha256: "d".repeat(64) } } });
+  const mismatch = await f.updates.plan("owner-a", ["alpha", windowsId], linuxRelease.id);
+  assert.equal(mismatch.targets[1].eligible, false);
+  assert.equal(mismatch.targets[1].reason, "release_platform_unavailable", "Same version is not proof of identical bytes");
+  await publish(windowsRelease);
+  const plan = await f.updates.plan("owner-a", ["alpha", windowsId], linuxRelease.id);
+  assert.deepEqual(plan.targets.map(target => target.releaseId), [linuxRelease.id, windowsRelease.id]);
+  assert.ok(plan.targets.every(target => target.eligible && /^[a-f0-9]{64}$/.test(target.digest)));
+  assert.equal(plan.targets[1].notes, windowsRelease.notes);
+  assert.equal((await f.updates.store.read()).data.jobs.length, 0);
+  await assert.rejects(f.updates.plan("owner-a", ["alpha", f.bobNode.id], linuxRelease.id), { status: 404 });
+  await publish({ ...windowsRelease, notes: "Changed after preview" });
+  await assert.rejects(f.updates.enqueue("owner-a", plan.id), { status: 409 });
+  assert.equal((await f.updates.store.read()).data.jobs.length, 0, "A stale platform signature rejects the entire batch");
+  await publish(windowsRelease);
+  const jobs = await f.updates.enqueue("owner-a", plan.id);
+  assert.equal(new Set(jobs.map(job => job.batchId)).size, 1);
+  assert.deepEqual(await f.updates.enqueue("owner-a", plan.id), jobs, "Confirmation remains idempotent");
+  const winJob = (await f.heartbeat(windows, windowsReport)).job;
+  assert.equal(winJob.releaseId, windowsRelease.id);
+  assert.equal(verifyNodeRelease(winJob.envelope, keys.publicKey).release.platform, "windows-x64");
+  assert.equal((await f.heartbeat(linux, linuxReport)).waitingForCanary, true);
+  for (const state of ["downloading", "staging", "waiting_idle", "applying", "verifying", "succeeded"]) {
+    await f.advance(windows, winJob, state);
+  }
+  assert.equal((await f.updates.list("owner-a")).nodes.find(node => node.id === windowsId).report.components.codey.version,
+    "0.1.6", "A successful job does not manufacture an installed-version heartbeat");
+  await f.heartbeat(windows, { ...windowsReport, components: { codey: {
+    version: component.version, commit: component.commit, entrySha256: component.entrySha256, nodeMajor: 24,
+  } }, highestSequence: windowsRelease.sequence, currentRelease: windowsRelease.id });
+  assert.equal((await f.updates.list("owner-a")).nodes.find(node => node.id === windowsId).report.components.codey.version, "0.1.7");
+  const linuxJob = (await f.heartbeat(linux, linuxReport)).job;
+  assert.equal(linuxJob.releaseId, linuxRelease.id);
+  assert.equal(verifyNodeRelease(linuxJob.envelope, keys.publicKey).release.platform, "linux-x64");
+});
+
 test("Mac bootstrap is owner-bound, architecture-specific and complete without Windows/systemd executables", async t => {
   for (const platform of ["macos-arm64", "macos-x64"]) {
     const f = await fixture(t), id = await importedNative(f, platform);
@@ -776,7 +832,8 @@ test("Mac owner-confirmed jobs select the latest release for their architecture,
   }
   const arm = machines[0], intel = machines[1];
   const mixed = await f.updates.plan("owner-a", [arm.id, intel.id, "alpha"], arm.release.id);
-  assert.deepEqual(mixed.targets.filter(row => row.eligible).map(row => row.nodeId), [arm.id]);
+  assert.deepEqual(mixed.targets.filter(row => row.eligible).map(row => row.nodeId), [arm.id, intel.id]);
+  assert.deepEqual(mixed.targets.filter(row => row.eligible).map(row => row.releaseId), [arm.release.id, intel.release.id]);
   const plan = await f.updates.plan("owner-a", [arm.id], arm.release.id);
   assert.equal((await f.heartbeat(arm.config, arm.report)).job, null);
   await f.updates.enqueue("owner-a", plan.id);

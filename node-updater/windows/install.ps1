@@ -71,7 +71,8 @@ $null = Invoke-CodeyProcess $config.nodeExe @((Join-Path $PSScriptRoot 'agent.mj
     '--config', $bootstrapFile) -WorkingDirectory $owner.Home -TimeoutSeconds 30
 $version = (Read-UpdateJson (Join-Path $config.codeyDirectory 'package.json')).version
 $beforeHash = Get-UpdateHash $configFile
-$beforeTask = $task.LastRunTime
+$beforeTask = [string]$task.Definition.XmlText
+$beforeInstances = @($task.GetInstances(0) | ForEach-Object { $_.InstanceGuid } | Sort-Object) -join ','
 $private = Join-Path $owner.Home '.config\codey-updater'
 $root = Join-Path $owner.Home '.local\share\codey-updater'
 $agentFile = Join-Path $private 'config.json'
@@ -146,8 +147,10 @@ try {
     Require-Update (-not (Test-Path -LiteralPath (Join-Path $private 'pending.json')) -and
         -not (Test-Path -LiteralPath (Join-Path $owner.Home '.local\share\codey-local-update\active.json'))) `
         'An update started while preparing the new agent; no agent code was replaced.'
+    $application = (Get-CodeyTaskFolder).Folder.GetTask("Codey Machine $($config.nodeId) codey")
     Require-Update ((Get-UpdateHash $configFile) -eq $beforeHash -and
-        (Get-CodeyTaskFolder).Folder.GetTask("Codey Machine $($config.nodeId) codey").LastRunTime -eq $beforeTask) `
+        [string]$application.Definition.XmlText -eq $beforeTask -and
+        (@($application.GetInstances(0) | ForEach-Object { $_.InstanceGuid } | Sort-Object) -join ',') -eq $beforeInstances) `
         'Application runtime changed during updater installation.'
     if ($existing.Count) { Assert-UpdaterTask $existing[0] $previous }
     Write-CodeyJson $agentFile $agentConfig

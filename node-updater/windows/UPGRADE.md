@@ -24,8 +24,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Apply
 
 ## 日常升级
 
-Portal 发行版选择器区分 Linux x64 / Windows x64。Windows 仅接受整包 Codey 的签名
-发行版；同一个应用 `.tgz` 可以共享，但平台清单、发行版 ID/序号分别签名。不执行
+Portal 选择器按同一应用包显示一个 Codey 版本，自动按节点匹配 Linux / Windows
+平台清单。Windows 仅接受整包 Codey 的签名发行版；共享同一个应用 `.tgz`，
+平台清单、发行版 ID/序号仍分别签名。不执行
 浏览器提供的脚本、npm 名称、URL 或 shell 命令，不能借此更新 Codex/DevTunnel。
 
 忙碌时留在队列。**先完成 Codey 任务并退出本机 Codex**：当前原生进程的空闲状态
@@ -33,8 +34,9 @@ Portal 发行版选择器区分 Linux x64 / Windows x64。Windows 仅接受整�
 保留 DevTunnel、TLS/SSO、身份、模型 key、Node 和用户数据。完整更新并非零停机。
 
 代理检查 Ed25519 签名、平台、有效期、哈希、Node 兼容性、配置和防降级序号，通过
-原 npm 的 pacote + `npm ci` 按原 shrinkwrap 暂存。依赖与原生预编译文件可能联网下载，
-但不会安装缺少的编译工具。切换后进行本机鉴权健康检查、一次独立 Codey 会话和一次
+原 npm 的 pacote 暂存应用；依赖锁相同时复制已检查的现有依赖，不访问 npm 源。
+锁不同时使用 `npm ci`，依赖与原生预编译文件可能联网下载，但不会安装缺少的
+编译工具。切换后进行本机鉴权健康检查、一次独立 Codey 会话和一次
 只读临时 Codex CLI 真调用；合成会话归档。失败只回退本次代码/描述符，不恢复旧数据库、
 密钥或覆盖并发部署。Portal 只在验证完成后显示成功。
 

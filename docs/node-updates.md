@@ -30,7 +30,22 @@ Settings presents only the single **Codey npm package**. The node overview reads
 `components.codey` from the owner-bound updater heartbeat, never from a desired
 release or a standalone Workspace version. Missing reports remain explicitly unknown.
 
-The release picker and confirmation dialog offer only whole-Codey releases.
+The release picker shows each identical whole-Codey application artifact once,
+not once per OS. A shared version/filename/size/hash/build fingerprint groups
+the signed platform records; different bytes never collapse just because the
+version string matches. Each node's preview pins its own platform release and
+digest, and one confirmed mixed-platform batch retains the existing canary gate.
+An unpublished platform remains explicitly unavailable instead of asking the
+user to select another OS. Platform notes and blockers remain visible in preview.
+
+Visible pages refresh every 10 seconds even without active jobs (5 seconds
+while jobs are active). Refresh continues after completion to collect the next
+actual version heartbeat and local CLI updates. Background tabs pause polling;
+returning refreshes immediately. Requests are deduplicated and a confirmation
+is not overwritten by polling. Success/failure status never supplies a guessed
+installed version; a terminal job waiting for its next heartbeat is labeled.
+
+The confirmation dialog offers only whole-Codey releases.
 The **Download Codey update package** button downloads the selected signed `.tgz`
 through an authenticated owner endpoint, with size/SHA-256 verification in both
 the service and browser. It creates no upgrade plan, job or agent credential.

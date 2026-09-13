@@ -26,6 +26,29 @@ export async function waitForCloudCliReady(request, {
   }
 }
 
+export function nativeProbeEnvironment(config, input, {
+  platform = process.platform, arch = process.arch, home = os.homedir(), node = process.execPath,
+} = {}) {
+  assert.ok(['win32', 'darwin'].includes(platform));
+  const windows = platform === 'win32';
+  const normalize = value => windows ? value.toLowerCase() : value;
+  assert.equal(config.kind, windows ? 'codey-windows-oneclick' : 'codey-macos-oneclick');
+  if (windows) {
+    assert.equal(arch, 'x64');
+    assert.equal(config.schema, 2);
+    assert.equal(config.layout, 'npm-codey-package');
+    // Windows schema 2 binds its platform through kind/layout, not a required platform field.
+    if (config.platform !== undefined) assert.equal(config.platform, 'windows-x64');
+  } else {
+    assert.equal(config.platform, `macos-${arch}`);
+  }
+  assert.equal(normalize(config.ownerHome), normalize(home));
+  assert.equal(config.nodeId, input.nodeId);
+  assert.equal(normalize(config.nodeExe), normalize(node));
+  assert.equal(normalize(config.codeyDirectory), normalize(input.cloudcliPath));
+  return { ...(windows ? config.services.codey.environment : config.environment), HOST: '127.0.0.1', SERVER_PORT: '3001' };
+}
+
 async function main() {
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
@@ -33,17 +56,8 @@ const input = JSON.parse(Buffer.concat(chunks).toString());
 assert.ok(['idle', 'verify'].includes(input.mode));
 let environ;
 if (input.runtimeFile) {
-  assert.ok(['win32', 'darwin'].includes(process.platform));
   const config = JSON.parse((await readFile(input.runtimeFile, 'utf8')).replace(/^\uFEFF/, ''));
-  const windows = process.platform === 'win32';
-  const normalize = value => windows ? value.toLowerCase() : value;
-  assert.equal(config.kind, windows ? 'codey-windows-oneclick' : 'codey-macos-oneclick');
-  assert.equal(config.platform, windows ? 'windows-x64' : `macos-${process.arch}`);
-  assert.equal(normalize(config.ownerHome), normalize(os.homedir()));
-  assert.equal(config.nodeId, input.nodeId);
-  assert.equal(normalize(config.nodeExe), normalize(process.execPath));
-  assert.equal(normalize(config.codeyDirectory), normalize(input.cloudcliPath));
-  environ = { ...(windows ? config.services.codey.environment : config.environment), HOST: '127.0.0.1', SERVER_PORT: '3001' };
+  environ = nativeProbeEnvironment(config, input);
 } else {
   assert.ok(Number.isSafeInteger(input.cloudcliPid) && input.cloudcliPid > 0);
   environ = Object.fromEntries((await readFile(`/proc/${input.cloudcliPid}/environ`)).toString()

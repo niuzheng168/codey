@@ -50,13 +50,14 @@ node scripts/publish-node-update.mjs publish \
 只声明实测过的 Node major。先上传不可变包和清单，最后原子发布 catalog。不得为了
 Windows 重打同版本的应用或改锁文件；先部署支持 Windows 清单的新 Portal，再发布
 Windows feed，防止旧 Portal 拒绝新的平台清单。首次使用单台 Windows canary，
-真实验收后再扩大范围；单个批次对应一个平台的一个明确发行版。
+真实验收后再扩大范围；页面选择同一应用包，批次内按节点匹配各平台签名清单。
 
 用户在 Portal 预览、确认；代理才领取任务。忙碌/离线等待，签名、有效期、版本、
 Node、配置与防降级检查失败则拒绝。**先结束 Codey 工作并退出 Windows 本机 Codex**：
 当前无法安全判定的原生 Codex 进程仍保守视为忙碌，没有 force、没有强杀用户任务。
 
-更新复用原安装中的固定 Node，通过原 npm 的 pacote + `npm ci` 严格安装锁定依赖，
+更新复用原安装中的固定 Node，通过原 npm 的 pacote 提取应用。依赖锁相同时，
+复用经过检查的私有依赖副本，不访问 npm 源或重编译；依赖锁不同时使用 `npm ci`，
 而非全局安装重新解析版本范围。候选与原生模块验证完成前不停止应用。切换前在原
 installer mutex 内重验所有应用文件，只重启 Codey 任务，不动隧道/续期任务。
 随后要求本机已鉴权健康检查、独立 Codey 真调用和只读临时 Codex CLI 真调用通过，
@@ -92,3 +93,8 @@ python3 -I -B test/test_node_updater.py
 以及代理的隔离状态机、坏签名、平台绑定、防降级、忙碌、并发、回滚和重试确认测试。
 模拟任务/模型调用不等于目标 Windows 实机验收。上线仍需检查实际节点的心跳、日志、
 真实模型结果与重启恢复，不把“代码实现完成”描述为“Windows 已升级成功”。
+
+Windows schema-2 runtime 使用 `kind=codey-windows-oneclick` 和
+`layout=npm-codey-package` 绑定平台，没有必填的 `platform` 字段。模型探针遵循
+该描述符格式，仍校验原用户、节点、Node 和应用目录；不能因缺少不存在的字段把
+有效安装误报为 `configuration_changed`。失败任务不会改变页面上的已安装版本。

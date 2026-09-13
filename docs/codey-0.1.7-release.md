@@ -34,10 +34,15 @@ Usage and WebSocket path from the Portal was verified after renewal.
 
 ## Release scope
 
-This is a Linux onboarding patch. Only the Linux x64 signed feed is targeted
-for 0.1.7, using Node 24. The artifact retains the existing shared package format;
-this is not new Windows/macOS native acceptance or a new feed release for those
-platforms. Their existing releases are retained.
+The application change is a Linux onboarding patch. The initial publication
+targeted Linux x64 on Node 24. Subsequent Windows x64 native acceptance passed
+against the exact same tarball, enabling an additional Windows signature without
+rebuilding the application. macOS has no new native acceptance or feed release.
+
+The Portal groups identical application artifacts into one version and resolves
+each node's signed platform record automatically. It continues refreshing actual
+installed-version heartbeats after terminal jobs and while idle. A target version
+or a completed task never substitutes for a node's installed-version report.
 
 Publishing the signed feed and new-machine Skill creates no node update jobs,
 does not perform a fleet rollout and does not deploy/restart the Portal.
@@ -81,7 +86,23 @@ the signing key was neither rotated nor distributed.
   requests with 401. The Portal revision and production service PIDs were
   unchanged; no node update jobs or real model requests were created.
 
-Full local build, acceptance and publication receipts are retained under
-`artifacts/codey-release-0.1.7-20260912/`. These checks do not claim native
-Windows/macOS acceptance, an authenticated browser session test, or automatic
-repair of other nodes' previously generated renewal scripts.
+Full initial build, Linux acceptance and publication receipts are retained under
+`artifacts/codey-release-0.1.7-20260912/`. Those original receipts remain unchanged.
+
+## Additional Windows acceptance — 2026-09-13
+
+The original 7,368,115-byte artifact passed an isolated native Windows offline
+installation from a private 0.1.6 dependency donor on Node 24.20.0. SQLite, bcrypt,
+ripgrep, PTY and SDK checks passed, as did real Workspace/gateway startup,
+authenticated access, anonymous denial and the installed CLI's next update check.
+No Node or dependency payload was added to the archive.
+
+The independent Windows updater also needed fixes outside the application:
+accept the actual schema-2 descriptor without an invented required `platform`
+field, reuse checked dependencies during Portal staging, and compare running
+Task Scheduler instances rather than retry-trigger timestamps. Refreshing this
+agent preserves its credential and does not restart Codey, its tunnel or renewal
+task. Failed historical tasks remain failed; publishing does not upgrade nodes.
+
+These checks do not claim macOS acceptance, an authenticated browser session
+test, or automatic repair of other nodes' previously generated renewal scripts.

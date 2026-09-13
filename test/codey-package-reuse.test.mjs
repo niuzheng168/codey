@@ -7,6 +7,8 @@ import { copyDependencies, sameDependencies, verifyDependencyTree } from "../pac
 import { execute, exists, fileHash, readJson } from "../packages/codey/lib/update-files.mjs";
 import { runUpdate, updateOptions } from "../packages/codey/lib/update.mjs";
 import { installOptions } from "../scripts/install-codey-runtime.mjs";
+import { Runtime } from "../node-updater/windows/runtime.mjs";
+import { inspectUpdateArchive } from "../packages/codey/lib/update-archive.mjs";
 import { fingerprint, jsonFile, packFixture, treeFiles, updateFixture } from "./codey-update-fixture.mjs";
 
 async function dependenciesFixture(t) {
@@ -84,6 +86,29 @@ test("real offline update copies dependencies independently and invokes no npm i
   await writeFile(copied, "new copy");
   assert.equal(await readFile(path.join(result.job, "previous-codey/node_modules/fixture/index.js"), "utf8"),
     "module.exports = 'existing';\n");
+});
+
+test("the Portal native updater also stages matching locked dependencies offline without npm ci or rebuild", { timeout: 120000 }, async t => {
+  const f = await dependenciesFixture(t);
+  const artifact = await inspectUpdateArchive(f.archive);
+  const job = path.join(f.home, "portal-job");
+  await mkdir(job);
+  const calls = [];
+  const runtime = new Runtime({}, { home: f.home, command: async (file, args, options) => {
+    calls.push(args);
+    assert.ok(!args.some(arg => ["ci", "rebuild", "install"].includes(arg)));
+    return execute(file, args, options);
+  } });
+  const candidate = await runtime.stage(f.archive, { platform: "windows-x64", components: { codey: {
+    version: artifact.pkg.version, sha256: artifact.sha256, entrySha256: artifact.entrySha256,
+    commit: artifact.build.sourceCommit, lockSha256: artifact.build.lockSha256,
+  } } }, { root: f.old, node: process.execPath }, job);
+  assert.equal((await readJson(path.join(job, "dependency-mode.json"))).mode, "reuse-installed-offline");
+  assert.ok(calls.some(args => args.includes("doctor")));
+  const copied = path.join(candidate, "node_modules/fixture/index.js");
+  assert.equal(await readFile(copied, "utf8"), "module.exports = 'existing';\n");
+  await writeFile(copied, "candidate only");
+  assert.equal(await readFile(path.join(f.old, "node_modules/fixture/index.js"), "utf8"), "module.exports = 'existing';\n");
 });
 
 test("changed locks and missing or mismatched dependencies fail before an offline transaction", async t => {
