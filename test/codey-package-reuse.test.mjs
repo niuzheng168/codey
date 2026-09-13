@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -26,7 +26,7 @@ async function dependenciesFixture(t) {
     await fingerprint(root);
   }
   await packFixture(f.next, f.archive);
-  await mkdir(path.join(f.old, "node_modules/fixture"), { recursive: true });
+  await mkdir(path.join(f.old, "node_modules/fixture"), { recursive: true, mode: 0o700 });
   await jsonFile(path.join(f.old, "node_modules/fixture/package.json"), { name: "fixture", version: "1.0.0" });
   await writeFile(path.join(f.old, "node_modules/fixture/index.js"), "module.exports = 'existing';\n");
   return f;
@@ -109,7 +109,7 @@ test("the Portal native updater also stages matching locked dependencies offline
   const f = await dependenciesFixture(t);
   const artifact = await inspectUpdateArchive(f.archive);
   const job = path.join(f.home, "portal-job");
-  await mkdir(job);
+  await mkdir(job, { mode: 0o700 });
   const calls = [];
   const runtime = new Runtime({}, { home: f.home, command: async (file, args, options) => {
     calls.push(args);
@@ -154,9 +154,9 @@ test("failed activation restores the same dependency tree without copying or reb
 test("interruption before dependency relinking restores the original standalone installation", async t => {
   const f = await dependenciesFixture(t);
   const job = path.join(f.home, "interrupted-job"), backup = path.join(job, "previous-codey");
-  await mkdir(job);
+  await mkdir(job, { mode: 0o700 });
   const candidate = path.join(job, "candidate");
-  await mkdir(candidate);
+  await mkdir(candidate, { mode: 0o700 });
   const lock = await readJson(path.join(f.next, "npm-shrinkwrap.json"));
   await linkDependencies(f.old, candidate, lock, { home: f.home });
   const previousEntrySha256 = await fileHash(path.join(f.old, "codey-build.json"));
@@ -171,7 +171,7 @@ test("interruption before dependency relinking restores the original standalone 
 test("shared dependencies require a matching owner-bound record, runtime ABI and unchanged link target", async t => {
   const f = await dependenciesFixture(t);
   const candidate = path.join(f.home, "candidate");
-  await mkdir(candidate);
+  await mkdir(candidate, { mode: 0o700 });
   const lock = await readJson(path.join(f.next, "npm-shrinkwrap.json"));
   await linkDependencies(f.old, candidate, lock, { home: f.home });
   const file = path.join(candidate, "codey-dependency-link.json");
@@ -181,7 +181,7 @@ test("shared dependencies require a matching owner-bound record, runtime ABI and
   await jsonFile(file, record);
   await rm(path.join(candidate, "node_modules"));
   const outside = path.join(f.temp, "outside");
-  await mkdir(outside);
+  await mkdir(outside, { mode: 0o700 });
   await symlink(outside, path.join(candidate, "node_modules"), process.platform === "win32" ? "junction" : "dir");
   await assert.rejects(verifyDependencyBinding(candidate, lock, { home: f.home }), /no longer matches/);
   await jsonFile(file, { ...record, modules: outside });
@@ -202,9 +202,18 @@ test("a prior installed dependency link is checked and adopted, never accepted a
   const lock = await readJson(path.join(f.next, "npm-shrinkwrap.json"));
   await assert.rejects(verifyDependencyBinding(f.old, lock, { home: f.home }), /ENOENT/);
   const candidate = path.join(f.home, "candidate");
-  await mkdir(candidate);
+  await mkdir(candidate, { mode: 0o700 });
   await linkDependencies(f.old, candidate, lock, { home: f.home });
   assert.equal(await verifyDependencyBinding(candidate, lock, { home: f.home }), await realpath(retained));
+});
+
+test("dependency reuse refuses a writable-by-others source tree", { skip: process.platform === "win32" }, async t => {
+  const f = await dependenciesFixture(t);
+  const candidate = path.join(f.home, "candidate");
+  await mkdir(candidate, { mode: 0o700 });
+  await chmod(path.join(f.old, "node_modules"), 0o777);
+  const lock = await readJson(path.join(f.next, "npm-shrinkwrap.json"));
+  await assert.rejects(linkDependencies(f.old, candidate, lock, { home: f.home }), /not writable by other users/);
 });
 
 test("changed locks and missing or mismatched dependencies fail before an offline transaction", async t => {
