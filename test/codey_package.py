@@ -10,6 +10,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -178,6 +179,17 @@ class CodeyPackageTests(unittest.TestCase):
         second = self.root / "second"
         second.mkdir()
         self.assertEqual(self.artifact, package.pack_runtime(self.runtime, second, self.node, None))
+
+    def test_shared_package_size_limit_accepts_boundary_and_rejects_larger_files_and_streams(self):
+        self.assertEqual(package.MAX_PACKAGE_BYTES, 8 * 1024 * 1024)
+        content = self.file.read_bytes()
+        for source in (self.file, io.BytesIO(content)):
+            with self.subTest(stream=hasattr(source, "read")):
+                with patch.object(package, "MAX_PACKAGE_BYTES", len(content)):
+                    self.assertEqual(package.inspect_npm_package(source)["version"], self.version)
+                with patch.object(package, "MAX_PACKAGE_BYTES", len(content) - 1):
+                    with self.assertRaisesRegex(RuntimeError, "8 MiB release limit"):
+                        package.inspect_npm_package(source)
 
     def test_npm_can_install_the_one_package_and_creates_only_the_codey_executable(self):
         prefix = self.root / "installation"

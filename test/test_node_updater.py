@@ -1133,6 +1133,19 @@ fs.writeFileSync(process.argv[3],key.publicKey.export({type:'spki',format:'pem'}
         component = {**before["components"]["codey"], "lockSha256": engine.sha(root / "npm-shrinkwrap.json")}
         job = runtime.root / "jobs/native"
         job.mkdir(parents=True)
+        application = ROOT / "packages/codey"
+        component["version"] = engine.read(application / "package.json")["version"]
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "The CLI contract regression requires the existing Node executable")
+        child_env = {"HOME": str(self.root), "PATH": str(Path(node).parent)}
+        if "SystemRoot" in os.environ:
+            child_env["SystemRoot"] = os.environ["SystemRoot"]
+        actual_cli = subprocess.run([node, str(application / "bin/codey.mjs"), "--version"],
+                                    env=child_env, stdin=subprocess.DEVNULL, capture_output=True,
+                                    text=True, encoding="utf-8", timeout=10, check=True)
+        self.assertEqual(actual_cli.stdout, "codey " + component["version"] + "\n")
+        self.assertEqual(actual_cli.stderr, "")
+        version_output = actual_cli.stdout.strip()
         proof = {**component, "ok": True, "name": "codey", "platform": "linux-x64",
                  "sourceCommit": component["commit"], "modelRequests": False, "serviceChanges": False,
                  "native": {key: True for key in ("sqlite", "bcrypt", "ripgrep", "pty", "codexSdk")}}
@@ -1142,7 +1155,7 @@ fs.writeFileSync(process.argv[3],key.publicKey.export({type:'spki',format:'pem'}
             self.assertNotIn("CODEX_HOME", options["env"])
             self.assertNotIn("--package-only", args)
             self.assertNotIn("exec", args)
-            return component["version"] if args[-1] == "--version" else json.dumps(proof)
+            return version_output if args[-1] == "--version" else json.dumps(proof)
         with patch("engine.run", side_effect=runner):
             engine.Runtime.check_codey(runtime, root, component, before, job)
             for name in proof["native"]:
@@ -1150,6 +1163,11 @@ fs.writeFileSync(process.argv[3],key.publicKey.export({type:'spki',format:'pem'}
                 with self.subTest(native=name), self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
                     engine.Runtime.check_codey(runtime, root, component, before, job)
                 proof["native"][name] = True
+            for version_output in (component["version"], "other " + component["version"], "Codey " + component["version"],
+                                   "codey 0.0.0", "codey " + component["version"] + "-wrong",
+                                   "codey " + component["version"] + "\nextra output"):
+                with self.subTest(output=version_output), self.assertRaisesRegex(engine.UpdateError, "stage_failed"):
+                    engine.Runtime.check_codey(runtime, root, component, before, job)
 
     def npm_dependencies(self):
         previous_umask = os.umask(0o077)

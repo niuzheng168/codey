@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -35,7 +35,10 @@ test("real app-only staging reuses the original dependency files and starts both
   const donor = await realpath(process.env.CODEY_PACKAGE_REUSE_FROM);
   const modules = await realpath(path.join(donor, "node_modules"));
   const lockBefore = await readFile(path.join(donor, "npm-shrinkwrap.json"));
+  const acceptanceStarted = Date.now();
   const artifact = await inspectUpdateArchive(process.env.CODEY_PACKAGE_TGZ);
+  const packageBytes = (await stat(artifact.file)).size;
+  assert.ok(packageBytes <= 8 * 1024 * 1024, "The shared application-only tarball must stay within 8 MiB");
   const platform = runtimePlatform();
   const runtime = new Runtime({}, { home, command: async (file, args, options) => {
     assert.ok(!args.some(arg => ["install", "rebuild", "ci"].includes(arg)), "No npm dependency operation");
@@ -114,6 +117,7 @@ test("real app-only staging reuses the original dependency files and starts both
   await stop();
   assert.deepEqual(await readFile(path.join(donor, "npm-shrinkwrap.json")), lockBefore);
   assert.equal(await realpath(path.join(donor, "node_modules")), modules);
-  t.diagnostic(JSON.stringify({ platform, version: artifact.pkg.version, sha256: artifact.sha256, stagingMs,
+  t.diagnostic(JSON.stringify({ platform, version: artifact.pkg.version, sha256: artifact.sha256, packageBytes, stagingMs,
+    stagingAndSmokeMs: Date.now() - acceptanceStarted,
     dependencyFilesCopied: 0, dependencyBytesCopied: 0, nativeAndHttpPassed: true, modelRequests: 0 }));
 });

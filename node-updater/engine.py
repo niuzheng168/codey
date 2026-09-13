@@ -609,7 +609,7 @@ class Runtime:
                           timeout=30, log=Path(job) / "version.private.log")
             proof = json.loads(run([node, candidate / "bin/codey.mjs", "doctor", "--json"], cwd=candidate, env=env,
                                    timeout=90, log=Path(job) / "doctor.private.log"))
-            require(version == component["version"] and proof.get("ok") is True and proof.get("name") == "codey"
+            require(version == "codey " + component["version"] and proof.get("ok") is True and proof.get("name") == "codey"
                     and proof.get("platform") == "linux-x64" and proof.get("modelRequests") is False
                     and proof.get("serviceChanges") is False and
                     all(proof.get(key) == component[key] for key in ("version", "entrySha256", "lockSha256"))

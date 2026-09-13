@@ -16,6 +16,7 @@ import zlib
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "packages/codey"
 RUNTIME_PLATFORMS = ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]
+MAX_PACKAGE_BYTES = 8 * 1024 * 1024
 TEXT_SUFFIXES = {".js", ".mjs", ".cjs", ".json", ".map", ".md", ".html", ".css", ".svg", ".txt", ".sh", ".ps1"}
 
 
@@ -199,6 +200,14 @@ def content_digest(runtime):
 
 def inspect_npm_package(file):
     """Check the npm layout without extracting files or executing package code."""
+    if hasattr(file, "read"):
+        position = file.tell()
+        size = file.seek(0, os.SEEK_END)
+        file.seek(position)
+    else:
+        size = Path(file).stat().st_size
+    if size > MAX_PACKAGE_BYTES:
+        raise RuntimeError("Codey application-only package exceeds the 8 MiB release limit")
     required = {
         "package/package.json", "package/npm-shrinkwrap.json", "package/bin/codey.mjs",
         "package/lib/cli.mjs", "package/codey-build.json", "package/dist-server/server/index.js",
