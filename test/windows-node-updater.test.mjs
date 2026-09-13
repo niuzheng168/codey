@@ -218,7 +218,7 @@ test("the next Windows poll always samples afresh after local recovery", async t
   const f = await fixture(t, { noJob: true });
   assert.equal((await f.agent.once()).state, "polling");
   const directory = path.join(f.before.jobsRoot, f.job.id);
-  await mkdir(directory);
+  await mkdir(directory, { mode: 0o700 });
   await f.runtime.acquireLocal(directory);
   await save(path.join(directory, "local-update.json"), { state: "applying" });
   await save(path.join(f.runtime.private, "pending.json"), { ...f.job, directory });
