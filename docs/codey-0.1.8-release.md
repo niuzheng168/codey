@@ -49,3 +49,33 @@ confirmed installed-version heartbeat. A staging-only smoke result is not proof
 of a completed Portal upgrade. The target for a compatible, idle installation
 with normal download connectivity is approximately one minute; time waiting for
 active work to become idle must be reported separately, not hidden as switching.
+
+## Published 0.1.9 acceptance
+
+- Application source: `b195bf946b9f7859330b3c167672d96f4c95dd0e`.
+- Updater implementation: `9503d9d20a909ff0fc0ea7b8a32d3066e148f7cd`;
+  deployment includes fixture correction `73e325a049064b261f5c07632b4e5e9321047479`.
+- Portal revision: `codey--f-20260913-072643-fc550f`.
+- One tarball: `codey-0.1.9.tgz`, 7,374,704 bytes (about 7.03 MiB).
+- SHA-256: `2c44ba9d2647c55931c297d8565911523180b09fca51710a88f1ee88a9df9358`.
+- Windows signature sequence 19; Linux sequence 20. Both authenticated downloads
+  returned those exact bytes; anonymous downloads returned 401.
+
+The actual owner-scoped Windows update from 0.1.6 to 0.1.9 succeeded, with a
+matching authenticated-health proof and subsequent real 0.1.9 heartbeat. The
+application launcher reports 0.1.9 and the installed CLI's next offline update
+check succeeds. Existing Node, protected files, tunnel/renew tasks and the
+physical dependency directory remained unchanged. No dependency files/bytes
+were copied and no model verification logs were created.
+
+Windows queue-to-success was 99.8 seconds; the first matching local heartbeat
+was observed by 139.2 seconds from queueing. This does **not** meet the one-minute
+end-to-end target. Separately, the isolated Windows staging/native/HTTP smoke
+took 19.5 seconds after bounded file-verification concurrency; that shorter
+number must not be presented as the complete production upgrade time.
+
+On native Linux x64, the previously installed 0.1.8 CLI performed an ordinary
+offline update to 0.1.9 in an isolated HOME in 4.1 seconds, without a bootstrap
+CLI replacement. Update plus native/HTTP acceptance and the subsequent update
+check took 10.2 seconds. The dependency inode and existing Node were unchanged.
+The host's production services were not migrated or restarted.
