@@ -106,3 +106,21 @@ task. Failed historical tasks remain failed; publishing does not upgrade nodes.
 
 These checks do not claim macOS acceptance, an authenticated browser session
 test, or automatic repair of other nodes' previously generated renewal scripts.
+
+## Unified publication — 2026-09-13 UTC
+
+- Added Windows signed release `codey-windows-928e51e4a13d92b6`, sequence **16**,
+  at **05:02:53 UTC**, retaining the original Linux sequence-15 signature.
+- Both authenticated platform download routes returned the exact same original
+  tarball and SHA-256; both anonymous routes returned 401. The existing new-machine
+  Skill pointer was unchanged.
+- Portal revision `codey--f-20260913-045927-d3f735` deployed source
+  `3d78042f28da5d907096bf96d852d4cb80187c31`, including unified version selection,
+  continued heartbeat polling and the repaired independent updater bootstrap.
+- The Windows updater was safely refreshed with its existing credential. Its
+  authenticated descriptor probe passed, all three application task instances
+  were unchanged, and its live heartbeat still correctly reported **0.1.6**.
+  The earlier two failed tasks did not install a newer application.
+- Publication created no node update jobs. Receipts are retained under
+  `artifacts/unified-017-20260913/` on the publishing host; Windows artifact
+  acceptance and download receipts are also saved in `Downloads\Codey-0.1.7`.
