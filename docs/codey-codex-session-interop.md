@@ -49,15 +49,17 @@ upgrade, stop, or restart the daemon.
   permissions when creating its own new thread and when starting its turn.
 - **Continuation:** use `thread/resume` and `turn/start` on the existing
   daemon, preserving the provider thread ID. Attach without permission
-  overrides, check that the thread is idle, then apply the permission mode
-  supplied with the Codey message at `turn/start`. Calls without a selected
-  mode retain inherited settings. Do not resume by starting a second writer.
-- **Events:** forward the Codey-started turn's text, tool progress, and
-  completion notifications. Buffer events that precede the start
-  acknowledgement; ignore other threads and turns.
-- **Safety:** reject an already active desktop turn. Abort only a turn started
-  by this Codey runtime. A timeout/disconnect never retries the prompt through
-  exec; the user should check the original conversation before retrying.
+  overrides. If idle, apply the permission mode supplied with the Codey
+  message at `turn/start`; omitted modes retain inherited settings. If active,
+  ordinary messages use `turn/steer` with the verified current turn ID and
+  inherit that turn's settings. Do not resume by starting a second writer.
+- **Events:** forward the tracked turn's text, tool progress, and completion
+  notifications, including desktop turns steered from Codey. Buffer events that
+  precede the submission acknowledgement; ignore other threads and turns.
+- **Safety:** steering never transfers ownership of a desktop turn. Abort only
+  a turn started by this Codey runtime. A stale turn ID, timeout or disconnect
+  never retries the prompt or redirects it through exec or a new turn; the
+  user should check the original conversation before retrying.
 - **Local lifecycle:** preserve Codey renames/archives and exclude locally
   removed sessions from subsequent imports. These actions do not rename,
   archive, or delete the original Codex thread. Permanent deletion of native
@@ -89,7 +91,78 @@ This path inherits desktop execution settings and keeps desktop approvals and
 started-turn interruption in the desktop. Incompatible explicit browser model,
 effort or permission selections are refused before submission. It does not
 rewrite Codex configuration, remove locks, fork histories, or restart the app.
-The existing Unix shared-daemon path remains unchanged.
+This queue path is separate from the shared-daemon steering path below.
+
+### Active shared-daemon turns (2026-09-13)
+
+The original Unix adapter explicitly rejected every active desktop turn with
+`This session is currently running in Codex app`. Ordinary messages now attach
+to the existing owner and append input to that same turn:
+
+- Read the thread's runtime status without loading its history, then fetch
+  only the newest turn using `thread/turns/list` with `itemsView: full`.
+  Paginated threads do not support `thread/read(includeTurns=true)` on the
+  bundled CLI. Verify the thread identity, a single nonempty turn ID,
+  `inProgress`, and no durable completion timestamp; never guess an older
+  unfinished turn or follow it onto another turn.
+- Seed existing in-flight items, subscribe before submitting, and call
+  `turn/steer` with `expectedTurnId`. Buffer output/completion that arrives
+  before acknowledgement. The acknowledgement must match the expected ID.
+- Do not forward model, effort, permission or collaboration-mode overrides
+  to an in-flight correction. A visible notice explains that the current
+  desktop settings remain in effect. Native `/goal` activations and Plan Mode
+  changes still require an idle session.
+- After acknowledgement, the existing Codey correction UI can send further
+  same-turn input. Advertise `canSteer: true` but `canInterrupt: false`.
+  Runtime Stop also rejects attempts to interrupt the desktop turn, including
+  during attachment, so a stale browser cannot bypass this ownership boundary.
+  Desktop approval requests remain in the desktop client.
+- If the turn ends or changes before steering, or an acknowledgement is lost,
+  fail without an automatic retry, queue submission, fork, or `turn/start`.
+  Closing Codey's observer connection does not stop the original task.
+
+The change requires a CloudCLI **backend** release; publishing only the shared
+frontend does not activate it. Development tests use mock sockets and opt-in,
+isolated real Codex instances with a localhost model fixture, not existing
+user conversations or model credentials.
+
+Validation on 2026-09-13:
+
+- 535 backend tests passed, with one existing missing-rollout fork fixture
+  skipped; all 641 frontend tests passed. Build, type checks and lint passed
+  (existing bundle-size and lint warnings remain).
+- The real two-client steering tests passed against both the bundled CLI
+  `0.146.0` and the locally installed `0.154.0`, for paginated and legacy
+  threads. Initial and subsequent corrections reached the model fixture and
+  persisted under the original turn ID; no competing turn was started.
+- Backend validation used isolated homes/databases and `TMPDIR=/var/tmp`.
+  The existing filesystem-root test fails under the forbidden `/tmp` path;
+  that failure was also reproduced from unmodified HEAD. No workspace
+  validation or permission restrictions were changed to make it pass.
+- No deployment or running-service restart was performed.
+
+### Live/history user-message reconciliation (2026-09-14)
+
+The 0.1.11 active-turn repair delivered each correction once, but the browser
+could show it twice: a persisted native row plus the optimistic/accepted echo.
+Native history timestamps all items with the enclosing turn's start, so a
+correction typed later exceeded the old ten-second clock-skew match. Accepted
+`steer_*` rows were not handled by the old `local_*`-only reconciliation either.
+The original task's two test inputs were read back once each from native history;
+their records were not deleted, rewritten, or submitted again.
+
+The fix carries one opaque input identity from the browser/native submission
+through `clientUserMessageId`, native `clientId` (legacy JSONL `client_id`), and
+normalized `clientMessageId`. First sends, same-turn corrections and the Windows
+desktop queue preserve that identity. History and WebSocket rows reconcile
+one-to-one within the same provider/session, independent of content and turn
+timestamps. Different known identities never fall back to fuzzy text matching;
+legacy inputs without identity retain the existing bounded compatibility path.
+
+Deploy the corrected node backend **and shared Workspace UI**, then refresh the
+browser. Backend-only publication does not update the browser store, and a UI-only
+publication cannot invent identities for older native submissions. Browser
+refresh clears old transient echoes; no native history repair is required.
 
 ### General limitations
 
@@ -98,9 +171,10 @@ The existing Unix shared-daemon path remains unchanged.
 - It enables discovery, reading, and safe continuation. The six-second index
   refresh is not token-level mirroring of every desktop-initiated background
   turn into an already-open Codey chat.
-- Continue turns sequentially, not by sending simultaneously from both UIs.
-  A preflight busy check is not a cross-client transaction or collaborative
-  editing lock.
+- Appending to an active shared-daemon turn uses its existing settings rather
+  than starting a parallel turn. `expectedTurnId` protects against sending to
+  a different turn, but a preflight check for idle/new-turn execution is not a
+  cross-client transaction or collaborative editing lock.
 - Desktop-specific interactive tools and approval dialogs still require the
   desktop client. Codey surfaces a notice and does not automatically approve,
   reject, or take over these requests.
