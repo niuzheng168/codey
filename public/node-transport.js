@@ -30,7 +30,7 @@ export function isLoopback(url) {
 // This is a user-selected route, not an automatic fallback. VNet requests stay
 // same-origin and use the portal Cookie; browser tickets never go to this API.
 export async function fetchNodeJson(node, url, {
-  connectionMode = "direct", timeoutMs = 15000, fetchImpl = fetch,
+  connectionMode = "direct", timeoutMs = 15000, fetchImpl = fetch, signal,
 } = {}) {
   // Prepared machines use a node-pinned private certificate. They deliberately
   // have no browser-direct endpoint; this is a declared route, not a fallback.
@@ -38,8 +38,10 @@ export async function fetchNodeJson(node, url, {
   const vnet = tunnel || node.vnetOnly === true || connectionMode === "vnet";
   const directUrl = new URL(url);
   const controller = new AbortController();
+  const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    requestSignal.throwIfAborted();
     let target = directUrl;
     const options = {
       cache: "no-store",
@@ -47,7 +49,7 @@ export async function fetchNodeJson(node, url, {
       headers: { accept: "application/json" },
       mode: vnet ? "same-origin" : "cors",
       redirect: "error",
-      signal: controller.signal,
+      signal: requestSignal,
     };
     if (vnet) {
       if ((tunnel && node.networkMode !== "devtunnel") ||
@@ -65,6 +67,7 @@ export async function fetchNodeJson(node, url, {
       throw new Error("Node response is too large");
     }
     const text = await response.text();
+    requestSignal.throwIfAborted();
     if (text.length > MAX_RESPONSE_BYTES) throw new Error("Node response is too large");
     const body = JSON.parse(text || "{}");
     if (!response.ok) {

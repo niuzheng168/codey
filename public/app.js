@@ -133,6 +133,7 @@ const state = {
   eventLimit: 20,
   isLoading: false,
   overviewRequestId: 0,
+  overviewAbortController: null,
   management: null,
   managementError: "",
   managementExpanded: window.location.hash === "#management-section",
@@ -221,6 +222,15 @@ function renderConnectionOptions() {
 
 function setConnectionLabel(value) {
   elements.connectionLabel.textContent = `${value}${connectionModeSuffix()}`;
+}
+
+function respondingNodeCount(data) {
+  return data.nodes.filter((node) => node.responding ?? ["online", "partial"].includes(node.status)).length;
+}
+
+function overviewConnectionLabel(data) {
+  const pending = data.status.loading || 0;
+  return `${respondingNodeCount(data)}/${data.nodes.length} 节点有响应${pending ? ` · ${pending} 个读取中` : ""}`;
 }
 
 async function refreshClientNodes(force = false) {
@@ -382,8 +392,7 @@ function renderActiveView() {
         : `${state.history.total} 个共享会话`,
     );
   } else if (state.data) {
-    const responding = state.data.status.online + state.data.status.partial;
-    setConnectionLabel(`${responding}/${state.data.nodes.length} 节点有响应`);
+    setConnectionLabel(overviewConnectionLabel(state.data));
   }
 }
 
@@ -464,9 +473,12 @@ function nodeColorClass(nodeId) {
 
 function setLoading(isLoading) {
   state.isLoading = isLoading;
-  elements.refreshButton.disabled = isLoading;
+  // A slow node must not disable manual refresh or filter changes.
+  elements.refreshButton.disabled = false;
   elements.refreshButton.classList.toggle("is-loading", isLoading);
-  elements.refreshButton.querySelector("span").textContent = isLoading ? "刷新中" : "刷新";
+  elements.refreshButton.setAttribute("aria-busy", String(isLoading));
+  elements.refreshButton.querySelector("span").textContent = isLoading ? "重新刷新" : "刷新";
+  if (isLoading) elements.refreshCountdown.textContent = "正在刷新各节点";
   if (!state.data) {
     elements.loadingState.hidden = !isLoading;
     elements.dashboard.hidden = true;
@@ -530,14 +542,17 @@ function renderKpis(data) {
   const cacheShare = totals.total_tokens
     ? (totals.cache_read_input_tokens / totals.total_tokens) * 100
     : 0;
-  const responding = data.status.online + data.status.partial;
+  const responding = respondingNodeCount(data);
+  const available = data.nodes.some((node) => node.tokenUsageAvailable);
+  const stale = data.nodes.some((node) => node.staleScopes?.includes("summary")) ? " · 含上次数据" : "";
+  const pending = data.status.loading ? ` · ${data.status.loading} 读取中` : "";
   return `
     <section class="kpi-grid" aria-label="汇总指标">
-      ${renderMetricCard("Token 总量", formatCompact(totals.total_tokens), `${formatExact(totals.total_tokens)} tokens`)}
-      ${renderMetricCard("请求数", formatCompact(totals.request_count), `${formatExact(totals.request_count)} 次请求`)}
-      ${renderMetricCard("估算成本", formatCosts(totals.costs), "由 Codey 网关 AIU 记录估算")}
-      ${renderMetricCard("缓存读取占比", formatPercent(cacheShare), `${formatExact(totals.cache_read_input_tokens)} cache-read tokens`)}
-      ${renderMetricCard("可响应节点", `${responding} / ${data.nodes.length}`, `${data.status.online} 正常 · ${data.status.partial} 部分可用`)}
+      ${renderMetricCard("Token 总量", available ? formatCompact(totals.total_tokens) : "—", `${formatExact(totals.total_tokens)} tokens${stale}`)}
+      ${renderMetricCard("请求数", available ? formatCompact(totals.request_count) : "—", `${formatExact(totals.request_count)} 次请求${stale}`)}
+      ${renderMetricCard("估算成本", formatCosts(totals.costs), `由 Codey 网关 AIU 记录估算${stale}`)}
+      ${renderMetricCard("缓存读取占比", available ? formatPercent(cacheShare) : "—", `${formatExact(totals.cache_read_input_tokens)} cache-read tokens${stale}`)}
+      ${renderMetricCard("可响应节点", `${responding} / ${data.nodes.length}`, `${data.status.online} 正常 · ${data.status.partial} 部分可用${pending}`)}
     </section>
   `;
 }
@@ -643,6 +658,8 @@ function renderAccounts(accounts) {
 }
 
 function renderOverviewPanels(data) {
+  const dailyPending = data.nodes.some((node) => node.pendingScopes?.includes("daily"));
+  const quotaPending = data.nodes.some((node) => node.pendingScopes?.includes("quota"));
   return `
     <div class="content-grid">
       <section class="section">
@@ -654,7 +671,8 @@ function renderOverviewPanels(data) {
             </div>
             <span class="section-badge">${data.aggregate.days.length} 个数据点</span>
           </div>
-          ${renderTrendChart(data.aggregate.days)}
+          ${!data.aggregate.days.length && dailyPending
+            ? '<div class="empty-state">正在读取每日用量…</div>' : renderTrendChart(data.aggregate.days)}
         </div>
       </section>
 
@@ -666,7 +684,8 @@ function renderOverviewPanels(data) {
               <p class="section-subtitle">账号级配额仅展示一次，不跨机器累加</p>
             </div>
           </div>
-          ${renderAccounts(data.accounts)}
+          ${!data.accounts.length && quotaPending
+            ? '<div class="empty-state">正在读取账号配额…</div>' : renderAccounts(data.accounts)}
         </div>
       </section>
     </div>
@@ -674,7 +693,7 @@ function renderOverviewPanels(data) {
 }
 
 function statusLabel(status) {
-  return { online: "正常", partial: "部分可用", offline: "数据链路异常" }[status] || status;
+  return { online: "正常", partial: "部分可用", offline: "数据链路异常", loading: "读取中" }[status] || status;
 }
 
 function groupedNodeErrors(errors) {
@@ -752,15 +771,15 @@ function renderNodeCard(node, aggregateTotal) {
         <span class="status-pill ${escapeHtml(node.status)}" title="用量接口的读取状态，不代表机器或升级器心跳状态">${escapeHtml(node.id === "local" && node.status === "offline" ? "未连接" : statusLabel(node.status))}</span>
       </div>
       <strong class="node-token-value">${node.tokenUsageAvailable ? escapeHtml(formatCompact(node.totals.total_tokens)) : "—"}</strong>
-      <span class="node-token-label">tokens · ${escapeHtml(PERIOD_LABELS[state.period])}</span>
+      <span class="node-token-label">tokens · ${escapeHtml(PERIOD_LABELS[state.period])}${node.staleScopes?.length ? " · 含上次数据" : ""}</span>
       <div class="node-share">
         <div class="node-share-label"><span>占所选节点</span><span>${escapeHtml(formatPercent(share))}</span></div>
         <progress value="${clamp(share, 0, 100)}" max="100" aria-label="${escapeHtml(node.name)} 用量占比"></progress>
       </div>
       <div class="node-stat-row">
-        <div class="node-stat"><span>请求</span><strong>${escapeHtml(formatCompact(node.totals.request_count))}</strong></div>
+        <div class="node-stat"><span>请求</span><strong>${node.tokenUsageAvailable ? escapeHtml(formatCompact(node.totals.request_count)) : "—"}</strong></div>
         <div class="node-stat"><span>成本</span><strong>${escapeHtml(formatCosts(node.totals.costs))}</strong></div>
-        <div class="node-stat"><span>响应</span><strong>${escapeHtml(`${node.latencyMs} ms`)}</strong></div>
+        <div class="node-stat"><span>响应</span><strong>${node.latencyMs == null ? "—" : escapeHtml(`${node.latencyMs} ms`)}</strong></div>
       </div>
       ${errorMarkup}
       ${startMarkup}
@@ -1021,7 +1040,7 @@ function renderModels(data) {
     return `
       <section class="section table-section">
         <div class="section-header"><div><h2 class="section-heading">模型用量</h2></div></div>
-        <div class="empty-state">所选范围内没有模型记录。</div>
+        <div class="empty-state">${data.nodes.some((node) => node.pendingScopes?.includes("summary")) ? "正在读取模型用量…" : "所选范围内没有模型记录。"}</div>
       </section>
     `;
   }
@@ -1101,17 +1120,20 @@ function renderEvents(data) {
           </table>
         </div>
         ${state.eventLimit < events.length ? '<button type="button" class="load-more" id="load-more-events">显示更多</button>' : ""}
-      ` : '<div class="empty-state">所选范围内还没有请求事件。</div>'}
+      ` : `<div class="empty-state">${data.nodes.some((node) => node.pendingScopes?.includes("events")) ? "正在读取请求事件…" : "所选范围内还没有请求事件。"}</div>`}
     </section>
   `;
 }
 
 function renderStatus(data) {
-  const affected = data.nodes.filter((node) => node.status !== "online");
+  const affected = data.nodes.filter((node) => node.errors?.length);
+  const pending = data.nodes.filter((node) => node.pendingScopes?.length);
+  const stale = data.nodes.filter((node) => node.staleScopes?.length);
   const notices = [];
   const localNode = data.nodes.find((node) => node.id === "local");
   const localUnavailable = LEGACY_NODE_CONNECTIONS_ENABLED &&
-    state.directMode && state.connectionMode !== "vnet" && localNode && localNode.status !== "online";
+    state.directMode && state.connectionMode !== "vnet" && localNode &&
+    ["offline", "partial"].includes(localNode.status);
   if (elements.localConnectButton) {
     elements.localConnectButton.hidden = !localUnavailable;
     elements.localConnectButton.disabled = false;
@@ -1127,6 +1149,9 @@ function renderStatus(data) {
       `<div class="notice ${state.operationNotice.error ? "notice-error" : "notice-success"}">${escapeHtml(state.operationNotice.message)}</div>`,
     );
   }
+  if (pending.length > 0) {
+    notices.push(`<div class="notice">正在读取 ${escapeHtml(pending.map((node) => node.name).join("、"))}；已返回的数据会立即显示，无需等待其他接口。</div>`);
+  }
   if (affected.length > 0) {
     const summary = affected
       .map((node) => {
@@ -1138,14 +1163,16 @@ function renderStatus(data) {
       .join("；");
     notices.push(`<div class="notice">部分节点数据不完整。${escapeHtml(summary)}</div>`);
   }
+  if (stale.length > 0) {
+    notices.push(`<div class="notice">${escapeHtml(stale.map((node) => node.name).join("、"))} 的部分数据沿用上次结果，获取成功后会替换。</div>`);
+  }
   elements.statusRegion.innerHTML = notices.join("");
 }
 
 function renderDashboard() {
   const data = state.data;
   if (!data) return;
-  const responding = data.status.online + data.status.partial;
-  setConnectionLabel(`${responding}/${data.nodes.length} 节点有响应`);
+  setConnectionLabel(overviewConnectionLabel(data));
   elements.lastUpdated.textContent = formatDateTime(data.generatedAt);
   renderStatus(data);
   elements.dashboard.innerHTML = [
@@ -2237,18 +2264,45 @@ async function provisionNode(payload) {
   }
 }
 
-async function fetchOverview(forceRefresh, { interactiveLocal = false, connectionChanged = false } = {}) {
+async function fetchOverview(forceRefresh, { interactiveLocal = false } = {}) {
+  const requestId = ++state.overviewRequestId;
+  state.overviewAbortController?.abort();
+  state.overviewAbortController = null;
+  state.nextRefreshAt = 0;
   if (state.selectedNodes.size === 0) {
+    state.data = null;
     setLoading(false);
+    elements.statusRegion.innerHTML = "";
+    elements.lastUpdated.textContent = "—";
+    elements.refreshCountdown.textContent = "暂无节点";
     elements.loadingState.hidden = true;
     elements.dashboard.hidden = false;
     elements.dashboard.innerHTML = '<section class="empty-state">你还没有可访问的 DevTunnel 节点。<a href="/settings#add-node">安装 Codey → 配置私有 DevTunnel → 验通后添加</a></section>';
     setConnectionLabel("暂无节点");
     return;
   }
-  if (state.isLoading && !connectionChanged) return;
-  const requestId = ++state.overviewRequestId;
+  const controller = new AbortController();
+  state.overviewAbortController = controller;
   const connectionMode = state.connectionMode;
+  const period = state.period;
+  const nodeIds = [...state.selectedNodes];
+  const previousData = state.data;
+  if (previousData && (previousData.period !== period ||
+      (state.directMode && previousData.connectionMode !== connectionMode))) {
+    state.data = null;
+  }
+  let renderFrame = null;
+  const onProgress = (data) => {
+    if (requestId !== state.overviewRequestId || controller.signal.aborted) return;
+    state.data = data;
+    // Several interfaces can finish together; update the DOM at most once per frame.
+    if (renderFrame === null) {
+      renderFrame = window.requestAnimationFrame(() => {
+        renderFrame = null;
+        if (requestId === state.overviewRequestId) renderDashboard();
+      });
+    }
+  };
   setLoading(true);
   elements.statusRegion.innerHTML = "";
   try {
@@ -2259,24 +2313,26 @@ async function fetchOverview(forceRefresh, { interactiveLocal = false, connectio
       data = await collectClientOverview(
         state.nodes,
         state.clientConfig,
-        state.period,
+        period,
         {
-          nodeIds: [...state.selectedNodes],
+          nodeIds,
           interactiveLocal,
           connectionMode,
+          previousData,
+          signal: controller.signal,
+          onProgress,
         },
       );
     } else {
       const query = new URLSearchParams({
-        period: state.period,
-        nodes: [...state.selectedNodes].join(","),
+        period,
+        nodes: nodeIds.join(","),
       });
       if (forceRefresh) query.set("refresh", "1");
-      data = await fetchJson(`/api/overview?${query}`);
+      data = await fetchJson(`/api/overview?${query}`, { signal: controller.signal });
     }
     if (requestId !== state.overviewRequestId) return;
     state.data = data;
-    state.nextRefreshAt = Date.now() + state.refreshSeconds * 1000;
     renderDashboard();
   } catch (error) {
     if (requestId !== state.overviewRequestId) return;
@@ -2285,7 +2341,13 @@ async function fetchOverview(forceRefresh, { interactiveLocal = false, connectio
     elements.loadingState.hidden = true;
     if (!state.data) elements.dashboard.hidden = true;
   } finally {
-    if (requestId === state.overviewRequestId) setLoading(false);
+    if (renderFrame !== null) window.cancelAnimationFrame(renderFrame);
+    if (requestId === state.overviewRequestId) {
+      state.overviewAbortController = null;
+      state.nextRefreshAt = Date.now() + state.refreshSeconds * 1000;
+      elements.refreshCountdown.textContent = `${state.refreshSeconds}s 后自动刷新`;
+      setLoading(false);
+    }
   }
 }
 
@@ -2382,7 +2444,7 @@ async function onConnectionModeChange(event) {
   updateUrl();
   setConnectionLabel("正在连接节点");
   await Promise.all([
-    fetchOverview(true, { connectionChanged: true }),
+    fetchOverview(true),
     ...(state.activeView === "sessions" ? [fetchHistoryList({ resetOffset: true })] : []),
   ]);
 }

@@ -1408,6 +1408,13 @@ button {
   content: "";
 }
 
+.status-pill.loading {
+  color: var(--text-muted);
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.status-pill.loading::before { background: var(--text-muted); }
+
 .status-pill.partial {
   color: #fde68a;
   background: rgba(251, 191, 36, 0.08);

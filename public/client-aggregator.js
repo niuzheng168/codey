@@ -9,6 +9,13 @@ const TOTAL_FIELDS = Object.freeze([
   "total_tokens",
 ]);
 
+const SCOPE_FIELDS = Object.freeze({
+  quota: ["login", "plan", "quotaResetAt", "quotas"],
+  summary: ["totals", "byModel"],
+  daily: ["days"],
+  events: ["events"],
+});
+
 function safeText(value, maximumLength = 160) {
   return String(value ?? "").trim().slice(0, maximumLength);
 }
@@ -237,10 +244,6 @@ function normalizeEvents(value, node) {
   });
 }
 
-function resultValue(result) {
-  return result.status === "fulfilled" ? result.value : null;
-}
-
 function groupAccounts(nodes) {
   const groups = new Map();
   for (const node of nodes) {
@@ -286,7 +289,65 @@ function groupAccounts(nodes) {
   });
 }
 
-async function collectNode(node, config, period, fetchImpl, options) {
+function initialNode(node, previous) {
+  const snapshot = {
+    id: node.id,
+    name: node.name,
+    region: node.region,
+    accent: node.accent,
+    endpoint: new URL(node.endpoint).origin,
+    status: "loading",
+    responding: false,
+    latencyMs: null,
+    pendingScopes: Object.keys(SCOPE_FIELDS),
+    availableScopes: [],
+    staleScopes: [],
+    tokenUsageAvailable: false,
+    login: "",
+    plan: "",
+    quotaResetAt: null,
+    quotas: [],
+    totals: emptyTotals(),
+    byModel: [],
+    days: [],
+    events: [],
+    errors: [],
+  };
+  if (previous?.endpoint === snapshot.endpoint) {
+    for (const [scope, fields] of Object.entries(SCOPE_FIELDS)) {
+      if (!previous.availableScopes?.includes(scope)) continue;
+      for (const field of fields) snapshot[field] = previous[field];
+      snapshot.availableScopes.push(scope);
+      snapshot.staleScopes.push(scope);
+    }
+    snapshot.tokenUsageAvailable = snapshot.availableScopes.includes("summary") && previous.tokenUsageAvailable;
+  }
+  return snapshot;
+}
+
+function normalizeScope(scope, value, node) {
+  switch (scope) {
+    case "quota":
+      return {
+        login: safeText(value?.login, 120),
+        plan: safeText(value?.copilot_plan, 80),
+        quotaResetAt: safeText(value?.quota_reset_date_utc || value?.quota_reset_date, 80) || null,
+        quotas: normalizeQuotaSnapshots(value?.quota_snapshots),
+      };
+    case "summary":
+      return {
+        tokenUsageAvailable: Boolean(value),
+        totals: normalizeTotals(value?.totals),
+        byModel: normalizeModels(value?.byModel),
+      };
+    case "daily":
+      return { days: normalizeDays(value?.days) };
+    case "events":
+      return { events: normalizeEvents(value?.items, node) };
+  }
+}
+
+async function collectNode(node, config, period, fetchImpl, options, initial, onProgress) {
   const timeoutMs =
     options.interactiveLocal && isLoopback(node.endpoint)
       ? 30000
@@ -315,41 +376,65 @@ async function collectNode(node, config, period, fetchImpl, options) {
     ],
   ];
   const startedAt = performance.now();
-  const results = await Promise.allSettled(
-    requests.map(([, url]) => fetchNodeJson(node, url, {
-      fetchImpl, timeoutMs, connectionMode: options.connectionMode,
-    })),
+  let current = initial;
+  let successes = 0;
+  await Promise.all(requests.map(async ([scope, url]) => {
+    let patch;
+    let failure;
+    try {
+      const value = await fetchNodeJson(node, url, {
+        fetchImpl, timeoutMs, connectionMode: options.connectionMode, signal: options.signal,
+      });
+      patch = normalizeScope(scope, value, node);
+    } catch (error) {
+      // Superseded refreshes are cancelled, not failed node probes.
+      options.signal?.throwIfAborted();
+      failure = { scope, message: errorMessage(error, options.connectionMode) };
+    }
+    options.signal?.throwIfAborted();
+    if (!failure) successes++;
+    const pendingScopes = current.pendingScopes.filter((item) => item !== scope);
+    const errors = failure ? [...current.errors, failure] : current.errors;
+    current = {
+      ...current,
+      ...patch,
+      pendingScopes,
+      availableScopes: failure ? current.availableScopes : [...new Set([...current.availableScopes, scope])],
+      staleScopes: failure ? current.staleScopes : current.staleScopes.filter((item) => item !== scope),
+      errors,
+      status: pendingScopes.length ? "loading" : successes === 0 ? "offline" : errors.length ? "partial" : "online",
+      responding: successes > 0,
+      latencyMs: Math.round(performance.now() - startedAt),
+    };
+    onProgress(current);
+  }));
+}
+
+function overviewSnapshot(collected, config, period, connectionMode) {
+  const usableNodes = collected.filter((node) => node.tokenUsageAvailable);
+  const aggregate = {
+    totals: mergeTotals(usableNodes.map((node) => node.totals)),
+    byModel: mergeModelBreakdowns(usableNodes.map((node) => node.byModel)),
+    // Daily data must not wait for the independent summary/quota requests.
+    days: mergeDailyUsage(collected),
+    recentEvents: collected
+      .flatMap((node) => node.events ?? [])
+      .sort((a, b) => b.created_at_ms - a.created_at_ms)
+      .slice(0, config.maxRecentEvents),
+  };
+  const status = collected.reduce(
+    (counts, node) => ({ ...counts, [node.status]: counts[node.status] + 1 }),
+    { online: 0, partial: 0, offline: 0, loading: 0 },
   );
-  const errors = results.flatMap((result, index) =>
-    result.status === "rejected"
-      ? [{ scope: requests[index][0], message: errorMessage(result.reason, options.connectionMode) }]
-      : [],
-  );
-  const usage = resultValue(results[0]);
-  const summary = resultValue(results[1]);
-  const daily = resultValue(results[2]);
-  const events = resultValue(results[3]);
-  const successes = results.filter((result) => result.status === "fulfilled").length;
   return {
-    id: node.id,
-    name: node.name,
-    region: node.region,
-    accent: node.accent,
-    endpoint: new URL(node.endpoint).origin,
-    status: successes === 0 ? "offline" : errors.length === 0 ? "online" : "partial",
-    latencyMs: Math.round(performance.now() - startedAt),
-    tokenUsageAvailable: Boolean(summary),
-    login: safeText(usage?.login, 120),
-    plan: safeText(usage?.copilot_plan, 80),
-    quotaResetAt:
-      safeText(usage?.quota_reset_date_utc || usage?.quota_reset_date, 80) ||
-      null,
-    quotas: normalizeQuotaSnapshots(usage?.quota_snapshots),
-    totals: normalizeTotals(summary?.totals),
-    byModel: normalizeModels(summary?.byModel),
-    days: normalizeDays(daily?.days),
-    events: normalizeEvents(events?.items, node),
-    errors,
+    generatedAt: new Date().toISOString(),
+    connectionMode,
+    period,
+    selectedNodeIds: collected.map((node) => node.id),
+    status,
+    aggregate,
+    accounts: groupAccounts(collected),
+    nodes: [...collected],
   };
 }
 
@@ -359,39 +444,29 @@ export async function collectClientOverview(
   period,
   options = {},
 ) {
+  options.signal?.throwIfAborted();
   const fetchImpl = options.fetchImpl ?? fetch;
+  const connectionMode = options.connectionMode ?? "direct";
   const selectedIds = new Set(options.nodeIds ?? []);
-  const available = nodesForConnection(nodes, options.connectionMode);
+  const available = nodesForConnection(nodes, connectionMode);
   const selected = selectedIds.size
     ? available.filter((node) => selectedIds.has(node.id))
     : available;
-  const collected = await Promise.all(
-    selected.map((node) =>
-      collectNode(node, config, period, fetchImpl, options),
-    ),
+  // Reuse only the current period/route, and only for still-selected nodes.
+  const previous = options.previousData;
+  const previousNodes = new Map(
+    previous?.period === period && previous.connectionMode === connectionMode
+      ? previous.nodes.map((node) => [node.id, node]) : [],
   );
-  const usableNodes = collected.filter((node) => node.tokenUsageAvailable);
-  const aggregate = {
-    totals: mergeTotals(usableNodes.map((node) => node.totals)),
-    byModel: mergeModelBreakdowns(usableNodes.map((node) => node.byModel)),
-    days: mergeDailyUsage(usableNodes),
-    recentEvents: collected
-      .flatMap((node) => node.events ?? [])
-      .sort((a, b) => b.created_at_ms - a.created_at_ms)
-      .slice(0, config.maxRecentEvents),
-  };
-  const status = collected.reduce(
-    (counts, node) => ({ ...counts, [node.status]: counts[node.status] + 1 }),
-    { online: 0, partial: 0, offline: 0 },
-  );
-  return {
-    generatedAt: new Date().toISOString(),
-    connectionMode: options.connectionMode ?? "direct",
-    period,
-    selectedNodeIds: selected.map((node) => node.id),
-    status,
-    aggregate,
-    accounts: groupAccounts(collected),
-    nodes: collected,
-  };
+  const collected = selected.map((node) => initialNode(node, previousNodes.get(node.id)));
+  const snapshot = () => overviewSnapshot(collected, config, period, connectionMode);
+  options.onProgress?.(snapshot());
+  await Promise.all(selected.map((node, index) =>
+    collectNode(node, config, period, fetchImpl, options, collected[index], (result) => {
+      collected[index] = result;
+      options.onProgress?.(snapshot());
+    }),
+  ));
+  options.signal?.throwIfAborted();
+  return snapshot();
 }
