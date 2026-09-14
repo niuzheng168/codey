@@ -85,6 +85,8 @@ test("built npm package installs as Codey and starts both real servers without u
   }
   await writeFile(path.join(preflightAssets, "SHA256SUMS"), sums.join("\n") + "\n");
   await writeFile(path.join(preflightRoot, "templates/a100-models.json"), "{}");
+  await writeFile(path.join(preflightRoot, "scripts/registration.mjs"),
+    await readFile(path.join(installed, "onboarding/scripts/registration.mjs")));
   for (const name of ["systemctl", "loginctl", "pkill", "pgrep", "fuser", "curl", "sudo", "npm"]) {
     const body = name === "sudo"
       ? '#!/bin/sh\n[ "$*" = "-n true" ] || exit 88\n'
