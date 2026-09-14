@@ -192,8 +192,7 @@ test("one shared version automatically matches Windows and Linux without a platf
   const p = await page({ initialData: status });
   assert.equal(p.get("release").children.length, 1);
   assert.equal(p.get("release").textContent, "Codey 0.2.0");
-  assert.match(p.get("download-info").textContent, /Linux x64/);
-  assert.match(p.get("download-info").textContent, /Windows x64/);
+  assert.match(p.get("download-info").textContent, /共享安装包/);
   assert.doesNotMatch(p.get("list").textContent, /对应平台/);
   assert.ok(p.get("list").children[2].querySelectorAll("button").some(button => button.textContent === "接入升级器"));
   assert.equal(p.get("list").children[0].querySelector("input").disabled, false);
@@ -212,8 +211,7 @@ test("Mac ARM/Intel releases and unreported enrollment stay explicit instead of 
   status.nodes[2] = { ...status.nodes[2], platform: "macos-x64", updaterSupported: true };
   const p = await page({ initialData: status });
   assert.equal(p.get("release").children.length, 1);
-  assert.match(p.get("download-info").textContent, /macOS Apple Silicon/);
-  assert.match(p.get("download-info").textContent, /macOS Intel/);
+  assert.match(p.get("download-info").textContent, /共享安装包/);
   const unpaired = p.get("list").children[2];
   assert.match(unpaired.textContent, /Codey 版本未上报/);
   assert.ok(unpaired.querySelectorAll("button").some(button => button.textContent === "接入升级器"));
@@ -384,12 +382,12 @@ test("local updates without Portal jobs also refresh; failed jobs keep their act
   assert.doesNotMatch(p.get("list").children[0].textContent, /升级成功/);
 });
 
-test("unsupported version platforms stay explicit; different tarballs with the same version never collapse", async () => {
+test("incomplete historical records stay explicit; different tarballs with the same version never collapse", async () => {
   const status = data();
   status.nodes[1] = { ...status.nodes[1], platform: "windows-x64",
     report: { ...status.nodes[1].report, platform: "windows-x64" } };
   const p = await page({ initialData: status });
-  assert.match(p.get("list").children[1].textContent, /此版本尚未向该平台开放/);
+  assert.match(p.get("list").children[1].textContent, /旧发行记录不完整/);
   assert.equal(p.get("list").children[1].querySelector("input").disabled, true);
   status.releases.push({ ...status.releases[0], id: "different-bytes", platform: "windows-x64", sequence: 2,
     components: { codey: { ...status.releases[0].components.codey, sha256: "c".repeat(64) } } });
@@ -398,6 +396,59 @@ test("unsupported version platforms stay explicit; different tarballs with the s
   assert.match(p.get("release").textContent, /cccccccccccc/);
   assert.equal(p.get("list").children[1].querySelector("input").disabled, true,
     "The original selected artifact was retained, not replaced with a same-version different package");
+});
+
+test("one shared update option serves all four runtimes without platform-specific publication choices", async () => {
+  const status = data();
+  status.releases[0] = { ...status.releases[0], platform: "shared",
+    runtimePlatforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"] };
+  const template = status.nodes[0];
+  status.nodes = status.releases[0].runtimePlatforms.map((platform, index) => ({
+    ...template, id: `node-${index}`, name: `Machine ${index}`, platform,
+    report: { ...template.report, platform, sharedCodeyReleases: true },
+  }));
+  const p = await page({ initialData: status });
+  assert.equal(p.get("release").children.length, 1);
+  assert.equal(p.get("release").textContent, "Codey 0.2.0");
+  assert.match(p.get("download-info").textContent, /共享安装包/);
+  assert.doesNotMatch(p.get("download-info").textContent, /已开放|Linux|Windows|macOS/);
+  for (const row of p.get("list").children) {
+    assert.equal(row.querySelector("input").disabled, false);
+    assert.doesNotMatch(row.textContent, /尚未.*平台|旧发行记录不完整/);
+  }
+  await p.get("all").click();
+  const request = p.requests.find(row => row.url.endsWith("/plans"));
+  assert.deepEqual(request.body.nodeIds, status.nodes.map(node => node.id));
+  assert.equal(request.body.releaseId, status.releases[0].id);
+  assert.equal("platform" in request.body, false);
+});
+
+test("an older updater gets a format-upgrade hint, not a platform-release prohibition", async () => {
+  const status = data();
+  status.releases[0] = { ...status.releases[0], platform: "shared",
+    runtimePlatforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"] };
+  status.nodes = [{ ...status.nodes[0], platform: "windows-x64",
+    report: { ...status.nodes[0].report, platform: "windows-x64" } }];
+  const p = await page({ initialData: status });
+  assert.match(p.get("list").textContent, /请更新升级器以支持共享版本/);
+  assert.doesNotMatch(p.get("list").textContent, /此版本尚未|旧发行记录不完整/);
+  assert.equal(p.get("list").children[0].querySelector("input").disabled, true);
+  status.nodes[0].report.sharedCodeyReleases = true;
+  await p.poll();
+  assert.equal(p.get("list").children[0].querySelector("input").disabled, false);
+  assert.ok(p.requests.every(row => row.options.method === "GET"));
+});
+
+test("a new shared signature and old per-platform signatures for identical bytes remain one version", async () => {
+  const status = data(), legacy = status.releases[0];
+  status.releases.unshift({ ...legacy, id: "shared-release", sequence: 2, platform: "shared",
+    runtimePlatforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"] });
+  status.nodes[0].report.sharedCodeyReleases = true;
+  const p = await page({ initialData: status });
+  assert.equal(p.get("release").children.length, 1);
+  assert.equal(p.get("release").value, "shared-release");
+  await p.get("download").click();
+  assert.equal(p.requests.at(-1).url, "/api/settings/updates/releases/shared-release/codey.tgz");
 });
 
 test("refresh requests are deduplicated, pause in hidden tabs and do not change a confirmation in progress", async () => {

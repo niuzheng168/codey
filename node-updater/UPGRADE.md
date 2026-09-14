@@ -44,6 +44,11 @@ Codey/ephemeral Codex model checks and their possible usage charges.
 Nodes installed from the single `codey` npm package report the `npm` layout.
 They accept only a whole `codey-<version>.tgz` release, prepare dependencies from
 its shrinkwrap, and stop both internal services around one atomic package switch.
+New whole-Codey releases use one `platform: "shared"` signature and artifact for
+all declared runtimes. This agent advertises `sharedCodeyReleases: true`; deploy
+the updated Portal before refreshing agents or publishing the shared format.
+Its real host stays `linux-x64`, and runtime/native checks are unchanged.
+Historical platform signatures keep their original scope.
 Matching dependencies are linked directly without a full copy, reinstall or rebuild.
 Whole-Codey reuse compares the CLI's dependency graph rather than app/root-lock version labels,
 so an app-only patch still reuses its dependencies. Dependency versions, integrity and

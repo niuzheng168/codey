@@ -7,6 +7,9 @@ const element = (tag, text, className) => {
 };
 const terminal = new Set(["succeeded", "failed", "rolled_back", "needs_action", "needs_migration", "cancelled"]);
 const codeyRelease = (release) => Boolean(release?.components?.codey) && Object.keys(release.components).length === 1;
+const supportsPlatform = (release, platform) => release.platform === "shared"
+  ? codeyRelease(release) && Array.isArray(release.runtimePlatforms) && release.runtimePlatforms.includes(platform)
+  : release.platform === platform;
 const packageKey = release => ["version", "file", "size", "sha256", "commit", "entrySha256", "lockSha256"]
   .map(key => release.components.codey[key] ?? "").join(":");
 const platformLabel = platform => ({ "windows-x64": "Windows x64", "linux-x64": "Linux x64",
@@ -19,7 +22,8 @@ const labels = {
   needs_setup: "尚未接入升级器", protected_local: "受保护节点", no_release: "暂无 Codey 发行版",
   needs_codey_migration: "需先迁移到 Codey npm 包", updater_unavailable: "升级服务尚未配置",
   up_to_date: "已是目标版本", unsupported_platform: "平台不支持", runtime_incompatible: "Node 运行时不兼容",
-  release_platform_unavailable: "此版本尚未向该平台开放",
+  release_platform_unavailable: "旧发行记录不完整，请重新发布为共享版本",
+  updater_upgrade_required: "请更新升级器以支持共享版本",
   model_auth_migration_required: "需先迁移模型 API key/调用方", migration_unsupported: "升级器尚不支持此迁移",
   model_login_required: "需先完成本人模型登录", configuration_changed: "节点配置已改变，请检查",
   downgrade_blocked: "禁止退回较旧的发行序号", job_active: "已有升级任务", busy: "等待任务空闲",
@@ -55,7 +59,7 @@ if (root) {
     return result;
   }
   const target = () => current?.releases.find((release) => release.id === $("release").value);
-  const targetFor = node => target()?.variants.find(release => release.platform === (node.platform ?? node.report?.platform));
+  const targetFor = node => target()?.variants.find(release => supportsPlatform(release, node.platform ?? node.report?.platform));
   function eligibilityReason(node) {
     const release = targetFor(node);
     if (node.protected) return "protected_local";
@@ -67,8 +71,9 @@ if (root) {
     if (node.report.layout !== "npm" || !node.report.components?.codey) return "needs_codey_migration";
     if (!current?.enabled) return "updater_unavailable";
     if (!target()) return "no_release";
-    if (!release) return "release_platform_unavailable";
-    if (node.report.platform !== release.platform) return "configuration_changed";
+    if (!release) return target().platform === "shared" ? "runtime_incompatible" : "release_platform_unavailable";
+    if (node.platform && node.report.platform !== node.platform) return "configuration_changed";
+    if (release.platform === "shared" && node.report.sharedCodeyReleases !== true) return "updater_upgrade_required";
     if (node.report.highestSequence > release.sequence) return "downgrade_blocked";
     if (release.migrations.some((id) => !node.report.readyMigrations.includes(id))) return "model_auth_migration_required";
     if (!release.components.codey.nodeMajors.includes(node.report.components.codey.nodeMajor)) return "runtime_incompatible";
@@ -88,7 +93,7 @@ if (root) {
     $("download").disabled = working || !target();
     const component = target()?.components.codey;
     $("download-info").textContent = component?.file
-      ? `${component.file} · ${(component.size / 1024 / 1024).toFixed(2)} MiB · 已开放：${target().variants.map(release => platformLabel(release.platform)).join("、")} · SHA-256: ${component.sha256}` : "";
+      ? `${component.file} · ${(component.size / 1024 / 1024).toFixed(2)} MiB · 共享安装包 · SHA-256: ${component.sha256}` : "";
     $("refresh").disabled = working;
     $("selected").textContent = selected.size ? `更新选中 (${selected.size})` : "更新选中机器";
     $("apply").disabled = working || !plan?.targets.some((node) => node.eligible);

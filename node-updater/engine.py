@@ -26,6 +26,19 @@ HASH = re.compile(r"^[a-f0-9]{64}$")
 COMPONENTS = ("cloudcli", "copilotApi")
 NPM_COMPONENT = "codey"
 DEPENDENCY_LINK = "codey-dependency-link.json"
+RUNTIME_PLATFORMS = ("linux-x64", "windows-x64", "macos-arm64", "macos-x64")
+
+
+def release_supports_platform(manifest, target):
+    """Match shared Codey releases without widening historical platform signatures."""
+    if target not in RUNTIME_PLATFORMS:
+        return False
+    if manifest.get("platform") != "shared":
+        return manifest.get("platform") == target
+    return (isinstance(manifest.get("components"), dict)
+            and set(manifest["components"]) == {NPM_COMPONENT}
+            and isinstance(manifest.get("runtimePlatforms"), list)
+            and target in manifest["runtimePlatforms"])
 
 
 def component_entry(name):
@@ -138,13 +151,34 @@ def verify_envelope(envelope, public_key, work, now=None):
             and isinstance(manifest.get("expiresAt"), int) and manifest["expiresAt"] > now
             and 0 < manifest["expiresAt"] - manifest["createdAt"] <= 90 * 86400000,
             "signature_invalid")
-    require(manifest.get("platform") == "linux-x64", "unsupported_platform")
     require(isinstance(manifest.get("migrations"), list) and len(manifest["migrations"]) <= 20
             and all(isinstance(item, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", item)
                     for item in manifest["migrations"]), "signature_invalid")
     require(isinstance(manifest.get("components"), dict) and manifest["components"]
             and (set(manifest["components"]).issubset(COMPONENTS)
                  or set(manifest["components"]) == {NPM_COMPONENT}), "signature_invalid")
+    if manifest.get("platform") == "shared":
+        runtimes = manifest.get("runtimePlatforms")
+        require(set(manifest).issubset({
+                    "schema", "kind", "id", "sequence", "createdAt", "expiresAt", "protocol",
+                    "platform", "runtimePlatforms", "components", "migrations", "configSchema", "notes", "rollback",
+                }) and isinstance(manifest.get("notes"), str) and len(manifest["notes"]) <= 4000
+                and all(type(manifest[key]) is int and abs(manifest[key]) <= 9007199254740991
+                        for key in ("sequence", "createdAt", "expiresAt"))
+                and len(set(manifest["migrations"])) == len(manifest["migrations"])
+                and set(manifest["components"]) == {NPM_COMPONENT}
+                and isinstance(runtimes, list) and 0 < len(runtimes) <= len(RUNTIME_PLATFORMS)
+                and all(isinstance(target, str) and target in RUNTIME_PLATFORMS for target in runtimes)
+                and len(set(runtimes)) == len(runtimes), "signature_invalid")
+        component = manifest["components"][NPM_COMPONENT]
+        require(isinstance(component, dict) and set(component).issubset({
+                    "version", "commit", "file", "sha256", "size", "entrySha256", "lockSha256", "nodeMajors",
+                }) and type(component.get("size")) is int
+                and isinstance(component.get("nodeMajors"), list) and 0 < len(component["nodeMajors"]) <= 10
+                and all(type(major) is int for major in component["nodeMajors"]), "signature_invalid")
+    else:
+        require("runtimePlatforms" not in manifest, "signature_invalid")
+    require(release_supports_platform(manifest, "linux-x64"), "unsupported_platform")
     for name, component in manifest["components"].items():
         expected_file = (f"codey-{component.get('version')}.tgz" if name == NPM_COMPONENT
                          else "cloudcli.tar.gz" if name == "cloudcli" else "gateway.tar.gz")
@@ -499,7 +533,7 @@ class Runtime:
         probe = self.root / "probe"
         probe.mkdir(mode=0o700, exist_ok=True)
         return {**{key: before[key] for key in ["platform", "layout", "components", "currentRelease", "highestSequence", "readyMigrations"]},
-                "busy": not self.idle(before, probe)}
+                "busy": not self.idle(before, probe), "sharedCodeyReleases": True}
 
     def assert_unchanged(self, before, after=None, package_paths=True):
         after = after or self.snapshot()
@@ -1043,7 +1077,7 @@ class Upgrade:
         require(manifest["sequence"] >= before["highestSequence"], "signature_invalid")
         if manifest["sequence"] == before["highestSequence"] and before["highestSequence"] > 0:
             require(before.get("installedDigest") == digest, "signature_invalid")
-        require(manifest["platform"] == before["platform"], "unsupported_platform")
+        require(release_supports_platform(manifest, before["platform"]), "unsupported_platform")
         require((before["layout"] == "npm") == (set(manifest["components"]) == {NPM_COMPONENT}),
                 "runtime_incompatible")
         for migration in manifest["migrations"]:
@@ -1097,6 +1131,8 @@ class Upgrade:
                         and all((candidate / file).is_file() for file in
                                 ["bin/codey.mjs", "dist-server/server/index.js", "gateway/main.js"]),
                         "signature_invalid")
+                if manifest["platform"] == "shared":
+                    require(build.get("runtimePlatforms") == manifest["runtimePlatforms"], "signature_invalid")
             dependencies = None
             if name in {"cloudcli", NPM_COMPONENT}:
                 require(sha(dependency_lock(candidate)) == component["lockSha256"], "signature_invalid")

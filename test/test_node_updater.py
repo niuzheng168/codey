@@ -947,6 +947,28 @@ fs.writeFileSync(process.argv[3],key.publicKey.export({type:'spki',format:'pem'}
         envelope = engine.read(self.root / "signed.json")
         public = (self.root / "public.pem").read_text()
         self.assertEqual(engine.verify_envelope(envelope, public, self.root)[0], manifest)
+        manifest.update({"platform": "shared", "notes": "One shared signature",
+                         "runtimePlatforms": list(engine.RUNTIME_PLATFORMS)})
+        engine.save(self.root / "manifest.json", manifest)
+        subprocess.run(["node", "-e", helper, str(self.root / "manifest.json"), str(self.root / "signed.json"),
+                        str(self.root / "public.pem")], check=True)
+        envelope = engine.read(self.root / "signed.json")
+        public = (self.root / "public.pem").read_text()
+        actual, digest = engine.verify_envelope(envelope, public, self.root)
+        self.assertEqual(actual, manifest)
+        verifier = "import {verifyNodeRelease} from " + json.dumps((ROOT / "src/node-update-manifest.mjs").as_uri()) + ";"
+        verifier += "import fs from 'node:fs';console.log(verifyNodeRelease(JSON.parse(fs.readFileSync(process.argv[1])),fs.readFileSync(process.argv[2],'utf8')).digest)"
+        verified = subprocess.check_output(["node", "--input-type=module", "-e", verifier,
+                                           str(self.root / "signed.json"), str(self.root / "public.pem")], text=True).strip()
+        self.assertEqual(verified, digest)
+        for runtimes in [None, [], ["linux-x64", "linux-x64"], ["linux-arm64"], ["windows-x64"]]:
+            with self.subTest(runtimePlatforms=runtimes):
+                engine.save(self.root / "manifest.json", {**manifest, "runtimePlatforms": runtimes})
+                subprocess.run(["node", "-e", helper, str(self.root / "manifest.json"), str(self.root / "bad-signed.json"),
+                                str(self.root / "bad-public.pem")], check=True)
+                with self.assertRaises(engine.UpdateError):
+                    engine.verify_envelope(engine.read(self.root / "bad-signed.json"),
+                                           (self.root / "bad-public.pem").read_text(), self.root)
         envelope["payload"] = base64.b64encode(b'{"changed":true}').decode()
         with self.assertRaisesRegex(engine.UpdateError, "signature_invalid"):
             engine.verify_envelope(envelope, public, self.root)
@@ -1046,6 +1068,53 @@ fs.writeFileSync(process.argv[3],key.publicKey.export({type:'spki',format:'pem'}
         self.assertEqual(proof["version"], "2.0.0")
         self.assertEqual(proof["entrySha256"], manifest["components"]["codey"]["entrySha256"])
         self.assertEqual((proof["jobId"], proof["digest"]), (job.name, "d" * 64))
+
+    def test_shared_release_uses_the_existing_linux_transaction_and_reports_format_support(self):
+        runtime = FakeNpmRuntime(self.root / "home", directory_anchor=True)
+        manifest, download = self.npm_release(runtime)
+        manifest.update({"platform": "shared", "runtimePlatforms": list(engine.RUNTIME_PLATFORMS)})
+        reported = engine.Runtime.report(runtime)
+        self.assertEqual(reported["platform"], "linux-x64")
+        self.assertTrue(reported["sharedCodeyReleases"])
+        job = runtime.root / "jobs" / ("a" * 32)
+        with patch.object(engine, "run", side_effect=runtime.runner):
+            result = engine.Upgrade(runtime, lambda *_: None, download).execute(manifest, "d" * 64, job)
+        self.assertEqual(result, {"state": "succeeded", "changed": ["codey"]})
+        self.assertEqual(runtime.snapshot()["components"]["codey"]["version"], "2.0.0")
+        self.assertEqual(runtime.native_checks, 1)
+        self.assertEqual(runtime.model_calls, 0)
+        self.assertFalse(engine.read(job / "health-proof.json")["modelRequests"])
+
+    def test_shared_release_cannot_target_an_absent_linux_runtime_or_legacy_layout(self):
+        runtime = FakeNpmRuntime(self.root / "home", directory_anchor=True)
+        manifest, download = self.npm_release(runtime)
+        manifest.update({"platform": "shared", "runtimePlatforms": ["windows-x64", "macos-arm64", "macos-x64"]})
+        with self.assertRaisesRegex(engine.UpdateError, "unsupported_platform"):
+            engine.Upgrade(runtime, lambda *_: None, download).execute(
+                manifest, "d" * 64, runtime.root / "jobs" / ("a" * 32))
+        self.assertEqual(runtime.actions, [])
+        self.assertEqual(runtime.native_checks, 0)
+        legacy = FakeRuntime(self.root / "legacy-home", directory_anchor=True)
+        old, old_download = self.package(legacy)
+        old.update({"platform": "shared", "runtimePlatforms": list(engine.RUNTIME_PLATFORMS)})
+        with self.assertRaises(engine.UpdateError):
+            engine.Upgrade(legacy, lambda *_: None, old_download).execute(
+                old, "d" * 64, legacy.root / "jobs" / ("b" * 32))
+        self.assertEqual(legacy.actions, [])
+
+    def test_shared_release_runtime_declaration_must_match_the_unchanged_archive(self):
+        runtime = FakeNpmRuntime(self.root / "home", directory_anchor=True)
+        manifest, download = self.npm_release(runtime)
+        manifest.update({"platform": "shared", "runtimePlatforms": ["linux-x64", "windows-x64"]})
+        before = runtime.snapshot()
+        with patch.object(runtime, "prepare_dependencies", side_effect=AssertionError("No dependency changes")), \
+                self.assertRaisesRegex(engine.UpdateError, "signature_invalid"):
+            engine.Upgrade(runtime, lambda *_: None, download).execute(
+                manifest, "d" * 64, runtime.root / "jobs" / ("a" * 32))
+        self.assertEqual(runtime.snapshot(), before)
+        self.assertEqual(runtime.actions, [])
+        self.assertEqual(runtime.native_checks, 0)
+        self.assertEqual(runtime.model_calls, 0)
 
     def test_npm_rollback_restores_the_whole_package_and_pin_without_restoring_stale_user_data(self):
         runtime = FakeNpmRuntime(self.root / "home", directory_anchor=True)

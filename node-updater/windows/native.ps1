@@ -175,9 +175,14 @@ try {
         $document = Read-UpdateJson $InputFile
         $request = if ($Operation -eq 'recover') { $document.request } else { $document }
         $job = Assert-CodeyPath $request.job $jobsRoot
+        $releaseMatchesHost = $request.release.platform -eq 'windows-x64' -or (
+            $request.release.platform -eq 'shared' -and
+            @($request.release.components.PSObject.Properties.Name).Count -eq 1 -and
+            $null -ne $request.release.components.codey -and
+            @($request.release.runtimePlatforms) -contains 'windows-x64')
         Require-Update ((Split-Path -Parent $job) -eq $jobsRoot -and
             (Split-Path -Leaf $job) -eq $request.jobId -and
-            $request.release.platform -eq 'windows-x64') 'Unexpected signed update job.'
+            $releaseMatchesHost) 'Unexpected signed update job.'
         $mutex = [Threading.Mutex]::new($false, ('Local\CodeyWindowsInstall-' + $owner.Sid))
         $held = $false
         try {

@@ -3,7 +3,7 @@ import path from "node:path";
 import { requestError } from "./signed-store.mjs";
 import { UPDATE_RELEASE_ID, verifyNodeRelease } from "./node-update-manifest.mjs";
 export { UPDATE_PROTOCOL, UPDATE_RELEASE_ID, UPDATE_COMPONENTS, UPDATE_PLATFORMS,
-  validateNodeRelease, verifyNodeRelease } from "./node-update-manifest.mjs";
+  UPDATE_SHARED_PLATFORM, releaseSupportsPlatform, validateNodeRelease, verifyNodeRelease } from "./node-update-manifest.mjs";
 const fields = (value, allowed) => value && typeof value === "object" && !Array.isArray(value) &&
   Object.keys(value).every((key) => allowed.includes(key));
 const invalid = () => requestError("节点升级发行版无效或签名验证失败", 503);

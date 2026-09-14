@@ -31,6 +31,10 @@ export async function checkRequest(file, { candidate = false, allowExpired = fal
     requireValue(artifact.build.runtimePlatforms.includes(config.platform) && artifact.pkg.version === component.version &&
       artifact.entrySha256 === component.entrySha256 && artifact.build.sourceCommit === component.commit &&
       artifact.build.lockSha256 === component.lockSha256, "signature_invalid");
+    if (signed.release.platform === "shared") {
+      requireValue(JSON.stringify(artifact.build.runtimePlatforms) === JSON.stringify(signed.release.runtimePlatforms),
+        "signature_invalid");
+    }
     await new Runtime(config).verifyPackage(request.candidate, artifact);
   }
   return { verified: true, platform: config.platform, digest: signed.digest };

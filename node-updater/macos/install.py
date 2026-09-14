@@ -29,7 +29,7 @@ PACKAGE_FILES = {
     *("macos/" + name for name in ("agent.mjs", "runtime.mjs", "verify.mjs", "native.py", "host.py")),
     *("windows/" + name for name in ("agent.mjs", "client.mjs", "runtime.mjs", "verify.mjs")),
     *("windows/lib/" + name for name in ("node-update-manifest.mjs", "update-probe.mjs", "update-files.mjs",
-                                       "update-archive.mjs", "package-info.mjs")),
+                                       "update-archive.mjs", "update-dependencies.mjs", "package-info.mjs")),
 }
 
 

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { createHash, generateKeyPairSync } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { createNodeUpdateRelease } from "../scripts/publish-node-update.mjs";
-import { NodeUpdateCatalog, validateNodeRelease } from "../src/node-update-release.mjs";
+import { NodeUpdateCatalog, validateNodeRelease, verifyNodeRelease, releaseSupportsPlatform } from "../src/node-update-release.mjs";
 import { digest, jsonFile, packageFixture, packFixture } from "./codey-update-fixture.mjs";
 
 test("publisher verifies evidence/checksums and publishes immutable, monotonic, signed component releases", async (t) => {
@@ -52,81 +52,10 @@ test("publisher verifies evidence/checksums and publishes immutable, monotonic, 
   assert.ok(!(await readFile(path.join(options.output, "catalog.json"), "utf8")).includes(keys.privateKey));
 });
 
-test("publisher signs one whole Codey npm package and never mixes it with legacy app components", async t => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "codey-npm-update-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const keys = generateKeyPairSync("ed25519", {
-    publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  const bytes = Buffer.from("reviewed-npm-package-fixture");
-  const artifact = { file: "codey-0.1.0.tgz", size: bytes.length,
-    sha256: createHash("sha256").update(bytes).digest("hex") };
-  const source = { schema: 1, name: "codey", artifact,
-    codey: { version: "0.1.0", commit: "a".repeat(40), entrySha256: "b".repeat(64), lockSha256: "c".repeat(64) } };
-  const manifestPath = path.join(root, "codey-package.json");
-  await writeFile(manifestPath, JSON.stringify(source));
-  await writeFile(path.join(root, artifact.file), bytes);
-  await writeFile(path.join(root, "validation.json"), '{"passed":true}');
-  const options = { manifestPath, output: path.join(root, "feed"), privateKey: keys.privateKey, sequence: 1 };
-  await assert.rejects(createNodeUpdateRelease({ ...options, components: ["cloudcli"] }), /reviewed/);
-  const published = await createNodeUpdateRelease(options);
-  assert.deepEqual(published.components, ["codey"]);
-  assert.equal(published.artifactCount, 1);
-  const catalog = new NodeUpdateCatalog({ root: options.output, publicKey: keys.publicKey });
-  const release = (await catalog.list())[0].release;
-  assert.equal(release.components.codey.file, artifact.file);
-  assert.equal(release.components.codey.lockSha256, source.codey.lockSha256);
-  assert.deepEqual(release.migrations, ["gateway-api-key-v1"]);
-  assert.throws(() => validateNodeRelease({
-    ...release, components: { ...release.components, cloudcli: { ...release.components.codey, file: "cloudcli.tar.gz" } },
-  }));
-  assert.throws(() => validateNodeRelease({
-    ...release, components: { codey: { ...release.components.codey, file: "../codey.tgz" } },
-  }));
-  assert.throws(() => validateNodeRelease({
-    ...release, components: { codey: { ...release.components.codey, lockSha256: undefined } },
-  }));
-  const stored = await catalog.artifact(release.id, artifact.file);
-  assert.deepEqual(await readFile(stored.target), bytes);
-});
+const platforms = ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"];
 
-test("one unchanged shared tarball can be signed for Windows with a distinct immutable ID and increasing sequence", async t => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "codey-win-publish-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const keys = generateKeyPairSync("ed25519", {
-    publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  const bytes = Buffer.from("shared package fixture");
-  const artifact = { file: "codey-0.1.5.tgz", size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
-  const manifestPath = path.join(root, "codey-package.json");
-  const source = { name: "codey", artifact,
-    codey: { version: "0.1.5", commit: "a".repeat(40), entrySha256: "b".repeat(64), lockSha256: "c".repeat(64) } };
-  await writeFile(manifestPath, JSON.stringify(source));
-  await writeFile(path.join(root, artifact.file), bytes);
-  await writeFile(path.join(root, "validation.json"), '{"passed":true}');
-  const options = { manifestPath, output: path.join(root, "feed"), privateKey: keys.privateKey, sequence: 1 };
-  await assert.rejects(createNodeUpdateRelease({ ...options, platform: "windows-x64" }), /shared/);
-  source.runtimePlatforms = ["linux-x64", "windows-x64"];
-  await writeFile(manifestPath, JSON.stringify(source));
-  const linux = await createNodeUpdateRelease(options);
-  const windows = await createNodeUpdateRelease({ ...options, platform: "windows-x64", sequence: 2 });
-  assert.notEqual(windows.releaseId, linux.releaseId);
-  const catalog = new NodeUpdateCatalog({ root: options.output, publicKey: keys.publicKey });
-  const rows = await catalog.list();
-  assert.deepEqual(rows.map(row => row.release.platform), ["windows-x64", "linux-x64"]);
-  assert.equal(rows[0].release.components.codey.sha256, rows[1].release.components.codey.sha256);
-  await assert.rejects(createNodeUpdateRelease({ ...options, platform: "windows-x64", sequence: 3 }), /immutable/);
-  const renewed = await createNodeUpdateRelease({ ...options, platform: "windows-x64", sequence: 3,
-    releaseId: "codey-windows-reauthorized" });
-  assert.equal(renewed.releaseId, "codey-windows-reauthorized");
-  assert.equal((await catalog.get(renewed.releaseId)).release.components.codey.sha256, artifact.sha256);
-  assert.throws(() => validateNodeRelease({ ...rows[0].release, components: {
-    cloudcli: { ...rows[0].release.components.codey, file: "cloudcli.tar.gz" },
-  } }));
-});
-
-async function macPublisherFixture(t) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "codey-mac-publish-"));
+async function sharedPublisherFixture(t) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "codey-shared-publish-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const keys = generateKeyPairSync("ed25519", {
     publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" },
@@ -141,113 +70,174 @@ async function macPublisherFixture(t) {
       entrySha256: digest(await readFile(path.join(app, "codey-build.json"))) } };
   const manifestPath = path.join(root, "codey-package.json");
   await jsonFile(manifestPath, source);
-  await jsonFile(path.join(root, "validation.json"), { passed: true });
-  const options = { manifestPath, output: path.join(root, "feed"), privateKey: keys.privateKey,
-    platform: "macos-arm64", sequence: 1 };
-  return { root, keys, app, build, file, source, manifestPath, options };
+  await jsonFile(path.join(root, "validation.json"), { passed: true, artifactSha256: source.artifact.sha256 });
+  const options = { manifestPath, output: path.join(root, "feed"), privateKey: keys.privateKey, sequence: 1 };
+  return { root, keys, app, build, file, bytes, source, manifestPath, options };
 }
 
-test("Mac publisher binds the actual tarball architecture and native doctor evidence, with separate ARM/Intel IDs", async t => {
-  const { root, keys, app, build, file, source, manifestPath, options } = await macPublisherFixture(t);
-  await assert.rejects(createNodeUpdateRelease(options), /macOS native validation/);
-  const doctor = { ok: true, platform: options.platform, version: "0.1.5", nodeMajor: 24,
-    sourceCommit: build.sourceCommit, lockSha256: build.lockSha256, entrySha256: source.codey.entrySha256,
+test("one Codey publication creates one artifact, signature and sequence for every supported runtime", async t => {
+  const f = await sharedPublisherFixture(t);
+  await assert.rejects(createNodeUpdateRelease({ ...f.options, components: ["cloudcli"] }), /reviewed/);
+  const published = await createNodeUpdateRelease(f.options);
+  assert.deepEqual(published.components, ["codey"]);
+  assert.equal(published.artifactCount, 1);
+  assert.match(published.releaseId, /^codey-shared-/);
+  const catalog = new NodeUpdateCatalog({ root: f.options.output, publicKey: f.keys.publicKey });
+  const rows = await catalog.list();
+  assert.equal(rows.length, 1);
+  const release = rows[0].release;
+  assert.equal(release.platform, "shared");
+  assert.deepEqual(release.runtimePlatforms, platforms);
+  assert.deepEqual(release.migrations, ["gateway-api-key-v1"]);
+  assert.deepEqual(release.components.codey.nodeMajors, [24]);
+  assert.deepEqual(await readdir(path.join(f.options.output, "releases")), [release.id]);
+  assert.deepEqual((await readdir(path.join(f.options.output, "releases", release.id))).sort(), [f.source.artifact.file, "release.json"]);
+  for (const platform of platforms) {
+    assert.equal(releaseSupportsPlatform(release, platform), true);
+    const verified = verifyNodeRelease(rows[0].envelope, f.keys.publicKey);
+    assert.equal(verified.digest, published.digest);
+    assert.equal(verified.release.id, release.id);
+  }
+  const stored = await catalog.artifact(release.id, f.source.artifact.file);
+  assert.deepEqual(await readFile(stored.target), f.bytes);
+  await assert.rejects(createNodeUpdateRelease({ ...f.options, sequence: 2 }), /immutable/);
+  await createNodeUpdateRelease({ ...f.options, sequence: 2, releaseId: "shared-reauthorized" });
+  assert.equal((await catalog.get("shared-reauthorized")).release.components.codey.sha256, f.source.artifact.sha256);
+});
+
+test("Codey publication no longer accepts a host-specific publishing or Mac canary switch", async t => {
+  const f = await sharedPublisherFixture(t);
+  for (const platform of [...platforms, "unknown"]) {
+    await assert.rejects(createNodeUpdateRelease({ ...f.options, platform }), /omit --platform/);
+  }
+  for (const macosValidation of ["native", "canary", "skip", "", null, true]) {
+    await assert.rejects(createNodeUpdateRelease({ ...f.options, macosValidation }), /does not use --macos-validation/);
+  }
+  await assert.rejects(readFile(path.join(f.options.output, "catalog.json")), { code: "ENOENT" });
+});
+
+test("shared publication retains validation and inspects the actual archive for all hosts", async t => {
+  const f = await sharedPublisherFixture(t);
+  await jsonFile(path.join(f.root, "validation.json"), { passed: false });
+  await assert.rejects(createNodeUpdateRelease(f.options), /Build validation has not passed/);
+  for (const evidence of [{ passed: true }, { passed: true, artifactSha256: "a".repeat(64) }]) {
+    await jsonFile(path.join(f.root, "validation.json"), evidence);
+    await assert.rejects(createNodeUpdateRelease(f.options), /validation must match/);
+  }
+  await jsonFile(path.join(f.root, "validation.json"), { passed: true, artifactSha256: f.source.artifact.sha256 });
+  for (const key of ["entrySha256", "lockSha256", "commit"]) {
+    await jsonFile(f.manifestPath, { ...f.source, codey: { ...f.source.codey, [key]: "f".repeat(key === "commit" ? 40 : 64) } });
+    await assert.rejects(createNodeUpdateRelease(f.options), /fingerprints differ/);
+  }
+  await jsonFile(f.manifestPath, f.source);
+  await writeFile(f.file, "corrupt archive");
+  await assert.rejects(createNodeUpdateRelease(f.options), /checksum/);
+  const bytes = await readFile(f.file);
+  await jsonFile(f.manifestPath, { ...f.source, artifact: { ...f.source.artifact, sha256: digest(bytes), size: bytes.length } });
+  await jsonFile(path.join(f.root, "validation.json"), { passed: true, artifactSha256: digest(bytes) });
+  await assert.rejects(createNodeUpdateRelease(f.options));
+  await assert.rejects(readFile(path.join(f.options.output, "catalog.json")), { code: "ENOENT" });
+});
+
+test("a shared declaration cannot add runtimes absent from the immutable application", async t => {
+  const f = await sharedPublisherFixture(t);
+  await jsonFile(path.join(f.app, "codey-build.json"), { ...f.build, runtimePlatforms: ["linux-x64", "windows-x64"] });
+  await packFixture(f.app, f.file);
+  const bytes = await readFile(f.file);
+  const source = { ...f.source,
+    artifact: { ...f.source.artifact, sha256: digest(bytes), size: bytes.length },
+    codey: { ...f.source.codey, entrySha256: digest(await readFile(path.join(f.app, "codey-build.json"))) } };
+  await jsonFile(f.manifestPath, source);
+  await jsonFile(path.join(f.root, "validation.json"), { passed: true, artifactSha256: source.artifact.sha256 });
+  await assert.rejects(createNodeUpdateRelease(f.options), /fingerprints differ/);
+  await jsonFile(f.manifestPath, { ...source, runtimePlatforms: ["linux-x64", "windows-x64"] });
+  const published = await createNodeUpdateRelease(f.options);
+  const catalog = new NodeUpdateCatalog({ root: f.options.output, publicKey: f.keys.publicKey });
+  const { release } = await catalog.get(published.releaseId);
+  assert.equal(release.platform, "shared");
+  assert.equal(releaseSupportsPlatform(release, "windows-x64"), true);
+  assert.equal(releaseSupportsPlatform(release, "macos-arm64"), false);
+});
+
+test("provided native evidence remains binding without requiring one publication per operating system", async t => {
+  const f = await sharedPublisherFixture(t);
+  const doctor = { ok: true, platform: "macos-arm64", version: f.build.version, nodeMajor: 24,
+    sourceCommit: f.build.sourceCommit, lockSha256: f.build.lockSha256, entrySha256: f.source.codey.entrySha256,
     native: { sqlite: true, bcrypt: true, ripgrep: true, pty: true, codexSdk: true } };
-  const proof = path.join(root, "doctor-macos-arm64.json");
-  for (const patch of [{ platform: "linux-x64" }, { nodeMajor: 22 }, { entrySha256: "a".repeat(64) },
+  const proof = path.join(f.root, "doctor-macos-arm64.json");
+  for (const patch of [{ ok: false }, { platform: "linux-x64" }, { nodeMajor: 22 }, { entrySha256: "a".repeat(64) },
     { native: { ...doctor.native, pty: false } }]) {
     await jsonFile(proof, { ...doctor, ...patch });
-    await assert.rejects(createNodeUpdateRelease(options), /native validation does not match/);
-    await assert.rejects(createNodeUpdateRelease({ ...options, macosValidation: "canary",
-      notes: "First native test" }), /native validation does not match/);
+    await assert.rejects(createNodeUpdateRelease(f.options), /Supplied native validation/);
   }
+  await writeFile(proof, "{");
+  await assert.rejects(createNodeUpdateRelease(f.options));
   await jsonFile(proof, doctor);
-  const arm = await createNodeUpdateRelease(options);
-  await jsonFile(path.join(root, "doctor-macos-x64.json"), { ...doctor, platform: "macos-x64" });
-  const intel = await createNodeUpdateRelease({ ...options, platform: "macos-x64", sequence: 2 });
-  assert.notEqual(arm.releaseId, intel.releaseId);
-  const catalog = new NodeUpdateCatalog({ root: options.output, publicKey: keys.publicKey });
-  const rows = await catalog.list();
-  assert.deepEqual(rows.map(row => row.release.platform), ["macos-x64", "macos-arm64"]);
-  assert.ok(rows.every(row => row.release.components.codey.sha256 === source.artifact.sha256));
-  assert.throws(() => validateNodeRelease({ ...rows[0].release, components: {
-    cloudcli: { ...rows[0].release.components.codey, file: "cloudcli.tar.gz" },
+  await createNodeUpdateRelease(f.options);
+  assert.deepEqual((await new NodeUpdateCatalog({ root: f.options.output, publicKey: f.keys.publicKey }).list())[0].release.runtimePlatforms, platforms);
+  // No files claiming native Windows/Intel acceptance were invented.
+  await assert.rejects(readFile(path.join(f.root, "doctor-windows-x64.json")), { code: "ENOENT" });
+  await assert.rejects(readFile(path.join(f.root, "doctor-macos-x64.json")), { code: "ENOENT" });
+});
+
+test("new shared signatures coexist with unchanged historical platform signatures for the same tarball", async t => {
+  const f = await sharedPublisherFixture(t);
+  const now = Date.now();
+  const old = { schema: 1, kind: "codey-node-release", id: "codey-" + f.source.artifact.sha256.slice(0, 16),
+    sequence: 1, createdAt: now - 1000, expiresAt: now + 86400000, protocol: 1, platform: "linux-x64",
+    configSchema: 1, rollback: "code-only", notes: "Original platform-scoped release", migrations: ["gateway-api-key-v1"],
+    components: { codey: { ...f.source.codey, file: f.source.artifact.file, sha256: f.source.artifact.sha256,
+      size: f.bytes.length, nodeMajors: [24] } } };
+  const body = Buffer.from(JSON.stringify(old));
+  const envelope = { payload: body.toString("base64"), signature: sign(null, body, f.keys.privateKey).toString("base64url") };
+  await mkdir(f.options.output);
+  await jsonFile(path.join(f.options.output, "catalog.json"), { schema: 1, releases: [envelope] });
+  const published = await createNodeUpdateRelease({ ...f.options, sequence: 2 });
+  const rows = await new NodeUpdateCatalog({ root: f.options.output, publicKey: f.keys.publicKey }).list();
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].release.id, published.releaseId);
+  assert.deepEqual(rows[1].envelope, envelope);
+  assert.equal(rows[0].release.components.codey.sha256, rows[1].release.components.codey.sha256);
+  assert.equal(releaseSupportsPlatform(rows[0].release, "windows-x64"), true);
+  assert.equal(releaseSupportsPlatform(rows[1].release, "windows-x64"), false);
+});
+
+test("shared schema rejects ambiguous runtime grants, mixed packages and unsupported target identities", async t => {
+  const f = await sharedPublisherFixture(t);
+  const published = await createNodeUpdateRelease(f.options);
+  const { release } = await new NodeUpdateCatalog({ root: f.options.output, publicKey: f.keys.publicKey }).get(published.releaseId);
+  for (const runtimePlatforms of [undefined, [], null, "all", ["linux-arm64"], ["linux-x64", "linux-x64"], ["shared"]]) {
+    assert.throws(() => validateNodeRelease({ ...release, runtimePlatforms }));
+  }
+  assert.throws(() => validateNodeRelease({ ...release, platform: "linux-x64" }));
+  assert.throws(() => validateNodeRelease({ ...release, components: {
+    ...release.components, cloudcli: { ...release.components.codey, file: "cloudcli.tar.gz" },
   } }));
-
-  // A source manifest claiming four platforms cannot authorize two-platform bytes.
-  await jsonFile(path.join(app, "codey-build.json"), { ...build, runtimePlatforms: ["linux-x64", "windows-x64"] });
-  await packFixture(app, file);
-  const oldBytes = await readFile(file);
-  await jsonFile(manifestPath, { ...source,
-    artifact: { ...source.artifact, sha256: digest(oldBytes), size: oldBytes.length },
-    codey: { ...source.codey, entrySha256: digest(await readFile(path.join(app, "codey-build.json"))) } });
-  await assert.rejects(createNodeUpdateRelease({ ...options, sequence: 3 }), /macOS platform\/build fingerprints differ/);
-  await assert.rejects(createNodeUpdateRelease({ ...options, sequence: 3, macosValidation: "canary",
-    notes: "First native test" }), /macOS platform\/build fingerprints differ/);
+  assert.throws(() => validateNodeRelease({ ...release, components: {
+    cloudcli: { ...release.components.codey, file: "cloudcli.tar.gz" },
+  } }));
+  assert.throws(() => validateNodeRelease({ ...release, components: {
+    codey: { ...release.components.codey, file: "../codey.tgz" },
+  } }));
+  assert.throws(() => validateNodeRelease({ ...release, components: {
+    codey: { ...release.components.codey, lockSha256: undefined },
+  } }));
+  for (const target of ["shared", "linux-arm64", "windows-arm64", undefined]) {
+    assert.equal(releaseSupportsPlatform(release, target), false);
+  }
 });
 
-test("explicit Mac canaries publish both architectures without inventing native evidence", async t => {
-  const { root, keys, source, options } = await macPublisherFixture(t);
-  await assert.rejects(createNodeUpdateRelease(options), /macOS native validation/);
-  const canary = { ...options, macosValidation: "canary", notes: "Owner requested first native testing",
-    codeyNodeMajors: [22, 24] };
-  const arm = await createNodeUpdateRelease(canary);
-  const intel = await createNodeUpdateRelease({ ...canary, platform: "macos-x64", sequence: 2 });
-  assert.equal(arm.macosValidation, "canary");
-  assert.notEqual(arm.releaseId, intel.releaseId);
-  const catalog = new NodeUpdateCatalog({ root: options.output, publicKey: keys.publicKey });
-  const rows = await catalog.list();
-  assert.deepEqual(rows.map(row => row.release.platform), ["macos-x64", "macos-arm64"]);
-  for (const { release } of rows) {
-    assert.match(release.notes, /^\[macOS CANARY: native acceptance pending\] Owner requested/);
-    assert.equal(release.components.codey.sha256, source.artifact.sha256);
-    assert.deepEqual(release.components.codey.nodeMajors, [22, 24]);
-    assert.equal(release.rollback, "code-only");
-    await assert.rejects(readFile(path.join(root, `doctor-${release.platform}.json`)), { code: "ENOENT" });
-  }
-  await assert.rejects(createNodeUpdateRelease({ ...canary, sequence: 3 }), /immutable/);
-  await assert.rejects(createNodeUpdateRelease({ ...canary, releaseId: "older-canary" }), /increase/);
-  await assert.rejects(createNodeUpdateRelease({ ...options, sequence: 3 }), /macOS native validation/);
-});
-
-test("Mac canaries retain validation, artifact integrity and explicit opt-in requirements", async t => {
-  const { root, source, manifestPath, options } = await macPublisherFixture(t);
-  const canary = { ...options, macosValidation: "canary", notes: "Owner requested first native testing" };
-  for (const macosValidation of ["skip", "", null, true]) {
-    await assert.rejects(createNodeUpdateRelease({ ...canary, macosValidation }), /Invalid macOS validation mode/);
-  }
-  for (const notes of ["", "  ", null]) {
-    await assert.rejects(createNodeUpdateRelease({ ...canary, notes }), /explicit operator notes/);
-  }
-  for (const platform of ["linux-x64", "windows-x64"]) {
-    await assert.rejects(createNodeUpdateRelease({ ...canary, platform }), /requires a Mac platform/);
-  }
-  await jsonFile(path.join(root, "validation.json"), { passed: false });
-  await assert.rejects(createNodeUpdateRelease(canary), /Build validation has not passed/);
-  await jsonFile(path.join(root, "validation.json"), { passed: true });
-  await writeFile(path.join(root, "doctor-macos-arm64.json"), "{");
-  await assert.rejects(createNodeUpdateRelease(canary), /macOS native validation/);
-  await jsonFile(path.join(root, "doctor-macos-arm64.json"), null);
-  await assert.rejects(createNodeUpdateRelease(canary), /native validation does not match/);
-  await rm(path.join(root, "doctor-macos-arm64.json"));
-  await jsonFile(manifestPath, { ...source, codey: { ...source.codey, entrySha256: "f".repeat(64) } });
-  await assert.rejects(createNodeUpdateRelease(canary), /platform\/build fingerprints differ/);
-  await jsonFile(manifestPath, { ...source, artifact: { ...source.artifact, sha256: "f".repeat(64) } });
-  await assert.rejects(createNodeUpdateRelease(canary), /checksum/);
-  await assert.rejects(readFile(path.join(options.output, "catalog.json")), { code: "ENOENT" });
-});
-
-test("the publication CLI passes through the explicit Mac canary option and signed warning", async t => {
-  const { root, keys, options, manifestPath } = await macPublisherFixture(t);
-  const privateKey = path.join(root, "test-private.pem");
-  await writeFile(privateKey, keys.privateKey, { mode: 0o600 });
-  const result = await promisify(execFile)(process.execPath, [
-    path.resolve("scripts/publish-node-update.mjs"), "publish",
-    "--manifest", manifestPath, "--output", options.output, "--private-key", privateKey,
-    "--platform", "macos-arm64", "--sequence", "1", "--macos-validation", "canary",
-    "--notes", "Explicit first native test",
+test("the ordinary publication CLI produces a single shared release without any platform option", async t => {
+  const f = await sharedPublisherFixture(t), privateKey = path.join(f.root, "test-private.pem");
+  await writeFile(privateKey, f.keys.privateKey, { mode: 0o600 });
+  const result = await promisify(execFile)(process.execPath, [path.resolve("scripts/publish-node-update.mjs"), "publish",
+    "--manifest", f.manifestPath, "--output", f.options.output, "--private-key", privateKey,
+    "--sequence", "1", "--notes", "One shared application release",
   ], { timeout: 30000, maxBuffer: 1024 * 1024 });
-  assert.equal(JSON.parse(result.stdout).macosValidation, "canary");
-  const catalog = new NodeUpdateCatalog({ root: options.output, publicKey: keys.publicKey });
-  assert.match((await catalog.list())[0].release.notes, /native acceptance pending.*Explicit first native test/);
+  assert.equal(JSON.parse(result.stdout).artifactCount, 1);
+  const rows = await new NodeUpdateCatalog({ root: f.options.output, publicKey: f.keys.publicKey }).list();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].release.platform, "shared");
+  assert.deepEqual(rows[0].release.runtimePlatforms, platforms);
+  assert.equal(rows[0].release.notes, "One shared application release");
 });

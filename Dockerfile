@@ -30,7 +30,7 @@ COPY --chown=node:node public ./public
 COPY --from=node-skill-builder --chown=node:node /build/public/downloads ./public/downloads
 COPY --chown=node:node src ./src
 COPY --chown=node:node node-updater ./node-updater
-COPY --chown=node:node packages/codey/lib/update-windows.ps1 packages/codey/lib/update-probe.mjs packages/codey/lib/update-files.mjs packages/codey/lib/update-archive.mjs packages/codey/lib/package-info.mjs ./packages/codey/lib/
+COPY --chown=node:node packages/codey/lib/update-windows.ps1 packages/codey/lib/update-probe.mjs packages/codey/lib/update-files.mjs packages/codey/lib/update-archive.mjs packages/codey/lib/update-dependencies.mjs packages/codey/lib/package-info.mjs ./packages/codey/lib/
 COPY --chown=node:node config/nodes.aca.json config/cloudcli-nodes.aca.json config/node-data.aca.json config/codey-node-ca.pem ./config/
 
 USER node

@@ -758,6 +758,142 @@ test("a unified package preview pins platform-specific signatures and enqueues o
   assert.equal(verifyNodeRelease(linuxJob.envelope, keys.publicKey).release.platform, "linux-x64");
 });
 
+async function sharedReleaseFixture(f) {
+  const archive = Buffer.from("one shared artifact, one signature, all supported runtimes");
+  const release = { ...f.built.release, id: "codey-shared-fixture", sequence: 2, platform: "shared",
+    runtimePlatforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"],
+    components: { codey: { version: "0.1.10", commit: "b".repeat(40), file: "codey-0.1.10.tgz",
+      sha256: sha(archive), size: archive.length, entrySha256: "b".repeat(64), lockSha256: "c".repeat(64), nodeMajors: [24] } } };
+  const publish = async (value = release) => {
+    const payload = Buffer.from(JSON.stringify(value));
+    const envelope = { payload: payload.toString("base64"), signature: sign(null, payload, keys.privateKey).toString("base64url") };
+    await writeFile(path.join(f.catalogRoot, "catalog.json"), JSON.stringify({ schema: 1, releases: [envelope, f.built.envelope] }));
+    return { envelope, digest: sha(payload) };
+  };
+  await mkdir(path.join(f.catalogRoot, "releases", release.id));
+  await writeFile(path.join(f.catalogRoot, "releases", release.id, release.components.codey.file), archive);
+  return { archive, release, publish, ...await publish() };
+}
+
+test("one shared release targets Linux, Windows and both Macs with the same signature, artifact and canary batch", async t => {
+  const f = await fixture(t), shared = await sharedReleaseFixture(f);
+  const nodes = [{ id: "alpha", platform: "linux-x64" }];
+  for (const platform of ["windows-x64", "macos-arm64", "macos-x64"]) {
+    nodes.push({ id: await importedNative(f, platform), platform });
+  }
+  const installed = { version: "0.1.9", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24 };
+  for (const node of nodes) {
+    node.config = await f.enroll(node.id);
+    node.report = report({ platform: node.platform, layout: "npm", sharedCodeyReleases: true,
+      components: { codey: installed } });
+    await f.heartbeat(node.config, node.report);
+  }
+  const listed = await f.updates.list("owner-a");
+  assert.equal(listed.releases.filter(row => row.components.codey).length, 1);
+  assert.ok(nodes.every(node => listed.nodes.find(row => row.id === node.id).eligible));
+  const plan = await f.updates.plan("owner-a", nodes.map(node => node.id), shared.release.id);
+  assert.ok(plan.targets.every(target => target.eligible));
+  assert.deepEqual([...new Set(plan.targets.map(target => target.releaseId))], [shared.release.id]);
+  assert.deepEqual([...new Set(plan.targets.map(target => target.digest))], [shared.digest]);
+  assert.equal((await f.updates.store.read()).data.jobs.length, 0);
+  await assert.rejects(f.updates.plan("owner-a", ["alpha", f.bobNode.id], shared.release.id), { status: 404 });
+  const jobs = await f.updates.enqueue("owner-a", plan.id);
+  assert.equal(jobs.length, 4);
+  assert.equal(new Set(jobs.map(job => job.batchId)).size, 1);
+  assert.deepEqual(await f.updates.enqueue("owner-a", plan.id), jobs);
+  const canary = nodes[1];
+  const first = (await f.heartbeat(canary.config, canary.report)).job;
+  assert.deepEqual(first.envelope, shared.envelope);
+  const rest = nodes.filter(node => node !== canary);
+  for (const node of rest) assert.equal((await f.heartbeat(node.config, node.report)).waitingForCanary, true);
+  const downloaded = await f.agent(canary.config, `/api/node-updater/releases/${shared.release.id}/${shared.release.components.codey.file}`);
+  assert.equal(downloaded.status, 200);
+  assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()), shared.archive);
+  for (const state of ["downloading", "staging", "waiting_idle", "applying", "verifying", "succeeded"]) {
+    await f.advance(canary.config, first, state);
+  }
+  for (const node of rest) {
+    const job = (await f.heartbeat(node.config, node.report)).job;
+    assert.equal(job.releaseId, shared.release.id);
+    assert.equal(job.digest, shared.digest);
+    assert.deepEqual(job.envelope, first.envelope);
+  }
+  assert.equal((await f.updates.list("owner-a")).nodes.find(row => row.id === canary.id)
+    .report.components.codey.version, "0.1.9", "Completion never invents an installed-version heartbeat");
+});
+
+test("shared format capability is negotiated without weakening runtime, identity, migration or sequence guards", async t => {
+  const f = await fixture(t), shared = await sharedReleaseFixture(f);
+  const id = await importedNative(f), config = await f.enroll(id);
+  const current = report({ platform: "windows-x64", layout: "npm",
+    components: { codey: { version: "0.1.9", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24 } } });
+  for (const sharedCodeyReleases of [undefined, false]) {
+    await f.heartbeat(config, { ...current, ...(sharedCodeyReleases === undefined ? {} : { sharedCodeyReleases }) });
+    const plan = await f.updates.plan("owner-a", [id], shared.release.id);
+    assert.equal(plan.targets[0].reason, "updater_upgrade_required");
+    assert.equal(plan.targets[0].eligible, false);
+    await assert.rejects(f.updates.enqueue("owner-a", plan.id), { status: 409 });
+  }
+  assert.equal((await f.agent(config, "/api/node-updater/poll", {
+    protocol: 1, report: { ...current, sharedCodeyReleases: "true" },
+  })).status, 400);
+  assert.equal((await f.agent(config, "/api/node-updater/poll", {
+    protocol: 1, report: { ...current, platform: "linux-x64", sharedCodeyReleases: true },
+  })).status, 409, "Shared releases do not let a credential change its host identity");
+  const capable = { ...current, sharedCodeyReleases: true };
+  for (const [patch, reason] of [
+    [{ readyMigrations: [] }, "model_auth_migration_required"],
+    [{ components: { codey: { ...current.components.codey, nodeMajor: 22 } } }, "runtime_incompatible"],
+  ]) {
+    await f.heartbeat(config, { ...capable, ...patch });
+    assert.equal((await f.updates.plan("owner-a", [id], shared.release.id)).targets[0].reason, reason);
+  }
+  await f.heartbeat(config, capable);
+  const plan = await f.updates.plan("owner-a", [id], shared.release.id);
+  assert.equal(plan.targets[0].eligible, true);
+  await f.heartbeat(config, current);
+  await assert.rejects(f.updates.enqueue("owner-a", plan.id), { status: 409 });
+  assert.equal((await f.updates.store.read()).data.jobs.length, 0);
+  await f.heartbeat(config, capable);
+  const queued = await f.updates.plan("owner-a", [id], shared.release.id);
+  const [job] = await f.updates.enqueue("owner-a", queued.id);
+  assert.equal((await f.heartbeat(config, current)).job, null);
+  const refused = (await f.updates.list("owner-a")).jobs.find(row => row.id === job.id);
+  assert.equal(refused.state, "needs_action");
+  assert.equal(refused.code, "updater_upgrade_required");
+  await f.heartbeat(config, { ...capable, highestSequence: 3 });
+  assert.equal((await f.updates.plan("owner-a", [id], shared.release.id)).targets[0].reason, "downgrade_blocked");
+});
+
+test("unchanged shared Windows/Mac packages can verify while busy without being mistaken for Linux nodes", async t => {
+  const f = await fixture(t), shared = await sharedReleaseFixture(f);
+  for (const platform of ["windows-x64", "macos-arm64", "macos-x64"]) {
+    const id = await importedNative(f, platform), config = await f.enroll(id);
+    const component = shared.release.components.codey;
+    const current = report({ platform, layout: "npm", sharedCodeyReleases: true, busy: true,
+      components: { codey: { version: component.version, commit: component.commit,
+        entrySha256: component.entrySha256, nodeMajor: 24 } } });
+    await f.heartbeat(config, current);
+    const plan = await f.updates.plan("owner-a", [id], shared.release.id);
+    assert.equal(plan.targets[0].verificationOnly, true);
+    await f.updates.enqueue("owner-a", plan.id);
+    assert.ok((await f.heartbeat(config, current)).job, "A read-only verification does not require stopping native work");
+  }
+});
+
+test("a shared runtime declaration or signature changed after preview rejects the entire batch", async t => {
+  const f = await fixture(t), shared = await sharedReleaseFixture(f), id = await importedNative(f, "macos-arm64");
+  const config = await f.enroll(id);
+  await f.heartbeat(config, report({ platform: "macos-arm64", layout: "npm", sharedCodeyReleases: true,
+    components: { codey: { version: "0.1.9", commit: "a".repeat(40), entrySha256: "a".repeat(64), nodeMajor: 24 } } }));
+  const plan = await f.updates.plan("owner-a", [id], shared.release.id);
+  assert.equal(plan.targets[0].eligible, true);
+  await shared.publish({ ...shared.release, runtimePlatforms: ["linux-x64", "windows-x64"] });
+  await assert.rejects(f.updates.enqueue("owner-a", plan.id), { status: 409 });
+  assert.equal((await f.updates.store.read()).data.jobs.length, 0);
+  assert.equal((await f.updates.plan("owner-a", [id], shared.release.id)).targets[0].reason, "runtime_incompatible");
+});
+
 test("Mac bootstrap is owner-bound, architecture-specific and complete without Windows/systemd executables", async t => {
   for (const platform of ["macos-arm64", "macos-x64"]) {
     const f = await fixture(t), id = await importedNative(f, platform);

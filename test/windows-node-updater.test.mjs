@@ -174,6 +174,37 @@ test("signed Windows update requires all phases and explicit health-only accepta
   assert.deepEqual(f.samples, { pids: [100], outsideChecks: 0 });
 });
 
+test("Windows accepts a shared Codey signature while preserving its native transaction and health checks", async t => {
+  const f = await fixture(t, { releasePatch: { platform: "shared",
+    runtimePlatforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"] } });
+  assert.equal((await f.agent.once()).state, "succeeded");
+  assert.deepEqual(f.counters, { stage: 1, download: 1, apply: 1, verify: 0, recover: 0, commit: 1 });
+  const request = await readJson(path.join(f.before.jobsRoot, f.job.id, "request.json"));
+  assert.equal(request.release.platform, "shared");
+  assert.equal(request.acceptance, "authenticated-health-v1");
+  assert.equal((await readJson(path.join(f.runtime.private, "heartbeat.json"))).platform, "windows-x64");
+});
+
+test("one shared receipt is verifiable on all supported hosts, but not on invented hosts or altered runtime lists", async t => {
+  const platforms = ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"];
+  const f = await fixture(t, { releasePatch: { platform: "shared", runtimePlatforms: platforms } });
+  const jobId = "b".repeat(32);
+  const request = { release: f.signed.release, envelope: f.signed.envelope, digest: f.signed.digest,
+    jobId, job: path.join(f.home, jobId) };
+  for (const platform of platforms) {
+    assert.equal(checkedReceipt(request, keys.publicKey, { platform }).digest, f.signed.digest);
+  }
+  for (const platform of ["shared", "linux-arm64", "windows-arm64"]) {
+    assert.throws(() => checkedReceipt(request, keys.publicKey, { platform }), { code: "signature_invalid" });
+  }
+  assert.throws(() => checkedReceipt({ ...request, release: { ...request.release,
+    runtimePlatforms: ["windows-x64"] } }, keys.publicKey), { code: "signature_invalid" });
+  const excluded = await fixture(t, { releasePatch: { platform: "shared", runtimePlatforms: ["macos-arm64"] } });
+  assert.equal((await excluded.agent.once()).code, "signature_invalid");
+  assert.equal(excluded.counters.download, 0);
+  assert.equal(excluded.counters.apply, 0);
+});
+
 test("report exposes one snapshot only through its callback, not through the Portal report", async t => {
   const f = await fixture(t), gateway = path.join(f.home, "gateway");
   await mkdir(gateway);
@@ -188,6 +219,7 @@ test("report exposes one snapshot only through its callback, not through the Por
   assert.equal(snapshots, 1);
   assert.equal(captured, f.before);
   assert.equal(report.layout, "npm");
+  assert.equal(report.sharedCodeyReleases, true);
   for (const field of ["root", "pid", "protected", "otherTasks", "snapshot"]) assert.equal(Object.hasOwn(report, field), false);
 });
 

@@ -27,6 +27,11 @@ cd codey
 systemd/DevTunnel 部署仍是独立的 `codey setup` 流程，不会套用到 Windows。
 源码仍保留为 submodule，构建、安装和升级产物统一为 Codey。
 
+现行共享包也支持 macOS arm64/x64。Codey 整包发行不再按操作系统分开：
+一次发布一份 `.tgz`、SHA-256 和共享签名清单；各节点使用同一版本，
+仍在本机校验 Node、原生依赖和身份。旧升级器需先刷新到支持共享清单的实现，
+无需重新安装 Codey 或重新注册节点。详见 [整包更新](./docs/node-updates.md)。
+
 ```sh
 npm run codey:build -- --output artifacts/codey-npm
 npm install --global ./artifacts/codey-npm/codey-0.1.1.tgz
@@ -313,6 +318,8 @@ npm start
 
 - Token 历史由每台 `copilot-api` 本地记录，因此 Portal 会把节点 totals 相加。
 - Copilot quota 是账号级数据。同一登录账号出现在多台机器时，Portal 只显示一份配额快照，不会把 entitlement 相加。
+- 主页按节点、按接口并行刷新，哪个接口先返回就先展示；配额或慢节点超时不会阻塞其他用量、趋势和事件。读取中的节点单独标记，手动刷新或切换筛选会取消上一轮请求。
+- 同一时间范围和连接方式下，刷新时保留已取得的数据；暂未刷新成功的字段明确标注为“上次数据”，成功后逐项替换，不把旧数据混入其他时间范围。
 - 节点某个接口失败不会拖垮整个页面；该节点会显示“部分可用”及具体失败范围。
 - 同一节点多个接口返回相同错误时，状态提示只显示一次并标注受影响的接口数量，避免重复文案。
 - 返回浏览器的数据会移除 token、session ID、trace ID、user ID 等不需要的字段。

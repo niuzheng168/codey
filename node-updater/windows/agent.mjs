@@ -8,7 +8,7 @@ import { Runtime, directory, libraryRoot, exists, protectedHashes, checkedReceip
 
 const manifestModule = await exists(path.join(directory, "lib/node-update-manifest.mjs"))
   ? path.join(directory, "lib/node-update-manifest.mjs") : path.resolve(directory, "../../src/node-update-manifest.mjs");
-const { verifyNodeRelease } = await import(pathToFileURL(manifestModule));
+const { verifyNodeRelease, releaseSupportsPlatform } = await import(pathToFileURL(manifestModule));
 const allowedCodes = new Set(["busy", "unsupported_platform", "runtime_incompatible", "model_auth_migration_required",
   "migration_unsupported", "model_login_required", "download_failed", "signature_invalid", "stage_failed",
   "configuration_changed", "health_failed", "model_failed", "rollback_failed", "lease_lost"]);
@@ -120,7 +120,7 @@ export class Agent {
     try {
       const verified = verifyNodeRelease(job.envelope, this.config.releasePublicKey, this.clock());
       const release = verified.release, component = release.components.codey;
-      requireValue(release.platform === this.config.platform && Object.keys(release.components).length === 1 &&
+      requireValue(releaseSupportsPlatform(release, this.config.platform) && Object.keys(release.components).length === 1 &&
         release.id === job.releaseId && verified.digest === job.digest, "signature_invalid");
       requireValue(release.sequence >= before.installed.sequence &&
         (release.sequence !== before.installed.sequence || !before.installed.digest || before.installed.digest === verified.digest),
@@ -223,8 +223,13 @@ async function main() {
     const { inspectUpdateArchive } = await import(pathToFileURL(path.join(libraryRoot, "update-archive.mjs")));
     const component = signed.release.components.codey;
     const artifact = await inspectUpdateArchive(path.join(request.job, component.file), component.sha256);
-    requireValue(artifact.entrySha256 === component.entrySha256 && artifact.build.sourceCommit === component.commit &&
+    requireValue(artifact.pkg.version === component.version &&
+      artifact.entrySha256 === component.entrySha256 && artifact.build.sourceCommit === component.commit &&
       artifact.build.lockSha256 === component.lockSha256, "signature_invalid");
+    if (signed.release.platform === "shared") {
+      requireValue(JSON.stringify(artifact.build.runtimePlatforms) === JSON.stringify(signed.release.runtimePlatforms),
+        "signature_invalid");
+    }
     await new Runtime(config).verifyPackage(request.candidate, artifact);
     console.log(JSON.stringify({ verified: true }));
     return;

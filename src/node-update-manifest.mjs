@@ -5,6 +5,7 @@ export const UPDATE_PROTOCOL = 1;
 export const UPDATE_RELEASE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const UPDATE_COMPONENTS = Object.freeze(["cloudcli", "copilotApi", "codey"]);
 export const UPDATE_PLATFORMS = Object.freeze(["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]);
+export const UPDATE_SHARED_PLATFORM = "shared";
 const HASH = /^[a-f0-9]{64}$/;
 const COMMIT = /^[a-f0-9]{40}$/;
 const VERSION = /^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/;
@@ -14,10 +15,11 @@ const invalid = () => Object.assign(new Error("节点升级发行版无效或签
 
 export function validateNodeRelease(value, now = Date.now(), allowExpired = false) {
   if (!fields(value, ["schema", "kind", "id", "sequence", "createdAt", "expiresAt", "protocol", "platform",
-    "components", "migrations", "configSchema", "notes", "rollback"]) ||
+    "runtimePlatforms", "components", "migrations", "configSchema", "notes", "rollback"]) ||
       value.schema !== 1 || value.kind !== "codey-node-release" || !UPDATE_RELEASE_ID.test(value.id ?? "") ||
       !Number.isSafeInteger(value.sequence) || value.sequence < 1 || value.protocol !== UPDATE_PROTOCOL ||
-      !UPDATE_PLATFORMS.includes(value.platform) || value.configSchema !== 1 || value.rollback !== "code-only" ||
+      !(UPDATE_PLATFORMS.includes(value.platform) || value.platform === UPDATE_SHARED_PLATFORM) ||
+      value.configSchema !== 1 || value.rollback !== "code-only" ||
       !Number.isSafeInteger(value.createdAt) || value.createdAt > now + 60000 ||
       !Number.isSafeInteger(value.expiresAt) || (!allowExpired && value.expiresAt <= now) || value.expiresAt <= value.createdAt ||
       value.expiresAt - value.createdAt > 90 * 86400000 ||
@@ -27,6 +29,17 @@ export function validateNodeRelease(value, now = Date.now(), allowExpired = fals
       new Set(value.migrations).size !== value.migrations.length ||
       !fields(value.components, UPDATE_COMPONENTS) || !Object.keys(value.components).length) throw invalid();
   if (Object.hasOwn(value.components, "codey") && Object.keys(value.components).length !== 1) throw invalid();
+  if (value.platform === UPDATE_SHARED_PLATFORM) {
+    // One signed application, not platform-specific packages. The supported
+    // runtimes are bound to the actual tarball by the publisher and each agent.
+    if (!Object.hasOwn(value.components, "codey") || !Array.isArray(value.runtimePlatforms) ||
+        !value.runtimePlatforms.length || value.runtimePlatforms.length > UPDATE_PLATFORMS.length ||
+        value.runtimePlatforms.some(platform => !UPDATE_PLATFORMS.includes(platform)) ||
+        new Set(value.runtimePlatforms).size !== value.runtimePlatforms.length) throw invalid();
+  } else if (Object.hasOwn(value, "runtimePlatforms")) {
+    // Never reinterpret an old single-platform signature as a shared grant.
+    throw invalid();
+  }
   // Native desktop agents have no legacy split-component/systemd adapter.
   if (value.platform !== "linux-x64" && !Object.hasOwn(value.components, "codey")) throw invalid();
   for (const [name, component] of Object.entries(value.components)) {
@@ -41,6 +54,14 @@ export function validateNodeRelease(value, now = Date.now(), allowExpired = fals
         component.nodeMajors.some(major => !Number.isInteger(major) || major < 20 || major > 40)) throw invalid();
   }
   return value;
+}
+
+/** Used by the Portal and native agents after signature verification; host identity remains platform-bound. */
+export function releaseSupportsPlatform(release, platform) {
+  if (!UPDATE_PLATFORMS.includes(platform)) return false;
+  if (release?.platform !== UPDATE_SHARED_PLATFORM) return release?.platform === platform;
+  return Boolean(release.components?.codey && Object.keys(release.components).length === 1 &&
+    Array.isArray(release.runtimePlatforms) && release.runtimePlatforms.includes(platform));
 }
 
 export function verifyNodeRelease(envelope, publicKey, now = Date.now(), allowExpired = false) {

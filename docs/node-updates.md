@@ -30,13 +30,23 @@ Settings presents only the single **Codey npm package**. The node overview reads
 `components.codey` from the owner-bound updater heartbeat, never from a desired
 release or a standalone Workspace version. Missing reports remain explicitly unknown.
 
-The release picker shows each identical whole-Codey application artifact once,
-not once per OS. A shared version/filename/size/hash/build fingerprint groups
-the signed platform records; different bytes never collapse just because the
-version string matches. Each node's preview pins its own platform release and
-digest, and one confirmed mixed-platform batch retains the existing canary gate.
-An unpublished platform remains explicitly unavailable instead of asking the
-user to select another OS. Platform notes and blockers remain visible in preview.
+New whole-Codey releases have **one artifact, one signed manifest, one release ID
+and one sequence** for Windows, Linux and macOS. They use `platform: "shared"`;
+`runtimePlatforms` is copied from and checked against the actual tarball, not
+chosen as a publishing target. Every eligible node pins the same release and
+digest, and mixed-host batches retain the existing owner confirmation and canary
+gate. The UI shows one shared package, without per-platform availability choices.
+
+Historical platform-specific signatures remain valid within their original
+scope. Identical historical artifacts still group into one visible version;
+different bytes never collapse just because their version strings match. Old
+Linux-only signatures are **not** silently reinterpreted as Windows/Mac grants.
+
+Deploy the updated Portal **before** refreshing existing independent updaters.
+New agents report `sharedCodeyReleases: true`; older agents receive an explicit
+updater-upgrade hint and are not assigned a format they cannot verify. This is
+an updater refresh, not a Codey/node reinstall or a reason to change the host's
+identity, tools or model credentials.
 
 Visible pages refresh every 10 seconds even without active jobs (5 seconds
 while jobs are active). Refresh continues after completion to collect the next
@@ -69,23 +79,24 @@ batch canaries, owner checks, offline waiting and confirmation still apply.
    `node scripts/publish-node-update.mjs keygen --private-key <private.pem> --public-key <public.pem>`.
    Keep the private key out of Git, ACA and its file share. Back it up through normal private
    operator key custody; do not regenerate it during every deploy.
-3. Publish using `publish --manifest <manifest.json> --output <feed> --private-key <private.pem>
-   --sequence <increasing integer>`. Optional `--components cloudcli` supports a CloudCLI-only
-   legacy release. A `codey-package.json` automatically selects the sole `codey` component.
-   The default platform is `linux-x64`. Use `--platform windows-x64` only with the
-   validated shared npm artifact: it signs a distinct `codey-windows-…` release ID
-   pointing at the SAME tarball and hash. Keep sequence numbers increasing across
-   the entire catalog. An explicit `--release-id` can re-authorize unchanged bytes
-   with a new ID/sequence; it never overwrites an existing ID.
-   macOS uses `--platform macos-arm64` or `--platform macos-x64`, with distinct
-   IDs and the same shared tarball. The publisher also inspects the actual archive
-   and requires the matching target's `doctor-<platform>.json` native report;
-   editing a manifest cannot turn the published Linux/Windows-only 0.1.4 into
-   a Mac artifact. Deploy the platform-aware Portal before publishing new
-   platform manifests, so older catalog parsers do not reject the feed.
-   Specify `--codey-node-majors` or the legacy `--cloudcli-node-majors` /
-   `--gateway-node-majors` only for runtimes actually tested; the default is Node 24.
-   The publisher verifies evidence and artifact hashes; it never installs an npm package by name.
+3. Publish using `publish --manifest <codey-package.json> --output <feed>
+   --private-key <private.pem> --sequence <increasing integer>`. **Do not select
+   an operating system.** The whole-Codey publisher defaults to a shared
+   `codey-shared-<hash>` release and rejects host-specific `--platform` and
+   `--macos-validation` switches. One publication copies the `.tgz` once and
+   adds one catalog entry. Validation evidence must bind `artifactSha256`.
+   The archive's version, commit, build/lock fingerprints and supported runtimes
+   must match the external manifest. A historical two-platform package cannot
+   gain Mac support by editing metadata.
+   Supplied `doctor-<runtime>.json` reports remain binding: failed, malformed or
+   mismatched evidence is rejected. Separate reports/signatures are not required
+   to open each host's update entry, and publication does not claim unperformed
+   native testing. Each agent still verifies its own host, Node, native modules
+   and package before stopping an application.
+   Use `--codey-node-majors` only for compatible tested Node versions; the default
+   is 24. Legacy split-component publication remains Linux-only, including
+   `--components cloudcli`. An explicit `--release-id` can re-authorize unchanged
+   bytes with a higher global sequence; existing IDs and signatures are immutable.
 4. Upload the immutable `releases/<release>/` files and public PEM to the existing private
    Azure Files share. Upload `catalog.json` **last** under an operator publishing lock and
    atomically rename it into place. Never expose the signing private key or an unauthenticated
@@ -96,10 +107,16 @@ batch canaries, owner checks, offline waiting and confirmation still apply.
    only success unlocks up to three concurrent remaining nodes. Offline/busy nodes stay queued.
 
 The signed manifest pins component version/commit, tar and entry hashes, supported Node
-major versions, platform, protocol/config schema, expiry and migration requirements. Both
+major versions and runtimes, protocol/config schema, expiry and migration requirements. Both
 Portal and agent verify it. Sequence numbers prevent downgrade; repeated release IDs cannot
 be republished. Sign a **new higher-sequence release** to deliberately roll code back.
 Never set a version from `latest` or execute an arbitrary command supplied by a browser.
+
+An already published Linux-only 0.1.10 may be re-authorized as a new shared
+release using the exact existing `.tgz`, after Portal/updater format support is
+deployed. The new shared ID and higher sequence coexist with the old signature;
+do not rebuild the application, overwrite its old manifest, or alter installed
+version reports to make the migration appear complete.
 
 ## Bootstrap old and new machines
 

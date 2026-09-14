@@ -5,7 +5,9 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import { SignedStore, requestError } from "./signed-store.mjs";
-import { NodeUpdateCatalog, UPDATE_PROTOCOL, UPDATE_PLATFORMS } from "./node-update-release.mjs";
+import {
+  NodeUpdateCatalog, UPDATE_PROTOCOL, UPDATE_PLATFORMS, UPDATE_SHARED_PLATFORM, releaseSupportsPlatform,
+} from "./node-update-release.mjs";
 import { zipStream } from "./zip-stream.mjs";
 
 const NODE_ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
@@ -23,7 +25,7 @@ const transitions = {
   applying: ["verifying", "rolled_back", "failed", "needs_action"],
   verifying: ["succeeded", "rolled_back", "failed", "needs_action"],
 };
-const CODES = new Set(["ok", "up_to_date", "busy", "unsupported_platform", "runtime_incompatible",
+const CODES = new Set(["ok", "up_to_date", "busy", "unsupported_platform", "runtime_incompatible", "updater_upgrade_required",
   "model_auth_migration_required", "migration_unsupported", "model_login_required", "download_failed",
   "signature_invalid", "stage_failed", "configuration_changed", "health_failed", "model_failed",
   "rollback_failed", "recovered_rollback", "canary_failed", "lease_lost", "operation_failed", "waiting_canary", "release_unavailable"]);
@@ -63,7 +65,8 @@ async function body(req, keys) {
 }
 
 export function safeAgentReport(value) {
-  const keys = ["platform", "layout", "components", "currentRelease", "highestSequence", "readyMigrations", "blockedReason", "busy"];
+  const keys = ["platform", "layout", "components", "currentRelease", "highestSequence", "readyMigrations",
+    "blockedReason", "busy", "sharedCodeyReleases"];
   if (!value || typeof value !== "object" || Array.isArray(value) ||
       Object.keys(value).some((key) => !keys.includes(key)) ||
       typeof value.platform !== "string" || !/^[a-z0-9-]{1,40}$/.test(value.platform) ||
@@ -73,6 +76,7 @@ export function safeAgentReport(value) {
       value.readyMigrations.some((item) => !/^[a-z0-9-]{1,80}$/.test(item)) ||
       (value.blockedReason && !CODES.has(value.blockedReason)) ||
       (value.busy !== undefined && typeof value.busy !== "boolean") ||
+      (value.sharedCodeyReleases !== undefined && typeof value.sharedCodeyReleases !== "boolean") ||
       (value.currentRelease && !/^[a-z0-9-]{1,64}$/.test(value.currentRelease))) throw requestError("Invalid agent report");
   const components = {};
   for (const [name, item] of Object.entries(value.components ?? {})) {
@@ -86,7 +90,8 @@ export function safeAgentReport(value) {
   if ((value.layout === "npm") !== Object.hasOwn(components, "codey")) throw requestError("Invalid npm package report");
   return { platform: value.platform, layout: value.layout, highestSequence: value.highestSequence,
     currentRelease: value.currentRelease || null, readyMigrations: [...value.readyMigrations],
-    blockedReason: value.blockedReason || null, busy: value.busy === true, components };
+    blockedReason: value.blockedReason || null, busy: value.busy === true, components,
+    ...(value.sharedCodeyReleases !== undefined ? { sharedCodeyReleases: value.sharedCodeyReleases } : {}) };
 }
 
 function eligibility(node, device, release) {
@@ -95,9 +100,15 @@ function eligibility(node, device, release) {
   if (!device || device.revoked || !device.report) return { eligible: false, reason: "needs_setup" };
   const report = device.report;
   if (report.blockedReason) return { eligible: false, reason: report.blockedReason };
-  if (report.platform !== release.platform || report.layout === "unsupported") return { eligible: false, reason: "unsupported_platform" };
+  if (report.platform !== nodePlatform(node)) return { eligible: false, reason: "configuration_changed" };
+  if (!releaseSupportsPlatform(release, report.platform) || report.layout === "unsupported") {
+    return { eligible: false, reason: release.platform === UPDATE_SHARED_PLATFORM ? "runtime_incompatible" : "unsupported_platform" };
+  }
   if ((report.layout === "npm") !== Object.hasOwn(release.components, "codey")) {
     return { eligible: false, reason: "runtime_incompatible" };
+  }
+  if (release.platform === UPDATE_SHARED_PLATFORM && report.sharedCodeyReleases !== true) {
+    return { eligible: false, reason: "updater_upgrade_required" };
   }
   if (report.highestSequence > release.sequence) return { eligible: false, reason: "downgrade_blocked" };
   if (release.migrations.some((migration) => !report.readyMigrations.includes(migration))) {
@@ -164,7 +175,7 @@ export class MachineUpdates {
       releases: releases.map(({ release, digest }) => ({ ...release, digest })),
       nodes: nodes.map((node) => {
         const platform = nodePlatform(node);
-        const platformRelease = releases.find(row => row.release.platform === platform)?.release;
+        const platformRelease = releases.find(row => releaseSupportsPlatform(row.release, platform))?.release;
         const device = data.devices[node.id]?.ownerId === principalId ? data.devices[node.id] : null;
         const currentJob = data.jobs.findLast((job) => job.nodeId === node.id && job.ownerId === principalId && !terminal.has(job.state));
         return {
@@ -375,8 +386,9 @@ export class MachineUpdates {
     const data = (await this.store.read()).data;
     const targets = owned.map(({ node }) => {
       const device = data.devices[node.id];
-      const matching = !sameCodeyPackage(selected.release, selected.release) || selected.release.platform === nodePlatform(node) ? selected
-        : releases.find(row => row.release.platform === nodePlatform(node) && sameCodeyPackage(row.release, selected.release));
+      const matching = !sameCodeyPackage(selected.release, selected.release) ||
+        selected.release.platform === UPDATE_SHARED_PLATFORM || releaseSupportsPlatform(selected.release, nodePlatform(node)) ? selected
+        : releases.find(row => releaseSupportsPlatform(row.release, nodePlatform(node)) && sameCodeyPackage(row.release, selected.release));
       const check = matching ? eligibility(node, device?.ownerId === principalId ? device : null, matching.release)
         : { eligible: false, reason: "release_platform_unavailable" };
       const busy = data.jobs.some((job) => job.nodeId === node.id && !terminal.has(job.state));
@@ -479,6 +491,13 @@ export class MachineUpdates {
         }
         return { protocol: UPDATE_PROTOCOL, job: null, pollAfterSeconds: 15 };
       }
+      // A helper can be replaced after preview/confirmation. Never hand the
+      // shared format to an older helper that cannot authenticate that schema.
+      if (selected.release.platform === UPDATE_SHARED_PLATFORM && clean.sharedCodeyReleases !== true) {
+        pending.state = "needs_action"; pending.code = "updater_upgrade_required";
+        pending.updatedAt = this.clock(); pending.leaseHash = null;
+        return { protocol: UPDATE_PROTOCOL, job: null, pollAfterSeconds: 15 };
+      }
       const canary = data.jobs.find((item) => item.id === batch.canaryJobId);
       if (canary && canary.id !== pending.id && canary.state !== "succeeded") {
         if (terminal.has(canary.state)) {
@@ -487,7 +506,7 @@ export class MachineUpdates {
         return { protocol: UPDATE_PROTOCOL, job: null, waitingForCanary: true, pollAfterSeconds: 15 };
       }
       if (pending.state === "queued" && clean.busy &&
-          !eligibility({ id: device.nodeId }, current, selected.release).verificationOnly) {
+          !eligibility({ id: device.nodeId, platform: device.platform ?? clean.platform }, current, selected.release).verificationOnly) {
         pending.code = "busy"; pending.updatedAt = this.clock();
         return { protocol: UPDATE_PROTOCOL, job: null, waitingForIdle: true, pollAfterSeconds: 15 };
       }

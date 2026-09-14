@@ -7,8 +7,9 @@ It is not a Mac installer, registration repair, tool updater or a copy of Codey.
 ## First enrollment
 
 Use the already installed schema-2 `codey-macos-oneclick` npm layout at
-`$HOME/.config/codey-machine-macos/runtime.json`. Apple Silicon and Intel have
-separate signed release platforms. An older split CloudCLI/data-relay layout
+`$HOME/.config/codey-machine-macos/runtime.json`. Apple Silicon and Intel consume
+the same shared Codey release as Windows/Linux, while retaining their real
+host identity and native runtime checks. An older split CloudCLI/data-relay layout
 is not silently migrated. `--check`/the default command must succeed first.
 
 In the Mac owner's external terminal, enter the extracted `codey-updater`
@@ -44,11 +45,16 @@ signed sequence high-water mark is retained.
 
 ## Normal updates
 
-Choose a compatible macOS release in Portal, preview it, then explicitly confirm
+Choose the shared Codey release in Portal, preview it, then explicitly confirm
 the job. The Mac pulls outbound over HTTPS; no listening updater port is opened.
 The published **0.1.4 Linux/Windows-only archive is not a macOS release**. The
-macOS-capable application changes are prepared as **0.1.5**, which still needs
-building, native acceptance and publication. Do not rebuild/overwrite 0.1.4.
+macOS-capable application starts with **0.1.5**. Do not rebuild/overwrite 0.1.4
+or add Mac support by changing its external manifest.
+
+Shared releases have one `platform: "shared"` signature and artifact. Refresh
+the independent updater after deploying the updated Portal; its heartbeat must
+advertise `sharedCodeyReleases: true`. Old platform-specific signatures remain
+readable within their original scope. No Codey/node reinstallation is required.
 
 Finish Codey tasks and close this Mac's native Codex/Desktop work before a changed
 package is activated. An external Codex/Desktop process whose activity cannot be

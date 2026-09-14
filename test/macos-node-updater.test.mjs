@@ -122,6 +122,34 @@ test("Mac state machine persists its real platform and waits for native verifica
   }
 });
 
+test("both Mac architectures consume shared Codey releases without changing their native host identity", async t => {
+  for (const platform of ["macos-arm64", "macos-x64"]) {
+    const f = await fixture(t, { platform, releasePatch: {
+      id: "codey-shared-fixture", platform: "shared",
+      runtimePlatforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"],
+    } });
+    assert.equal((await f.agent.once()).state, "succeeded");
+    assert.deepEqual(f.counts, { download: 1, stage: 1, apply: 1, verify: 0, recover: 0, commit: 1 });
+    const request = await readJson(path.join(f.before.jobsRoot, f.assigned.id, "request.json"));
+    assert.equal(request.release.platform, "shared");
+    assert.equal(request.acceptance, "authenticated-health-v1");
+    assert.equal((await readJson(path.join(f.runtime.private, "heartbeat.json"))).platform, platform);
+  }
+});
+
+test("a shared declaration cannot bypass Mac runtime membership or the signed receipt", async t => {
+  for (const releasePatch of [
+    { platform: "shared", runtimePlatforms: ["linux-x64", "windows-x64"] },
+    { platform: "shared", runtimePlatforms: ["macos-x64"] },
+    { platform: "shared", runtimePlatforms: ["macos-arm64", "macos-arm64"] },
+  ]) {
+    const f = await fixture(t, { releasePatch });
+    assert.equal((await f.agent.once()).code, "signature_invalid");
+    assert.equal(f.counts.download, 0);
+    assert.equal(f.counts.apply, 0);
+  }
+});
+
 test("wrong-architecture signatures, invalid signatures and replayed release sequences never stage or stop a Mac", async t => {
   for (const options of [{ releasePatch: { platform: "macos-x64" } }, { releasePatch: { platform: "windows-x64" } },
     { badSignature: true }, { sequence: 10 }, { sequence: 9, installedDigest: "a".repeat(64) }]) {

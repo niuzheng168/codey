@@ -24,9 +24,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Apply
 
 ## 日常升级
 
-Portal 选择器按同一应用包显示一个 Codey 版本，自动按节点匹配 Linux / Windows
-平台清单。Windows 仅接受整包 Codey 的签名发行版；共享同一个应用 `.tgz`，
-平台清单、发行版 ID/序号仍分别签名。不执行
+Portal 对 Codey 整包只显示一个共享版本。Windows、Linux、macOS 使用同一个
+`.tgz`、SHA-256、`platform: shared` 签名清单、发行 ID 和序号，不再分平台发布。
+本代理上报 `sharedCodeyReleases: true`；先部署新版 Portal，再刷新代理实现。
+原节点仍保持 Windows x64 身份，旧单平台签名保留原范围。无需重装 Codey 或重注册。
+Windows 仅接受整包 Codey；不执行
 浏览器提供的脚本、npm 名称、URL 或 shell 命令，不能借此更新 Codex/DevTunnel。
 
 忙碌时留在队列。**先完成 Codey 任务并退出本机 Codex**：当前原生进程的空闲状态

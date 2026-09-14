@@ -21,7 +21,7 @@ async function freePort() {
   return port;
 }
 
-test("real app-only staging reuses the original dependency files and starts both servers without npm or model calls", {
+test("real shared-release staging reuses dependencies and starts both servers without npm or model calls", {
   skip: !process.env.CODEY_PACKAGE_TGZ || !process.env.CODEY_PACKAGE_REUSE_FROM,
   timeout: 300000,
 }, async t => {
@@ -44,8 +44,12 @@ test("real app-only staging reuses the original dependency files and starts both
     assert.ok(!args.some(arg => ["install", "rebuild", "ci"].includes(arg)), "No npm dependency operation");
     return execute(file, args, options);
   } });
+  // Exercise the common staging implementation on the actual test host; no
+  // Windows/macOS service adapter is invoked by this portable native check.
+  runtime.platform = platform;
   const started = Date.now();
-  const root = await runtime.stage(artifact.file, { platform, components: { codey: {
+  const root = await runtime.stage(artifact.file, { platform: "shared", runtimePlatforms: artifact.build.runtimePlatforms,
+    components: { codey: {
     version: artifact.pkg.version, sha256: artifact.sha256, entrySha256: artifact.entrySha256,
     commit: artifact.build.sourceCommit, lockSha256: artifact.build.lockSha256,
   } } }, { root: donor, node: process.execPath }, job);

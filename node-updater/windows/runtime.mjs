@@ -19,7 +19,7 @@ const { linkDependencies, EXTRACT_PACKAGE, reusableDependencies, verifyDependenc
   await import(pathToFileURL(path.join(libraryRoot, "update-dependencies.mjs")));
 const manifestPath = await files.exists(path.join(directory, "lib/node-update-manifest.mjs"))
   ? path.join(directory, "lib/node-update-manifest.mjs") : path.resolve(directory, "../../src/node-update-manifest.mjs");
-const { verifyNodeRelease } = await import(pathToFileURL(manifestPath));
+const { verifyNodeRelease, releaseSupportsPlatform } = await import(pathToFileURL(manifestPath));
 export const { execute, controlEnvironment, buildEnvironment, ownedPath, exists, fileHash } = files;
 const samePath = (left, right) => process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
 const sorted = value => value instanceof Date ? { date: value.toISOString() } :
@@ -29,7 +29,7 @@ export const objectHash = value => sha(JSON.stringify(sorted(value)));
 
 export function checkedReceipt(request, publicKey, { allowExpired = false, now = Date.now(), platform = "windows-x64" } = {}) {
   const verified = verifyNodeRelease(request.envelope, publicKey, now, allowExpired);
-  requireValue(verified.release.platform === platform && verified.digest === request.digest &&
+  requireValue(releaseSupportsPlatform(verified.release, platform) && verified.digest === request.digest &&
     objectHash(verified.release) === objectHash(request.release) &&
     /^[a-f0-9]{32}$/.test(request.jobId) && path.basename(request.job) === request.jobId,
   "signature_invalid");
@@ -199,12 +199,12 @@ export class Runtime {
       onSnapshot?.(before);
       return { platform: this.platform, layout: "npm", components: before.components,
         currentRelease: before.installed.releaseId, highestSequence: before.installed.sequence,
-        readyMigrations: keyReady ? ["gateway-api-key-v1"] : [], busy: !activity.idle };
+        readyMigrations: keyReady ? ["gateway-api-key-v1"] : [], busy: !activity.idle, sharedCodeyReleases: true };
     } catch {
       const installed = await this.installed();
       return { platform: this.platform, layout: "unsupported", components: {},
         currentRelease: installed.releaseId, highestSequence: installed.sequence,
-        readyMigrations: [], blockedReason: "configuration_changed", busy: true };
+        readyMigrations: [], blockedReason: "configuration_changed", busy: true, sharedCodeyReleases: true };
     }
   }
   async assertUnchanged(before, { allowPackageChange = false } = {}) {
@@ -242,7 +242,13 @@ export class Runtime {
   }
   async stage(file, manifest, before, job) {
     const artifact = await inspectUpdateArchive(file, manifest.components.codey.sha256);
-    requireValue(artifact.build.runtimePlatforms.includes(manifest.platform), "runtime_incompatible");
+    const target = manifest.platform === "shared" ? this.platform : manifest.platform;
+    requireValue(releaseSupportsPlatform(manifest, target) && artifact.build.runtimePlatforms.includes(target),
+      "runtime_incompatible");
+    if (manifest.platform === "shared") {
+      requireValue(JSON.stringify(artifact.build.runtimePlatforms) === JSON.stringify(manifest.runtimePlatforms),
+        "signature_invalid");
+    }
     requireValue(artifact.pkg.version === manifest.components.codey.version &&
       artifact.entrySha256 === manifest.components.codey.entrySha256 &&
       artifact.build.sourceCommit === manifest.components.codey.commit &&

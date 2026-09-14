@@ -2,7 +2,7 @@ import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sig
 import { copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { UPDATE_PLATFORMS, validateNodeRelease, verifyNodeRelease } from "../src/node-update-release.mjs";
+import { UPDATE_SHARED_PLATFORM, validateNodeRelease, verifyNodeRelease } from "../src/node-update-release.mjs";
 import { knownRuntimePlatforms } from "../packages/codey/lib/package-info.mjs";
 import { inspectUpdateArchive } from "../packages/codey/lib/update-archive.mjs";
 
@@ -12,7 +12,7 @@ const parseMajors = (value = "24") => value.split(",").map((item) => Number(item
 export async function createNodeUpdateRelease({
   manifestPath, output, privateKey, sequence, components,
   cloudcliNodeMajors = [24], gatewayNodeMajors = [24], codeyNodeMajors = [24], notes = "", migrations,
-  platform = "linux-x64", releaseId, macosValidation = "native",
+  platform, releaseId, macosValidation,
   now = Date.now(), expiresAt = now + 30 * 86400000,
 }) {
   const directory = path.dirname(path.resolve(manifestPath));
@@ -20,19 +20,15 @@ export async function createNodeUpdateRelease({
   const npm = source.name === "codey" && source.codey;
   const npmArtifact = source.artifact ?? source.artifacts?.[0];
   components ??= npm ? ["codey"] : ["cloudcli", "copilotApi"];
-  if (!UPDATE_PLATFORMS.includes(platform) || platform !== "linux-x64" && !npm) {
-    throw new Error("Native signed updates require the shared whole-Codey npm package");
+  platform ??= npm ? UPDATE_SHARED_PLATFORM : "linux-x64";
+  if (npm ? platform !== UPDATE_SHARED_PLATFORM : platform !== "linux-x64") {
+    throw new Error("Codey npm releases are shared across platforms; omit --platform. Only legacy split releases use linux-x64.");
   }
-  if (!["native", "canary"].includes(macosValidation)) {
-    throw new Error("Invalid macOS validation mode; use native or canary");
+  if (macosValidation !== undefined) {
+    throw new Error("Shared Codey publication does not use --macos-validation; native checks run on each node before activation.");
   }
-  const macosCanary = macosValidation === "canary";
-  if (macosCanary && (!platform.startsWith("macos-") || typeof notes !== "string" || !notes.trim())) {
-    throw new Error("macOS canary publication requires a Mac platform and explicit operator notes");
-  }
-  if (platform !== "linux-x64" &&
-      (!knownRuntimePlatforms(source.runtimePlatforms) || !source.runtimePlatforms.includes(platform))) {
-    throw new Error("This platform requires a compatible, validated shared Codey artifact");
+  if (npm && !knownRuntimePlatforms(source.runtimePlatforms)) {
+    throw new Error("A shared Codey artifact must declare its supported runtimes");
   }
   if ((!npm && (!source.cloudcli || !source.gateway)) || !components.length ||
       components.some((name) => !["cloudcli", "copilotApi", "codey"].includes(name)) ||
@@ -46,14 +42,16 @@ export async function createNodeUpdateRelease({
     evidence = JSON.parse(await readFile(path.join(directory, "report.json"), "utf8"));
   }
   if (evidence.passed !== true && evidence.status !== "complete") throw new Error("Build validation has not passed");
+  if (npm && evidence.artifactSha256 !== npmArtifact.sha256) {
+    throw new Error("Shared package validation must match the artifact SHA-256");
+  }
   const release = {
     schema: 1, kind: "codey-node-release",
-    id: releaseId ?? (npm ? platform.startsWith("macos-") ? `codey-${platform}-${npmArtifact.sha256.slice(0, 16)}`
-      : platform === "windows-x64" ? `codey-windows-${npmArtifact.sha256.slice(0, 16)}`
-      : source.releaseId ?? `codey-${npmArtifact.sha256.slice(0, 16)}` : source.release),
+    id: releaseId ?? (npm ? `codey-shared-${npmArtifact.sha256.slice(0, 16)}` : source.release),
     sequence, createdAt: now, expiresAt,
     protocol: 1, platform, configSchema: 1, rollback: "code-only",
-    notes: macosCanary ? `[macOS CANARY: native acceptance pending] ${notes.trim()}` : notes,
+    ...(npm ? { runtimePlatforms: [...source.runtimePlatforms] } : {}),
+    notes,
     migrations: migrations ?? (npm || components.includes("copilotApi") ? ["gateway-api-key-v1"] : []), components: {},
   };
   const files = [];
@@ -64,32 +62,30 @@ export async function createNodeUpdateRelease({
     const body = await readFile(path.join(directory, filename));
     const archiveSha256 = npm ? npmArtifact.sha256 : item.archiveSha256;
     if (hash(body) !== archiveSha256 || (npm && body.length !== npmArtifact.size)) throw new Error("Node artifact checksum mismatch");
-    if (platform.startsWith("macos-")) {
-      // In particular, editing codey-package.json cannot make the published
-      // Linux/Windows-only 0.1.4 tarball into a macOS release.
+    if (npm) {
+      // Verify every shared publication against the actual tarball, not just
+      // external metadata. Older two-platform artifacts cannot gain macOS by
+      // editing the manifest. This does not claim native tests on every OS:
+      // each agent still checks its host, Node ABI and native modules in staging.
       const artifact = await inspectUpdateArchive(path.join(directory, filename), archiveSha256);
-      if (!artifact.build.runtimePlatforms.includes(platform) ||
-          artifact.pkg.version !== item.version || artifact.build.sourceCommit !== item.commit ||
+      if (artifact.pkg.version !== item.version || artifact.build.sourceCommit !== item.commit ||
           artifact.entrySha256 !== item.entrySha256 || artifact.build.lockSha256 !== item.lockSha256 ||
           JSON.stringify(artifact.build.runtimePlatforms) !== JSON.stringify(source.runtimePlatforms)) {
-        throw new Error("macOS platform/build fingerprints differ from the actual Codey package");
+        throw new Error("Shared platform/build fingerprints differ from the actual Codey package");
       }
-      let native;
-      try { native = JSON.parse(await readFile(path.join(directory, `doctor-${platform}.json`), "utf8")); }
-      catch (error) {
-        // First native testing can start through the Portal. Only explicitly
-        // authorized canaries may lack evidence; broken or failed evidence is
-        // never ignored, and the agent still runs doctor before stopping Codey.
-        if (error.code !== "ENOENT" || !macosCanary) {
-          throw new Error("macOS native validation is required: save the target's codey doctor --json report beside the build, or explicitly publish a canary");
+      // Native reports are evidence, not separate release targets. Missing
+      // reports do not split a shared release, but known failed/stale evidence
+      // must never be silently ignored.
+      for (const runtime of source.runtimePlatforms) {
+        let native;
+        try { native = JSON.parse(await readFile(path.join(directory, `doctor-${runtime}.json`), "utf8")); }
+        catch (error) { if (error.code === "ENOENT") continue; throw error; }
+        if (native?.ok !== true || native.platform !== runtime || native.version !== item.version ||
+            native.entrySha256 !== item.entrySha256 || native.lockSha256 !== item.lockSha256 ||
+            native.sourceCommit !== item.commit || !codeyNodeMajors.includes(native.nodeMajor) ||
+            ["sqlite", "bcrypt", "ripgrep", "pty", "codexSdk"].some(name => native.native?.[name] !== true)) {
+          throw new Error("Supplied native validation does not match the shared package or Node major");
         }
-      }
-      if (native !== undefined && (native?.ok !== true || native.platform !== platform || native.version !== item.version ||
-          native.entrySha256 !== item.entrySha256 || native.lockSha256 !== item.lockSha256 ||
-          native.sourceCommit !== item.commit || !codeyNodeMajors.includes(native.nodeMajor) ||
-          codeyNodeMajors.length !== 1 ||
-          ["sqlite", "bcrypt", "ripgrep", "pty", "codexSdk"].some(name => native.native?.[name] !== true))) {
-        throw new Error("macOS native validation does not match this platform, package or Node major");
       }
     }
     release.components[name] = {
@@ -143,8 +139,7 @@ export async function createNodeUpdateRelease({
     const temporary = path.join(root, `catalog-${release.id}.next`);
     await writeFile(temporary, JSON.stringify({ schema: 1, releases: [envelope, ...retained] }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
     await rename(temporary, path.join(root, "catalog.json"));
-    return { releaseId: release.id, sequence, digest: hash(bytes), components, artifactCount: files.length,
-      ...(macosCanary ? { macosValidation: "canary" } : {}) };
+    return { releaseId: release.id, sequence, digest: hash(bytes), components, artifactCount: files.length };
   } finally {
     const { rmdir } = await import("node:fs/promises");
     await rmdir(lock);
@@ -175,7 +170,7 @@ async function main() {
       cloudcliNodeMajors: parseMajors(options.get("cloudcli-node-majors")),
       gatewayNodeMajors: parseMajors(options.get("gateway-node-majors")),
       codeyNodeMajors: parseMajors(options.get("codey-node-majors")), notes: options.get("notes") || "",
-      platform: options.get("platform") || "linux-x64",
+      platform: options.get("platform"),
       releaseId: options.get("release-id"),
       macosValidation: options.get("macos-validation"),
       migrations: options.has("migrations") ? options.get("migrations").split(",").filter(Boolean) : undefined,
