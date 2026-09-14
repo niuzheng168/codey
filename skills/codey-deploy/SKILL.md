@@ -19,6 +19,23 @@ description: 快速发布 Codey 的 ACA Portal、共享 Workspace UI 和 jpe2/jp
 
 ## 一条发布命令
 
+### Codey npm 整包：一次共享发布
+
+`codey-package.json` 交给 `scripts/publish-node-update.mjs publish` 时，
+不要传 `--platform` 或 `--macos-validation`。同一个包只生成一个
+`codey-shared-*` ID、签名清单和全局序号，覆盖包内实际声明的 Windows /
+Linux / macOS 运行环境。构建验收必须绑定 `artifactSha256`；不能为另一个
+系统重打同版本包，也不能把缺少的原生验收写成已通过。
+
+先部署支持共享清单的 Portal，再刷新独立升级器；新心跳必须报告
+`sharedCodeyReleases: true`。旧代理不能强行领取新格式任务。现有单平台签名
+原样保留；对已发布包补共享授权，用原 `.tgz`、新的共享 ID 和更高序号。
+只有节点实际身份、Node/原生模块、空闲和健康检查通过才允许更新。
+这不要求重装 Codey、重注册节点或更新 Codex/DevTunnel。
+
+下方旧四节点/Workspace 组件发布器继续用于其原有 legacy 范围，不把 npm 布局
+节点交给拆分组件更新。整包发布/节点确认流程见 `docs/node-updates.md`。
+
 控制机：Windows，默认工作区 `Q:\codex_manager`。现有 SSH 别名必须能以 `zhn` 连接四个节点。
 
 构建机：`westus2`，已有 checkout `/home/zhn/g/codey`、Azure CLI 登录以及 `/opt/az/bin/python3` 的 Azure Files SDK。目标来自该 checkout 的 `config/workspace-ui-publish.json`；不创建云资源或更改订阅/网络/身份。
@@ -51,6 +68,17 @@ SSH 只更新独立升级器并复用该节点本地凭据；有未结束的升�
 ```powershell
 python <skill-dir>/scripts/deploy.py --scope portal --apply --target-seconds 600
 ```
+
+如果已经在 Linux 构建机 `/home/zhn/g/codey` 上，用本机 worker 入口，避免 SSH/SCP 到自身：
+
+```sh
+python3 skills/codey-deploy/scripts/deploy.py --workspace /home/zhn/g/codey \
+  --remote-root /home/zhn/g/codey --local-builder --scope portal --apply
+```
+
+本机入口仅允许 Portal-only 且两个根目录相同；仍执行原有冻结、测试、镜像构建、
+ACA 配置漂移检查、登录/静态文件验收与锁清理。未提交的已审核改动仍须显式
+附加下述 `--reviewed-working-tree`，不会自动提交或推送。
 
 仅更新 Portal 镜像并确保 ACA 只部署 `portal` 容器；首次执行会删除旧 `mcp` sidecar
 及 Portal 中两个旧 upstream 环境变量。保留共享 UI、远程节点的包和进程，验证生产

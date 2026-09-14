@@ -455,7 +455,7 @@ class Builder:
         images = {"portal": {"image": f"{self.registry}.azurecr.io/codey@{digest}", "tag": self.release}}
         files = {"/": sha(source / "public/index.html"), "/app.js": sha(source / "public/app.js")}
         files["/settings"] = sha(source / "public/settings.html")
-        for name in ["settings.css", "machine-updates.js"]:
+        for name in ["settings.css", "machine-updates.js", "client-aggregator.js", "node-transport.js", "styles.css"]:
             files["/" + name] = sha(source / "public" / name)
         features = {}
         if (source / "public/portal-features.js").is_file():

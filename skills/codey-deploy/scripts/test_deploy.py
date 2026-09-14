@@ -237,6 +237,42 @@ class DeploymentSafety(unittest.TestCase):
         self.assertFalse(worker.report["nodeChecksPerformed"])
         self.assertNotIn("mcp", worker.report)
 
+    def test_local_builder_is_restricted_to_portal_and_the_current_build_root(self):
+        from deploy import Deploy
+        for scope, remote in [("fleet", str(self.root)), ("workspace", str(self.root)),
+                              ("portal", str(self.root / "other"))]:
+            args = SimpleNamespace(local_builder=True, scope=scope,
+                                   workspace=str(self.root), remote_root=remote)
+            with self.assertRaisesRegex(RuntimeError, "Local builder is Portal-only"):
+                Deploy(args)
+        self.assertFalse((self.root / "artifacts").exists())
+
+    def test_local_portal_files_and_workers_never_use_ssh_or_scp(self):
+        from deploy import Deploy
+        worker = object.__new__(Deploy)
+        worker.args = SimpleNamespace(local_builder=True, builder="westus2")
+        worker.job = self.root / "release"
+        worker.job.mkdir()
+        worker.remote = str(worker.job)
+        worker.base = {"root": str(self.root)}
+        source = self.root / "builder.py"
+        source.write_text("# synthetic worker\n")
+        with patch.object(worker, "ssh", side_effect=AssertionError("No node connections")):
+            worker.upload("westus2", [source], str(worker.job / "scripts"))
+            self.assertEqual((worker.job / "scripts/builder.py").read_text(), source.read_text())
+            archive = worker.job / "portal-reviewed.tar.gz"
+            archive.write_bytes(b"keep the already-local archive")
+            worker.upload("westus2", [archive], str(worker.job))
+            self.assertEqual(archive.read_bytes(), b"keep the already-local archive")
+            with self.assertRaisesRegex(RuntimeError, "release directory"):
+                worker.upload("westus2", [source], str(self.root / "outside"))
+            with patch("deploy.command", return_value=('{"ok":true,"result":{"ready":true}}', 0)) as run:
+                self.assertEqual(worker.worker("build_portal"), {"ready": True})
+                self.assertEqual(run.call_args.args[0][:3], ["/opt/az/bin/python3", "-I", "-c"])
+                self.assertEqual(json.loads(run.call_args.kwargs["input"])["mode"], "build_portal")
+        with self.assertRaisesRegex(RuntimeError, "must not use SSH"):
+            worker.ssh("any-node", ["true"])
+
     def test_portal_deployment_removes_the_legacy_mcp_sidecar_and_proxy_configuration(self):
         from builder import portal_deployment_template
         original = {
@@ -278,7 +314,10 @@ class DeploymentSafety(unittest.TestCase):
         storage = ModuleType("azure.storage")
         fileshare = ModuleType("azure.storage.fileshare")
         fileshare.ShareFileClient = object
-        with patch.dict(sys.modules, {"azure.storage": storage, "azure.storage.fileshare": fileshare}):
+        exceptions = ModuleType("azure.core.exceptions")
+        exceptions.ResourceNotFoundError = type("ResourceNotFoundError", (Exception,), {})
+        with patch.dict(sys.modules, {"azure.storage": storage, "azure.storage.fileshare": fileshare,
+                                      "azure.core.exceptions": exceptions}):
             from portal import Portal
         worker = object.__new__(Portal)
         worker.job = self.root / "portal-verifier"
@@ -570,6 +609,7 @@ class DeploymentSafety(unittest.TestCase):
         index = sha(repository / ".git/index")
         file.write_text("after\n")
         (repository / "public/portal-features.js").write_text("export const enabled = false;\n")
+        (repository / "README.md").write_text("Reviewed Portal documentation.\n")
         worker = object.__new__(Deploy)
         worker.root = repository
         worker.job = self.root / "snapshot-job"
@@ -584,6 +624,7 @@ class DeploymentSafety(unittest.TestCase):
         safe_extract(worker.job / "portal-reviewed.tar.gz", self.root / "snapshot")
         self.assertEqual((self.root / "snapshot/public/app.js").read_text(), "after\n")
         self.assertTrue((self.root / "snapshot/public/portal-features.js").is_file())
+        self.assertEqual((self.root / "snapshot/README.md").read_text(), "Reviewed Portal documentation.\n")
 
 
 if __name__ == "__main__":

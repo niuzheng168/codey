@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import secrets
 import shlex
+import shutil
 import sys
 import time
 import zipfile
@@ -29,6 +30,9 @@ class Deploy:
         resumed = getattr(args, "resume_release", None)
         self.release = release_name(resumed) if resumed else "fast-" + datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
         self.root = Path(args.workspace).resolve()
+        if getattr(args, "local_builder", False):
+            require(args.scope == "portal" and self.root == Path(args.remote_root).resolve(),
+                    "Local builder is Portal-only and requires matching workspace/remote roots")
         self.job = self.root / "artifacts" / self.release
         self.job.mkdir(mode=0o700, parents=True, exist_ok=bool(resumed))
         self.scripts = Path(__file__).resolve().parent
@@ -76,10 +80,21 @@ class Deploy:
         self.pool = ThreadPoolExecutor(max_workers=12)
 
     def ssh(self, host, args, *, input=None, timeout=180, log=None):
+        require(not getattr(self.args, "local_builder", False), "Local Portal releases must not use SSH")
         return command(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, shlex.join(args)],
                        input=input, timeout=timeout, log=log)[0]
 
     def upload(self, host, files, destination):
+        if getattr(self.args, "local_builder", False):
+            target = Path(destination).resolve()
+            require(target.is_relative_to(self.job.resolve()), "Local build files must stay in the release directory")
+            target.mkdir(mode=0o700, parents=True, exist_ok=True)
+            for file in files:
+                source = Path(file).resolve()
+                output = target / source.name
+                if source != output:
+                    shutil.copy2(source, output)
+            return
         self.ssh(host, ["mkdir", "-p", destination], timeout=15)
         self.ssh(host, ["chmod", "700", destination], timeout=15)
         command(["scp", "-q", *files, f"{host}:{destination}/"], timeout=90)
@@ -87,9 +102,11 @@ class Deploy:
     def worker(self, mode, *, script="builder.py", extra=None, timeout=330):
         entry = self.remote + "/scripts/" + script
         bootstrap = "import sys,runpy;sys.path.insert(0," + json.dumps(self.remote + "/scripts") + ");runpy.run_path(" + json.dumps(entry) + ",run_name='__main__')"
-        output = self.ssh(self.args.builder, ["/opt/az/bin/python3", "-I", "-c", bootstrap],
-                          input=json.dumps({**self.base, "mode": mode, **(extra or {})}), timeout=timeout,
-                          log=self.job / f"{script}-{mode}.log")
+        args = ["/opt/az/bin/python3", "-I", "-c", bootstrap]
+        options = {"input": json.dumps({**self.base, "mode": mode, **(extra or {})}), "timeout": timeout,
+                   "log": self.job / f"{script}-{mode}.log"}
+        output = command(args, **options)[0] if getattr(self.args, "local_builder", False) else \
+            self.ssh(self.args.builder, args, **options)
         result = json.loads(output.splitlines()[-1])
         require(result["ok"], result.get("error", "Worker failed"))
         return result["result"]
@@ -142,7 +159,7 @@ class Deploy:
         files = command(["git", "ls-files", "--modified", "--others", "--exclude-standard", "-z"], cwd=self.root)[0]
         files = sorted(set(name for name in files.split("\0") if name))
         allowed = ("public/", "src/", "test/", "docs/", "skills/", "scripts/", "node-updater/")
-        require(files and all(name.startswith(allowed) or name in {"Dockerfile", ".dockerignore", ".env.example", "package.json", "package-lock.json"}
+        require(files and all(name.startswith(allowed) or name in {"README.md", "Dockerfile", ".dockerignore", ".env.example", "package.json", "package-lock.json"}
                               for name in files), "Review unexpected source/config changes before snapshotting")
         require(not command(["git", "ls-files", "--deleted"], cwd=self.root)[0],
                 "Reviewed Portal snapshot must not silently delete code")
@@ -539,6 +556,8 @@ def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", default=r"Q:\codex_manager")
     parser.add_argument("--builder", default="westus2", choices=NODES)
+    parser.add_argument("--local-builder", action="store_true",
+                        help="Portal-only: execute the existing workers on this build machine, without SSH/SCP")
     parser.add_argument("--remote-root", default="/home/zhn/g/codey")
     parser.add_argument("--registry", default="codexshareef492f53f0")
     parser.add_argument("--seed", help="Optional previously validated build cache; not a substitute for this run's tests")
