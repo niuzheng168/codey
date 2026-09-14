@@ -1,35 +1,61 @@
-# Codey Linux 一键节点接入
+# Codey Linux / Windows / macOS 一键节点接入
 
-## Linux / Windows 共用的应用包
+## 三个平台共用的应用包
 
-`codey-0.1.3.tgz` 是两个系统共用的运行包，不再独立生成 Windows 应用发行物。
+新版 `codey-<version>.tgz` 是三个系统共用的运行包，不独立生成 Windows/macOS 应用发行物。
 构建器从同一源码与公共 npm 锁生成一次，打包前规范化文本换行；
 不把任一系统的 `node_modules` 或原生二进制装进应用包。原生依赖在目标机安装。
-包内 `runtimePlatforms` 同时列出 `linux-x64` 与 `windows-x64`。
+包内 `runtimePlatforms` 列出 `linux-x64`、`windows-x64`、`macos-arm64` 和 `macos-x64`；
+旧的 Linux/Windows 包不会因此自动变成 Mac 发行物。
 
-随包提供的 `install-codey.mjs` 可在已有 Node.js 22.13+（含 npm）的两种系统上运行，
+随包提供的 `install-codey.mjs` 可在已有 Node.js 22.13+（含 npm）的三个系统上运行，
 检查内置 SHA-256、npm 安装、新的 `codey doctor` 原生模块自检及用户 PATH。
-它只安装运行包，不接管服务、凭据或 DevTunnel；Windows 托管部署不会因此自动启用。
-Linux 完整一键流程仍用下文的脚本。
+它只安装运行包，不接管服务、凭据或 DevTunnel，**不生成 Portal 注册 JSON**。
+完整一键安装必须走下面对应系统的原生入口。
 
 ## Skill ZIP 交付
 
 需要 Skill 时，应交付 `config-new-codey-machine.zip`，而不是只有 README 和脚本的
 普通 ZIP。完整包以 `config-new-codey-machine/` 为根，包含 `SKILL.md`、
-`agents/openai.yaml`、`scripts/install-npm.sh`、`scripts/install-runtime.mjs`
+`agents/openai.yaml`、Linux `scripts/install-npm.sh`、Windows `scripts/install.ps1`、
+macOS `scripts/install-macos.py`、全部平台依赖/守护/注册辅助文件、`scripts/install-runtime.mjs`
 和唯一的 `assets/codey-<version>.tgz`。
 
 “账号与节点 → 添加节点”只有一个“下载 Codey 安装 Skill”按钮，不按操作系统分栏。
 它使用不带平台参数的 `POST /api/settings/machines/shared-skill`；只有已发布并校验
 跨平台安装器及对应 npm 包的发行版才可用。旧 Linux 专用包不会冒充共用包。
 安装时读取 `SKILL.md` 按实际系统执行；注册时仍校验 JSON 中的真实平台，
-不改变 Windows 托管部署与 Linux 的支持边界。
+使用对应的 systemd、Task Scheduler 或 LaunchAgents，不跨平台调用服务管理器。
+发布器拒绝缺少任一平台完整入口或注册 helper 的新版 Skill。
 
 Linux 完整节点部署在 Skill 根目录执行：
 
 ```bash
 bash scripts/install-npm.sh --package assets/codey-*.tgz
 ```
+
+Windows/macOS 先执行默认只读计划；确认联网、目标和已有配置替换范围后执行：
+
+```powershell
+powershell -NoProfile -File .\scripts\install.ps1 -Apply -NetworkApproved -ExpectedComputerName $env:COMPUTERNAME
+```
+
+```bash
+python3 -I -B scripts/install-macos.py --apply --network-approved --expected-computer "$(hostname)"
+```
+
+Windows 需要外部非管理员 PowerShell 和 OpenSSL 3；macOS 需要原生 Python 3.12+、
+GUI 登录会话，不使用 Rosetta/root。已有 Codex config/models 需另行批准
+`-ReplaceExisting` / `--replace-existing`；保留 auth/sessions，不终止无关服务或 Desktop。
+
+**三个系统完整安装的最后产物都是原用户 Home 下的 `codey-machine-registration.json`**。
+文件必须通过 schema、真实平台、身份凭据、TLS 证书和有效 connect-only token 检查；
+Unix 使用 `0600`，Windows 使用私有 ACL。没有此文件时不能报告节点安装完成。
+Windows/macOS 已完成节点重跑可刷新或补回导出，不重装应用、不旋转身份、不重启应用服务。
+三个系统均在导出前自动配置并启动签名升级器；Portal 导入 JSON 时同步绑定升级器，
+不再要求用户单独下载和接入。安装包只含公钥和无凭据的升级器代码，本机生成私密配置；
+已有升级器的凭据和防降级序号保持不变。上传前代理等待机器激活，不代表安装失败。
+计划和 `--check` 模式不产生注册文件；导入 Portal 成功后删除文件。
 
 这里解压的是 Skill 载体，应用仍由 npm 安装；无需手工解压 `.tgz`。
 下面的独立 npm 包和小型脚本下载是另一种入口，不替代 Skill ZIP。
@@ -174,8 +200,10 @@ codey start
 `~/.codex/auth.json`、`~/.codex/sessions/` 和其他用户文件保留；
 `~/.codex/config.toml`、`~/.codex/models.json` 以及 Codey 服务配置按当前版本覆盖。
 
-Windows 完整托管部署和 macOS 版本暂不发布；Windows x64 可安装上述共用运行包，
-不把运行包安装误认为已完成六步托管部署。
+Linux 使用 systemd/user linger；Windows/macOS 原生守护在 owner 登录后运行。
+Windows/macOS 自动安装自己的原生 Portal 升级代理，不以 Linux updater 替代；
+三个系统的注册入口均要求 Portal 已配置签名升级器。已有节点的独立接入入口仍可用于维护。
+源码修改需重新构建并发布完整 Skill 才会改变 Portal 下载内容；已有 ZIP 不会自动更新。
 
 ## 独立发布
 

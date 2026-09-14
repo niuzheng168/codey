@@ -126,9 +126,11 @@ WantedBy=default.target
    CloudCLI，首次安装则仅停止新建 CloudCLI。保留数据与诊断，不循环重装。
    已修改数据库 schema 时先确认旧版本兼容，不能盲目覆盖数据库回退。
 
-新增完整机器配置当前只发布 Linux x64：解压 `config-new-codey-machine`
-后运行 `bash scripts/install.sh`。包内只有 CloudCLI、copilot-api、updater；
-Node、Codex 和 DevTunnel 从官方源下载。Windows PowerShell 和 macOS 原生版本
-等待 Linux 六步流程稳定后再迁移，不能回退运行 Linux 脚本。
+新增完整机器使用新版 `config-new-codey-machine` Skill：Linux 执行
+`scripts/install-npm.sh`，Windows 执行 `scripts/install.ps1`，macOS 执行
+`scripts/install-macos.py`，按 Skill 说明确认计划后应用。三个系统使用同一个 npm
+应用包，Node、Codex 和 DevTunnel 从官方源下载；不得跨平台运行 Linux 服务脚本。
+完整安装最后必须验通原用户 Home 下的 `codey-machine-registration.json`，
+不能把 `install-runtime.mjs` 仅安装运行包当成节点安装完成。
 
 网络放行与 ACA 上游配置继续 [VNet](vnet.md)，最终按 [验收](verification.md) 检查。

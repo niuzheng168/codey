@@ -4,17 +4,29 @@
 
 **Settings → Add node** accepts a locally generated schema-2
 `codey-machine-registration.json` for both `macos-arm64` (Apple Silicon) and
-`macos-x64` (Intel). Registration and gateway recovery do not require a published
-installer bundle or an updater. The Portal still verifies the bound Portal origin,
+`macos-x64` (Intel). Registration does not require a published installer bundle,
+but now requires the Portal's signed updater to be configured, just like Linux.
+The Portal automatically binds the locally generated updater credential during import.
+It still verifies the bound Portal origin,
 matching package/machine platform, node TLS certificate, private DevTunnel,
 owner credentials, data authentication, Workspace SSO and WebSocket access.
 
-The new macOS managed installer remains unavailable. An independent Portal
-updater is now implemented for the existing schema-2 `codey-macos-oneclick` npm
-layout; it still requires Portal rollout, one-time private enrollment and a
+The shared installation Skill now includes `scripts/install-macos.py` for native
+Apple Silicon and Intel Macs. Its default is a read-only plan; explicitly approved
+installation configures the shared npm application, private DevTunnel and owner
+LaunchAgents, verifies models/TLS/SSO, and exports the private schema-2 registration
+JSON into the owner's home. A verified existing installation can recreate the
+export without reinstalling or rotating its identity. See the current
+[installation workflow](codey-machine-setup.md); source changes require building
+and publishing a new Skill before they reach the download button.
+
+The independent Portal updater supports the schema-2 `codey-macos-oneclick` npm
+layout. New one-click installations automatically install/start it and enroll it
+with the same registration JSON; existing nodes can still use explicit enrollment for maintenance.
+It still requires Portal rollout and a
 compatible signed release. See [Mac updater enrollment](macos-node-updates.md).
-The published 0.1.4 Linux/Windows archive is not a Mac release; the next
-macOS-capable application changes are prepared as 0.1.5.
+Previously published Linux/Windows-only archives are not Mac releases; verify
+the actual artifact's `runtimePlatforms` instead of relabelling an older archive.
 Do not relabel a Mac registration as Linux/Windows or rerun a new-machine
 installer to get past an updater check. The legacy split layout below is not
 silently migrated.

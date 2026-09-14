@@ -120,7 +120,7 @@ class CodeyPackageTests(unittest.TestCase):
             "dist-server/server/index.js", "dist/index.html", "gateway/main.js", "pages/index.html",
             "lib/codex-sdk/index.js",
             "updater/install.py", "updater/engine.py", "updater/updater.py", "updater/probe.mjs",
-            "onboarding/scripts/install.sh", "onboarding/templates/a100-models.json",
+            "onboarding/scripts/install.sh", "onboarding/scripts/registration.mjs", "onboarding/templates/a100-models.json",
         ):
             file = self.runtime / name
             file.parent.mkdir(parents=True, exist_ok=True)
@@ -136,6 +136,8 @@ class CodeyPackageTests(unittest.TestCase):
             ], text=True)},
         }
         write_json(self.runtime / "onboarding/setup.json", self.setup)
+        subprocess.run([str(self.node / "bin/node"), str(ROOT / "scripts/build-native-updaters.mjs"),
+                        str(self.runtime / "updater/native")], check=True)
         write_json(self.runtime / "codey-build.json", {
             "schema": 1, "name": "codey", "version": pkg["version"], "sourceCommit": "b" * 40,
             "runtimePlatforms": package.RUNTIME_PLATFORMS,
@@ -295,6 +297,8 @@ class CodeyPackageTests(unittest.TestCase):
         self.assertEqual(outer["runtimePackage"]["file"], self.artifact["file"])
         self.assertEqual(outer["codey"], package.inspect_npm_package(self.file))
         self.assertEqual(outer["npmSetup"], 1)
+        self.assertEqual(outer["managedInstallPlatforms"], package.RUNTIME_PLATFORMS)
+        self.assertEqual(outer["runtimePlatforms"], package.RUNTIME_PLATFORMS)
         self.assertEqual(outer["installer"]["file"], "install-codey-linux.sh")
         self.assertEqual(outer["runtimeInstaller"]["file"], "install-codey.mjs")
         self.assertEqual(outer["runtimeInstaller"]["sha256"], package.metadata(self.root / "install-codey.mjs")["sha256"])
@@ -302,6 +306,8 @@ class CodeyPackageTests(unittest.TestCase):
         self.assertEqual(outer["releaseId"], "machine-" + package.metadata(file)["sha256"][:16])
         self.assertEqual(json.loads(raw), outer)
         with zipfile.ZipFile(file) as archive:
+            for required in package.MACHINE_SKILL_FILES:
+                self.assertIn("config-new-codey-machine/" + required, archive.namelist())
             archives = [name for name in archive.namelist() if name.endswith((".tgz", ".tar.gz"))]
             self.assertEqual(archives, ["config-new-codey-machine/assets/" + self.artifact["file"]])
             self.assertEqual(archive.read(archives[0]), self.file.read_bytes(), "Never repack the application for the Skill's OS")
@@ -387,6 +393,34 @@ class CodeyPackageTests(unittest.TestCase):
                     archive.writestr(name, body)
             with self.subTest(changes=changes), self.assertRaises(publisher.PublishError):
                 publisher.inspect_package(modified)
+
+    def test_publisher_rejects_skill_without_any_native_installer_or_registration_helper(self):
+        file = self.machine_bundle()
+        with zipfile.ZipFile(file) as archive:
+            files = {name: archive.read(name) for name in archive.namelist()}
+        for missing in ["scripts/install.ps1", "scripts/install-macos.py", "scripts/registration.mjs",
+                        "scripts/windows-common.ps1", "scripts/macos-service.py", "dependencies.macos.json"]:
+            modified = self.root / "incomplete.zip"
+            with zipfile.ZipFile(modified, "w", compression=zipfile.ZIP_STORED) as archive:
+                for name, body in files.items():
+                    if name != "config-new-codey-machine/" + missing:
+                        archive.writestr(name, body)
+            with self.subTest(missing=missing), self.assertRaises(publisher.PublishError):
+                publisher.inspect_package(modified)
+
+    def test_native_updaters_remain_checksum_valid_after_package_text_normalization(self):
+        package.normalize_runtime_text(self.runtime)
+        for platform in package.RUNTIME_PLATFORMS[1:]:
+            root = self.runtime / "updater/native" / platform
+            manifest = json.loads((root / "agent-files.json").read_text())
+            self.assertEqual(manifest["platform"], platform)
+            self.assertFalse((root / "config.json").exists(), "Do not publish target credentials")
+            for name, checksum in manifest["files"].items():
+                self.assertEqual(package.metadata(root / name)["sha256"], checksum, name)
+        with self.assertRaisesRegex(RuntimeError, "credential-free"):
+            package.inspect_npm_package(self.rewritten(lambda files: files.update({
+                "package/updater/native/windows-x64/config.json": b'{"credential":"fixture-must-not-ship"}',
+            })))
 
     def test_source_dependency_changes_require_updating_the_single_manifest(self):
         package.validate_dependencies({"dependencies": {"a": "1"}, "optionalDependencies": {}},

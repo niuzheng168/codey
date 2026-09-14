@@ -32,7 +32,7 @@ def zip_entries(file, entries):
             archive.writestr(name, content)
 
 
-def make_codey_tgz(root):
+def make_codey_tgz(root, shared=True):
     runtime = root / "installed-codey"
     package = {
         "name": "codey", "version": "0.1.0", "type": "module",
@@ -52,7 +52,9 @@ def make_codey_tgz(root):
     lock_hash = hashlib.sha256((runtime / "npm-shrinkwrap.json").read_bytes()).hexdigest()
     write_json(runtime / "codey-build.json", {
         "schema": 1, "name": "codey", "version": "0.1.0",
-        "sourceCommit": "a" * 40, "sourceDirty": False, "platform": "windows-x64",
+        "sourceCommit": "a" * 40, "sourceDirty": False,
+        **({"runtimePlatforms": ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]} if shared
+           else {"platform": "windows-x64"}),
         "cloudcli": {"commit": "b" * 40, "version": "1.37.2"},
         "copilotApi": {"commit": "c" * 40, "version": "2.5.4"},
         "lockSha256": lock_hash,
@@ -96,20 +98,22 @@ def make_codey_tgz(root):
     return runtime, artifact, built
 
 
-def fixture(root):
+def fixture(root, shared=True):
     package = root / "package"
     shutil.copytree(SKILL / "scripts", package / "scripts")
     shutil.copy2(SKILL / "dependencies.windows.json", package / "dependencies.json")
     shutil.copytree(SKILL / "templates", package / "templates")
-    runtime, artifact, built = make_codey_tgz(root)
+    runtime, artifact, built = make_codey_tgz(root, shared)
     assets = package / "assets"
     assets.mkdir()
     shutil.copy2(artifact, assets / artifact.name)
     manifest = {
-        "schema": 2, "name": "codey", "platform": "windows-x64",
+        "schema": 2, "name": "codey", "platform": "linux-x64" if shared else "windows-x64",
+        **({"runtimePlatforms": ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]} if shared else {}),
         "releaseId": "machine-" + "a" * 16,
-        "dependencyMode": "npm-codey-package", "node": built["node"],
-        "nodeDistribution": built["nodeDistribution"],
+        "dependencyMode": "npm-codey-package", "node": "24.18.0" if shared else built["node"],
+        "nodeDistribution": ({"url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-x64.tar.xz",
+                              "sha256": "a" * 64} if shared else built["nodeDistribution"]),
         "bunBuildTool": built["bunBuildTool"],
         "dependencyRegistry": built["dependencyRegistry"],
         "codey": built["codey"], "cloudcli": built["cloudcli"],
@@ -119,10 +123,11 @@ def fixture(root):
     }
     write_json(assets / "manifest.json", manifest)
     write_json(assets / "setup.json", {
-        "schema": 1, "platform": "windows-x64", "releaseId": manifest["releaseId"],
+        "schema": 1, "platform": manifest["platform"], "releaseId": manifest["releaseId"],
         "portalOrigin": "https://codey.example.test",
         "network": {"mode": "devtunnel"}, "tunnelAuthProvider": "github",
-        "updater": {"supported": False, "reason": "unsupported_platform"},
+        "updater": ({"protocol": 1, "releasePublicKey": "-----BEGIN PUBLIC KEY-----\nfixture-public-key"}
+                    if shared else {"supported": False, "reason": "unsupported_platform"}),
     })
     names = [artifact.name, "manifest.json", "setup.json"]
     (assets / "SHA256SUMS").write_text(
@@ -148,6 +153,22 @@ def fixture(root):
     link.external_attr = 0o120777 << 16
     zip_entries(root / "link.zip", [(link, "../outside")])
     return runtime
+
+
+@unittest.skipUnless(os.environ.get("CODEY_TEST_PWSH") or shutil.which("pwsh"), "Portable PowerShell is optional")
+class PortablePowerShellTests(unittest.TestCase):
+    def test_shared_and_legacy_windows_metadata_and_registration_reexport(self):
+        shell = os.environ.get("CODEY_TEST_PWSH") or shutil.which("pwsh")
+        for shared in (True, False):
+            with self.subTest(shared=shared), tempfile.TemporaryDirectory(prefix="codey-pwsh-package-") as directory:
+                root = Path(directory)
+                fixture(root, shared)
+                result = subprocess.run([
+                    shell, "-NoProfile", "-NonInteractive", "-File",
+                    str(ROOT / "test/windows-registration-fixture.ps1"), "-Root", str(root),
+                ], capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("WINDOWS_REGISTRATION_FIXTURE_OK", result.stdout)
 
 
 @unittest.skipUnless(os.name == "nt", "Native PowerShell behavior requires Windows")

@@ -37,7 +37,7 @@ async function fixture(t) {
   for (const name of [
     "dist-server/server/index.js", "gateway/main.js", "updater/install.py",
     "updater/updater.py", "updater/engine.py", "updater/probe.mjs",
-    "onboarding/scripts/install.sh", "onboarding/templates/a100-models.json",
+    "onboarding/scripts/install.sh", "onboarding/scripts/registration.mjs", "onboarding/templates/a100-models.json",
   ]) {
     await mkdir(path.dirname(path.join(pkg, name)), { recursive: true });
     await writeFile(path.join(pkg, name), entry);

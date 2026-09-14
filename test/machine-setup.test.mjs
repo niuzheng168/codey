@@ -43,7 +43,7 @@ async function temporary(t) {
   return root;
 }
 
-async function bundle(root, platform = "linux-x64", { shared = false } = {}) {
+async function bundle(root, platform = "linux-x64", { shared = false, managed = false } = {}) {
   assert.equal(platform, "linux-x64");
   await mkdir(root, { recursive: true });
   const npmBytes = gzipSync("fixture npm application");
@@ -73,6 +73,10 @@ async function bundle(root, platform = "linux-x64", { shared = false } = {}) {
     runtimePackage: { name: "codey", ...npmMetadata }, codey: { version },
     npmSetup: 1, installer: metadata("install-codey-linux.sh", installerBytes),
     ...(shared ? { runtimeInstaller: metadata("install-codey.mjs", runtimeInstallerBytes) } : {}),
+    ...(managed ? {
+      runtimePlatforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"],
+      managedInstallPlatforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"],
+    } : {}),
     bundledRuntimes: ["cloudcli", "copilot-api", "updater"],
     downloadedOfficialRuntimes: ["node", "codex", "devtunnel"],
     package: {
@@ -162,7 +166,7 @@ async function machineFile(root, nodeId, options = {}) {
   };
 }
 
-async function fixture(t, { shared = false } = {}) {
+async function fixture(t, { shared = false, managed = false } = {}) {
   const root = await temporary(t);
   const master = randomBytes(32).toString("base64url");
   const ticketMaster = randomBytes(32).toString("base64url");
@@ -181,7 +185,7 @@ async function fixture(t, { shared = false } = {}) {
   const admin = (await auth.login("admin", password)).cookie.split(";")[0];
   const cookie = (await auth.login("member", password)).cookie.split(";")[0];
   const bundleRoot = path.join(root, "bundle");
-  const manifest = await bundle(bundleRoot, "linux-x64", { shared });
+  const manifest = await bundle(bundleRoot, "linux-x64", { shared, managed });
   const data = new NodeDataGateway({ nodes: [], signingKey: ticketMaster, ca: "legacy-test-ca" }, { nodePolicy: policy });
   const workspace = new CloudCliGateway({ nodes: [], ssoMaster: master, ca: "legacy-test-ca" }, { sessionAuthenticator: auth, nodePolicy: policy });
   const probes = [];
@@ -379,6 +383,19 @@ test("the shared endpoint never silently downloads an older Linux-only Skill", a
   assert.equal((await f.policy.pendingMachines(f.member.id)).length, 0);
 });
 
+test("new shared Skill capabilities cover all native installers without relabelling older downloads", async t => {
+  const f = await fixture(t, { shared: true, managed: true });
+  const availability = (await (await f.request("/api/settings")).json()).machineSetup;
+  assert.deepEqual(availability.runtimePlatforms, ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]);
+  assert.deepEqual(availability.managedInstallPlatforms, availability.runtimePlatforms);
+  const response = await f.request("/api/settings/machines/shared-skill", { method: "POST",
+    headers: { "user-agent": "Macintosh; Apple Silicon" } });
+  assert.equal(response.status, 200);
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), f.manifest.packageBytes);
+  assert.equal(f.probes.length, 0);
+  assert.equal((await f.policy.pendingMachines(f.member.id)).length, 0);
+});
+
 test("shared availability validates the portable installer, its artifact binding and complete publication", async t => {
   const f = await fixture(t, { shared: true });
   const selected = await loadMachineBundle(f.bundleRoot);
@@ -486,11 +503,10 @@ test("native registration support is independent from the installer download gat
 });
 
 for (const platform of ["windows-x64", "macos-arm64", "macos-x64"]) {
-  test(`${platform} registration imports without a published bundle or updater and restores both gateways`, async t => {
+  test(`${platform} registration imports without a published bundle, automatically enrolls its updater and restores gateways`, async t => {
     const f = await fixture(t);
     f.machineSetup.bundleRoot = null;
     const updates = f.machineSetup.machineUpdates;
-    f.machineSetup.machineUpdates = null;
     f.machineSetup.selectedBundle = async () => { assert.fail("Registration must not load a download"); };
     const id = `n-${randomBytes(12).toString("hex")}`;
     const { privateIp, vmResourceId, ...fields } = await machineFile(f.root, id);
@@ -513,8 +529,11 @@ for (const platform of ["windows-x64", "macos-arm64", "macos-x64"]) {
     assert.equal(await f.probes[0].options.getTunnelToken(), value.devTunnelConnectToken);
     assert.equal(f.probes[0].options.workspaceBinding.key, value.credentials.workspaceSsoKey);
     assert.equal(await f.policy.keyFor(f.member.id, id), value.credentials.clientSigningKey);
-    assert.equal((await updates.store.read()).data.devices[id], undefined,
-      "Import must not implicitly enroll a non-Linux node in an updater");
+    const device = (await updates.store.read()).data.devices[id];
+    assert.equal(device.platform, platform);
+    assert.equal(device.ownerId, f.member.id);
+    assert.equal(device.credentialHash, createHash("sha256").update(value.credentials.updaterCredential).digest("hex"),
+      "Import binds the already-installed agent without a second bootstrap/credential rotation");
     assert.equal((await f.policy.list(f.credential.principalId)).length, 0);
     assert.equal((await post({ user: f.admin })).status, 409, "Another owner cannot reclaim the node");
     assert.equal((await post()).status, 201, "Same-owner retries are idempotent");
@@ -545,7 +564,6 @@ for (const platform of ["windows-x64", "macos-arm64", "macos-x64"]) {
   test(`${platform} import retains metadata, tunnel, TLS and account checks before any persistence`, async t => {
     const f = await fixture(t);
     f.machineSetup.bundleRoot = null;
-    f.machineSetup.machineUpdates = null;
     const id = `n-${randomBytes(12).toString("hex")}`;
     const { privateIp, vmResourceId, ...fields } = await machineFile(f.root, id);
     const value = registration({ platform, releaseId: "machine-" + "c".repeat(16) }, {
@@ -589,7 +607,7 @@ for (const platform of ["windows-x64", "macos-arm64", "macos-x64"]) {
   });
 }
 
-test("registration still requires gateways and, on Linux only, a configured signed updater", async t => {
+test("all native registrations require gateways and a configured signed updater", async t => {
   const f = await fixture(t);
   f.machineSetup.bundleRoot = null;
   assert.equal(f.machineSetup.registrationAvailability("linux-x64").enabled, true);
@@ -600,7 +618,7 @@ test("registration still requires gateways and, on Linux only, a configured sign
   for (const updater of [null, { catalog: { configured: false } }, { catalog: { configured: true } }]) {
     f.machineSetup.machineUpdates = updater;
     for (const platform of ["windows-x64", "macos-arm64", "macos-x64"]) {
-      assert.equal(f.machineSetup.registrationAvailability(platform).enabled, true);
+      assert.equal(f.machineSetup.registrationAvailability(platform).enabled, Boolean(updater?.catalog.configured));
       for (const name of ["cloudCliGateway", "nodeDataGateway"]) {
         const gateway = f.machineSetup[name];
         f.machineSetup[name] = null;
@@ -786,7 +804,7 @@ for (const platform of ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"])
       assert.equal(await f.policy.machineTunnelToken(id), renewed.devTunnelConnectToken);
       assert.equal(await f.policy.keyFor(f.member.id, id), original.credentials.clientSigningKey);
       assert.deepEqual((await f.machineSetup.machineUpdates.store.read()).data.devices[id], device,
-        "Restoration preserves updater credentials and history, and never implicitly enrolls non-Linux nodes");
+        "Restoration preserves the automatically enrolled updater credentials and history");
       assert.equal((await post(value)).status, 201, "Restoration remains idempotent");
       assert.equal((await f.policy.records()).data.nodes.length, 1);
       assert.deepEqual(await f.policy.list(f.credential.principalId), []);

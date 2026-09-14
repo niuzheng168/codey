@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { runDoctor, doctorOptions } from "../packages/codey/lib/doctor.mjs";
 import { RUNTIME_PLATFORMS, readPackageInfo, runtimePlatform, validateRuntimeLock } from "../packages/codey/lib/package-info.mjs";
 import { readInstalledPackageInfo } from "../packages/codey/lib/update-files.mjs";
-import { installLauncher, installOptions, launcherContents, npmCandidates, npmPackageRoot, WINDOWS_PATH_SCRIPT } from "../scripts/install-codey-runtime.mjs";
+import { installerPlatform, installLauncher, installOptions, launcherContents, npmCandidates, npmPackageRoot, WINDOWS_PATH_SCRIPT } from "../scripts/install-codey-runtime.mjs";
 
 const exec = promisify(execFile);
 const digest = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -126,6 +126,29 @@ test("the universal installer accepts explicit local artifacts, not public packa
   ]) assert.throws(() => installOptions(args));
 });
 
+test("the runtime installer selects the real platform, including both native Mac architectures", () => {
+  for (const [platform, arch, target] of [
+    ["linux", "x64", "linux-x64"], ["win32", "x64", "windows-x64"],
+    ["darwin", "arm64", "macos-arm64"], ["darwin", "x64", "macos-x64"],
+  ]) assert.equal(installerPlatform(platform, arch), target);
+  for (const [platform, arch] of [["linux", "arm64"], ["win32", "arm64"], ["darwin", "ia32"]]) {
+    assert.throws(() => installerPlatform(platform, arch));
+  }
+});
+
+test("macOS runtime CLI adds PATH to Zsh without overwriting profiles or creating a registration file", async t => {
+  const f = await fixture(t);
+  await writeFile(path.join(f.home, ".zshrc"), "export KEEP_MY_SETTING=yes\n");
+  await installLauncher(f.home, process.execPath, f.root, { platform: "darwin" });
+  for (const name of [".zprofile", ".zshrc"]) {
+    const file = path.join(f.home, name), before = await readFile(file, "utf8");
+    assert.match(before, /Codey PATH/);
+    await installLauncher(f.home, process.execPath, f.root, { platform: "darwin" });
+    assert.equal(await readFile(file, "utf8"), before);
+  }
+  assert.match(await readFile(path.join(f.home, ".zshrc"), "utf8"), /KEEP_MY_SETTING=yes/);
+  await assert.rejects(readFile(path.join(f.home, "codey-machine-registration.json")), { code: "ENOENT" });
+});
 test("Windows installation uses npm's JS entry and native global layout, not Linux paths or npm.cmd spawning", () => {
   assert.equal(npmPackageRoot("C:\\Users\\Demo\\.local\\release", "win32"), "C:\\Users\\Demo\\.local\\release\\node_modules\\codey");
   assert.equal(npmCandidates("C:\\Program Files\\nodejs\\node.exe", "win32")[0],

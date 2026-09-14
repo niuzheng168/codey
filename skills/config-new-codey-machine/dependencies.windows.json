@@ -18,11 +18,10 @@
   },
   "npmPackage": {
     "name": "codey",
-    "dependencies": "npm-shrinkwrap.json",
-    "buildLock": "packages/codey/package-lock.windows.json"
+    "dependencies": "npm-shrinkwrap.json"
   },
   "updater": {
-    "supported": false,
-    "reason": "The signed node updater currently requires Linux and systemd."
+    "supported": true,
+    "mode": "automatic"
   }
 }

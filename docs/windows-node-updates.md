@@ -2,13 +2,18 @@
 
 ## 能力与发布状态
 
-新增 Windows x64 的独立拉取代理、按平台签名发行版和 Portal 接入入口。它不是把
+新版完整安装 Skill 会自动安装并启动此原生代理，上传机器注册 JSON 时同步绑定凭据；
+不需要第二次手动接入。下面的独立接入步骤用于已有、尚未接入的节点和维护修复。
+
+Windows x64 使用独立拉取代理和 Portal 接入入口，并消费 Windows/Linux/macOS 共用的
+整包签名发行版。它不是把
 “平台不支持”文字隐藏掉：版本来自正在运行的原 Codey 进程、安装指纹和本机已鉴权
 健康检查。没有代理上报时仍明确显示未知。
 
 这需要**部署包含该实现的新 Portal**，并在现有 Windows 上**首次安装一次专用代理**。
 仅安装 Codey 应用/离线包（包括 0.1.6）不会自动接入代理；不需要重打应用 `.tgz`。
-新机安装、已有机器注册和升级代理接入是三个不同操作，不强制重新注册 Windows 节点。
+新版完整 Skill 将新机安装和升级代理配置合并；已有 Windows 节点仍可独立接入，
+不强制重新注册或重装应用。
 
 ## 原用户首次接入
 
@@ -33,10 +38,15 @@
 
 ## 发行版与日常更新
 
-发行版选择器显式区分 Windows x64 / Linux x64。两者可以共享相同 Codey npm 包，
-但签名清单的平台、ID 不同，序号在整个 feed 中严格递增。Windows 不接受旧的
+Codey 整包只发布一次：同一个 `.tgz`、SHA-256、签名清单、release ID 和序号供
+Windows、Linux、Mac 使用，不再分平台开放更新。Windows 不接受旧的
 CloudCLI/copilot-api 拆分包、Linux 任务或 Codex/DevTunnel 工具 manifest。
-某个平台的新发行版不会使其他平台已安装的版本错误地显示为不支持。
+历史单平台签名仍按原范围读取，不会被擅自扩大授权。
+
+共享清单使用 `platform: shared`，支持的运行环境来自实际包的 `runtimePlatforms`。
+原 Windows 节点身份仍是 `windows-x64`。先部署新版 Portal，再刷新独立升级器；
+新代理上报 `sharedCodeyReleases: true`。旧代理会显示需要更新升级器，而不是把
+共享应用说成“Windows 版本尚未开放”。不需要重装 Codey 或重新注册节点。
 
 发布已构建、已验证的共享包（运维执行，不在 Windows 节点生成签名）：
 
@@ -44,13 +54,13 @@ CloudCLI/copilot-api 拆分包、Linux 任务或 Codex/DevTunnel 工具 manifest
 node scripts/publish-node-update.mjs publish \
   --manifest /absolute/build/codey-package.json \
   --output /absolute/feed --private-key /absolute/private.pem \
-  --platform windows-x64 --sequence NEW_GLOBAL_SEQUENCE --codey-node-majors 24
+  --sequence NEW_GLOBAL_SEQUENCE --codey-node-majors 24
 ```
 
-只声明实测过的 Node major。先上传不可变包和清单，最后原子发布 catalog。不得为了
-Windows 重打同版本的应用或改锁文件；先部署支持 Windows 清单的新 Portal，再发布
-Windows feed，防止旧 Portal 拒绝新的平台清单。首次使用单台 Windows canary，
-真实验收后再扩大范围；页面选择同一应用包，批次内按节点匹配各平台签名清单。
+只声明兼容、已验证的 Node major。先上传不可变包和清单，最后原子发布 catalog。
+不得为了 Windows 重打同版本的应用或改锁文件。发布器检查实际包与验收摘要，
+不伪造 Windows 原生验收；代理在停止应用前仍检查本机 Node、原生模块和候选包。
+首次使用单台 Windows canary，真实验收后再扩大范围；各节点绑定同一份共享签名。
 
 用户在 Portal 预览、确认；代理才领取任务。忙碌/离线等待，签名、有效期、版本、
 Node、配置与防降级检查失败则拒绝。**先结束 Codey 工作并退出 Windows 本机 Codex**：

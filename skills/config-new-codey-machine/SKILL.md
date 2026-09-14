@@ -1,9 +1,9 @@
 ---
 name: config-new-codey-machine
-description: "安装 Linux/Windows x64 共用的 Codey npm 运行包并自检；Linux 另支持 DevTunnel 和 systemd 一键节点部署，Windows 运行包安装不替代其服务托管配置。"
+description: "在 Linux x64、Windows x64、macOS arm64/x64 一键安装 Codey 节点，配置私有 DevTunnel 和原生守护，验通后生成 Portal 注册 JSON。"
 ---
 
-# 安装共享 Codey 运行包与 Linux 节点
+# 安装 Codey 节点并生成 Portal 注册文件
 
 交付物是完整的 `config-new-codey-machine.zip` Skill，包含本文件、
 `agents/openai.yaml`、安装脚本和 `assets/codey-<version>.tgz`。
@@ -15,26 +15,91 @@ description: "安装 Linux/Windows x64 共用的 Codey npm 运行包并自检；
 - Workspace 和网关的编译产物直接进入包，共用一棵 npm 运行依赖树。
 - 更新器和 `codey setup` 部署入口也在包内；两个后端可独立运行，但只能整包更新。
 
-## 先区分运行包安装和托管部署
+## 三个平台统一的完成条件
 
-两种系统使用同一份 `assets/codey-<version>.tgz` 和 SHA-256，不生成另一个
-`codey-win` 包，也不在 Windows 重新生成依赖锁。Node.js 22.13+（含 npm）已安装时，
-Windows PowerShell 从 Skill 根目录执行：
+Linux、Windows、macOS 使用同一份 `assets/codey-<version>.tgz` 和 SHA-256，
+按目标系统执行下面的**完整节点入口**。不要重新构建平台专用应用包或依赖锁。
+先定位包含本文件的 Skill 根目录；脚本、平台依赖文件或唯一 `.tgz` 缺失时，
+报告 Skill 不完整，不改装公共 npm 的同名项目。
+
+完整安装成功必须同时满足：
+
+- 本机网关、Workspace、私有 DevTunnel、原生守护和真实模型检查成功。
+- 三个平台均自动配置、安装并启动各自的签名升级器；不能让用户在注册后再手动接入。
+- owner Home 下存在有效的 **`codey-machine-registration.json`**：
+  Linux/macOS 为 `~/codey-machine-registration.json`；Windows 为原始登录用户的
+  `%USERPROFILE%\codey-machine-registration.json`，不是 Skill 解压目录。
+- 文件为 schema 2，`package.platform` 和 `machine.platform` 均为本机真实平台：
+  `linux-x64`、`windows-x64`、`macos-arm64` 或 `macos-x64`；身份、独立凭据、
+  非 CA TLS 证书和新签发的 connect-only token 来自这台实际运行的节点。
+- Unix 权限 `0600`；Windows 使用原用户/SYSTEM 的私有 ACL。
+
+安装器会严格校验注册文件，**不是生成空 JSON、模板、其他机器的配置或伪造平台字段**。
+只向用户报告文件绝对路径，不打印凭据；用户只上传该文件到自己的 Portal，验收后删除。
+本机安装完成不代表 Portal 已验收。缺少文件、设备登录未完成或检查失败时，不得宣称安装完成。
+上传这一个 JSON 时，Portal 同时绑定本机升级器凭据；无需第二次下载升级器或点击接入。
+上传前升级器等待机器激活是正常状态。Portal 必须配置签名公钥；升级器安装失败时不导出
+注册文件、不报告完整安装成功。重复执行保留已接入升级器的凭据及防降级序号。
+`--check` / 默认计划模式不配置节点、不生成凭据或注册文件。
+
+## Windows 原生完整安装
+
+使用原登录用户的非管理员、外部 PowerShell 终端；不要从 Codex/Desktop 或
+Codey Workspace 自己的进程树内执行，也不要用 WSL/Linux/systemd 入口。
+需要 OpenSSL 3（例如 Git for Windows 提供的版本）；Node、DevTunnel 和官方 Codex
+由完整安装器准备。从 Skill 根目录先查看只读计划：
 
 ```powershell
-$package = @(Get-Item .\assets\codey-*.tgz)
-if ($package.Count -ne 1) { throw "Skill must contain exactly one Codey npm artifact." }
-node .\scripts\install-runtime.mjs --package ($package[0].FullName)
+powershell -NoProfile -File .\scripts\install.ps1
 ```
 
-这条入口只安装运行包、准备本机原生依赖、自检并注册用户 PATH。不修改现有
-Windows 服务、DevTunnel、模型凭据或 Codex 配置；不要在 Windows 调用 Linux
-的 `codey setup` / systemd 升级器，也不要把运行包安装成功报告为托管节点部署成功。
-仅验证时追加 `--check`（仍会安装 npm 依赖，但不修改 PATH）。后续可执行
-`codey doctor --json` 检查原生模块，再按用户要求登录或手动启动服务。
+确认目标机器、联网和配置替换范围后执行：
 
-Linux 也可使用 `node scripts/install-runtime.mjs --package <包路径>` 只安装运行包。
-用户要求完整 Linux 节点部署时，使用下文的一键入口，而不是停在运行包安装。
+```powershell
+powershell -NoProfile -File .\scripts\install.ps1 -Apply -NetworkApproved -ExpectedComputerName $env:COMPUTERNAME
+```
+
+已有 Codex 配置或需要替换旧节点时，先获准再加 `-ReplaceExisting`；
+可用 `-CodexHome` / `-OpenSslExe` 指定实际绝对路径。安装器拒绝占用端口的无关服务，
+不会自动终止未托管的 Codex/Desktop。需要用户关闭应用时说明原因，保留待执行命令，
+不要退回仅安装运行包并报告成功。
+
+完整流程安装同一 npm 包，配置私有隧道、TLS、SSO 和原生 Task Scheduler watchdog，
+真实验证后以私有 ACL 导出注册文件。任务在原用户登录后运行，不冒充无人登录开机服务。
+已完成安装的同版本节点重跑此命令会验证、确保升级器接入并重新导出注册文件，
+不旋转身份或重启应用服务。使用独立的原生更新任务，不运行 Linux updater。
+
+## macOS 原生完整安装
+
+在原用户已登录 GUI 的原生终端使用 Python 3.12+；支持 Apple Silicon 与 Intel，
+拒绝 root 和 Rosetta。保留 Codex auth/sessions，不接管无关 LaunchAgent 或占用端口的服务。
+从 Skill 根目录先查看只读计划：
+
+```bash
+python3 -I -B scripts/install-macos.py
+```
+
+确认目标、联网和配置范围，关闭仍在运行的 Codex/Desktop 后执行：
+
+```bash
+python3 -I -B scripts/install-macos.py --apply --network-approved --expected-computer "$(hostname)"
+```
+
+已有 Codex 配置需明确批准后加 `--replace-existing`，只备份和替换 config/models，
+不删除 auth/sessions。失败重试需先检查私有状态，再加 `--retry-failed`。
+安装器下载并校验本机架构的 Node/DevTunnel，通过 npm 安装共享应用、准备官方 Codex，
+配置 `codey`、`tunnel`、`renew` 用户 LaunchAgents。模型、TLS、SSO、匿名拒绝和守护
+检查通过后才写入注册 JSON；重新运行已完成节点会用现有身份刷新导出，不重装节点。
+稳定 CLI PATH 覆盖 Bash 和 macOS 默认 Zsh。原生 Portal 升级代理随安装自动配置、
+启动；与应用共用的安装锁先释放再接入，避免死锁。仅升级器阶段失败时，保留已验通
+应用，直接重跑即可补齐，不需要重装应用或再次做模型请求。
+
+## 仅安装运行包（不是一键节点安装）
+
+仅当用户明确只要应用运行包或自检时，才使用
+`node scripts/install-runtime.mjs --package <assets 中的唯一 tgz>`。
+该入口在已有 Node.js 22.13+（含 npm）时安装并自检，**不配置服务/隧道、不会生成注册
+JSON**；`--check` 还跳过 PATH 修改。不得把此命令作为 Windows/macOS 完整安装的终点。
 
 ## Linux 托管部署
 
@@ -136,4 +201,5 @@ Linux 托管部署按本机解析为 `linux-x64`。通用构建需要
 - **验收标准**：所有 unit 均 enabled/active；生成权限为 `0600` 的
   `~/codey-machine-registration.json`，只上传该文件到 Portal。
 
-Windows PowerShell 版本在 Linux 流程实机通过后再实现；不要在 Windows 上运行本脚本。
+上述六步是 Linux/systemd 流程；Windows/macOS 使用本文件前面的原生完整入口，
+三个系统最终交付相同文件名、按真实平台生成的私有注册 JSON。

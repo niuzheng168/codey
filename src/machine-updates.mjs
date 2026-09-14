@@ -332,9 +332,9 @@ export class MachineUpdates {
       ...sources];
   }
 
-  async registerClientMachine(principalId, nodeId, credential) {
+  async registerClientMachine(principalId, nodeId, credential, platform = "linux-x64") {
     if (!this.catalog.configured) throw requestError("节点更新尚未配置", 409);
-    if (!NODE_ID.test(nodeId ?? "") || !TOKEN.test(credential ?? "")) {
+    if (!NODE_ID.test(nodeId ?? "") || !TOKEN.test(credential ?? "") || !UPDATE_PLATFORMS.includes(platform)) {
       throw requestError("客户端生成的升级器凭据无效");
     }
     const account = await this.accounts.byId(principalId);
@@ -342,7 +342,7 @@ export class MachineUpdates {
     return this.mutate((data) => {
       const existing = data.devices[nodeId];
       if (existing) {
-        if (existing.ownerId !== principalId || existing.revoked ||
+        if (existing.ownerId !== principalId || existing.revoked || (existing.platform && existing.platform !== platform) ||
             !sameHash(existing.credentialHash, hash(credential))) {
           throw requestError("此机器的升级器身份已被使用", 409);
         }
@@ -351,6 +351,7 @@ export class MachineUpdates {
       if (Object.keys(data.devices).length >= 1024) throw requestError("升级器数量已达上限", 409);
       data.devices[nodeId] = {
         nodeId,
+        platform,
         ownerId: principalId,
         credentialHash: hash(credential),
         createdAt: this.clock(),

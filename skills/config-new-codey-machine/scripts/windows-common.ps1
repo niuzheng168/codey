@@ -94,6 +94,20 @@ function Read-CodeyJson {
     Get-Content -LiteralPath (Assert-CodeyPath $Path) -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
+function ConvertFrom-CodeyTunnelJson {
+    param([string]$Text)
+    # DevTunnel can prepend a welcome banner even when --json was requested.
+    # Never surface ConvertFrom-Json diagnostics containing a connect token.
+    try {
+        $text = $Text.TrimStart([char]0xFEFF)
+        $start = [regex]::Match($text, '(?m)^\s*\{')
+        if (-not $start.Success) { throw 'Missing JSON object' }
+        $value = $text.Substring($start.Index) | ConvertFrom-Json
+        if (-not ($value -is [pscustomobject])) { throw 'Expected an object' }
+        return $value
+    } catch { throw 'DevTunnel did not return a valid JSON object.' }
+}
+
 function Write-CodeyJson {
     param([string]$Path, $Value, [switch]$Backup)
     Write-CodeyFile $Path (($Value | ConvertTo-Json -Depth 30) + "`n") -Backup:$Backup

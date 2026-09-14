@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// One installer and one application artifact for Linux x64 and Windows x64.
+// Runtime-only installer for the shared Linux/Windows/macOS application artifact.
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
@@ -15,7 +15,8 @@ const PUBLIC_REGISTRY = "https://registry.npmjs.org";
 const HELP = `Usage: node install-codey.mjs [--package FILE.tgz] [--sha256 HASH] [--prefix DIR] [--check]
                               [--reuse-from EXISTING_CODEY_DIRECTORY]
 
-Install the SAME Codey npm artifact on Linux x64 or Windows x64 using Node.js 22.13+.
+Install the SAME Codey npm artifact on Linux x64, Windows x64 or macOS arm64/x64
+using Node.js 22.13+.
 A published installer has its adjacent package filename and SHA-256 built in.
 Source use requires both --package and --sha256; public npm names are never accepted.
 --prefix must be a new directory under the current user's home.
@@ -24,9 +25,18 @@ Source use requires both --package and --sha256; public npm names are never acce
 or rebuilding them. This offline path requires the same dependency lock and a
 compatible existing Node/native ABI; it never falls back to the registry.
 
-No services, DevTunnel, credentials or Codex settings are modified. On Linux, run
-codey setup separately for managed deployment; Windows service hosting stays external.
+No services, DevTunnel, credentials or Codex settings are modified, and no Portal
+registration JSON is generated. For a complete node use the installation Skill's
+native entrypoint (install-npm.sh, install.ps1 or install-macos.py).
 `;
+
+export function installerPlatform(platform = process.platform, arch = process.arch) {
+  const target = `${platform === "win32" ? "windows" : platform === "darwin" ? "macos" : platform}-${arch}`;
+  if (!["linux-x64", "windows-x64", "macos-arm64", "macos-x64"].includes(target)) {
+    throw new Error("Native Linux x64, Windows x64 or macOS arm64/x64 is required.");
+  }
+  return target;
+}
 
 export function installOptions(args, directory = path.dirname(fileURLToPath(import.meta.url))) {
   const options = { package: DEFAULT_PACKAGE_FILE ? path.join(directory, DEFAULT_PACKAGE_FILE) : "",
@@ -176,6 +186,7 @@ export async function installLauncher(home, node, root, { execute = command, pla
       Buffer.from(WINDOWS_PATH_SCRIPT, "utf16le").toString("base64")], { ...process.env, CODEY_RUNTIME_BIN: bin });
   } else {
     const profiles = [".profile", ".bashrc"];
+    if (platform === "darwin") profiles.push(".zprofile", ".zshrc");
     for (const name of [".bash_profile", ".bash_login"]) {
       try { await lstat(path.join(home, name)); profiles.push(name); }
       catch (error) { if (error.code !== "ENOENT") throw error; }
@@ -195,7 +206,7 @@ export async function installRuntime(args) {
   const options = installOptions(args);
   if (options.help) return console.log(HELP);
   const platform = process.platform;
-  if (!["linux", "win32"].includes(platform) || process.arch !== "x64") throw new Error("Linux x64 or Windows x64 is required.");
+  const target = installerPlatform();
   if (process.getuid?.() === 0 || os.userInfo().username.toUpperCase() === "SYSTEM") throw new Error("Run as the target OS user, not root or SYSTEM.");
   const [major, minor] = process.versions.node.split(".").map(Number);
   if (major < 22 || major === 22 && minor < 13) throw new Error("Node.js 22.13+ is required.");
@@ -266,16 +277,18 @@ require('node:module').createRequire(process.argv[1])('pacote').extract(process.
     await command(node, [cli, "doctor", "--json"], env);
   }
   const bin = options.check ? null : await installLauncher(home, node, app);
-  console.log(JSON.stringify({ ok: true, name: "codey", version: pkg.version, packageSha256: options.sha256,
-    platform: platform === "win32" ? "windows-x64" : "linux-x64", packageRoot: app, bin,
+  const result = { ok: true, name: "codey", version: pkg.version, packageSha256: options.sha256,
+    platform: target, packageRoot: app, bin, installationKind: "runtime-only", registrationFile: null,
     pathChanged: !options.check, serviceChanges: false, modelRequests: false,
-    dependencyMode: donor ? "reuse-installed-offline" : "npm-install" }));
+    dependencyMode: donor ? "reuse-installed-offline" : "npm-install" };
+  console.log(JSON.stringify(result));
   if (bin) {
     console.log("Open a new terminal to use codey. For the current terminal:");
     console.log(platform === "win32" ? `$env:Path = '${bin.replaceAll("'", "''")};' + $env:Path`
       : 'export PATH="$HOME/.local/bin:$PATH"');
     console.log("Authenticate with codey auth login --provider copilot; use codey start or codey gateway.");
   }
+  return result;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

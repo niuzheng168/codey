@@ -1,4 +1,4 @@
-/** Native Windows installer probes/token renewal. Only runs when invoked as a CLI. */
+/** Native installer probes/token renewal, shared by Windows and macOS. */
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { readFile, writeFile, rename, unlink } from "node:fs/promises";
 import http from "node:http";
@@ -7,10 +7,22 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { nativePlatform, registrationDocument as nativeRegistrationDocument, verifyRegistrationFile, writeRegistration } from "./registration.mjs";
 
 const exec = promisify(execFile);
 const read = async file => JSON.parse(await readFile(file, "utf8"));
 const requireValue = (condition, message) => { if (!condition) throw new Error(message); };
+
+export function parseTunnelJson(text) {
+  try {
+    const source = text.replace(/^\uFEFF/, "");
+    const start = source.search(/^\s*\{/m);
+    requireValue(start >= 0, "");
+    const value = JSON.parse(source.slice(start));
+    requireValue(value && typeof value === "object" && !Array.isArray(value), "");
+    return value;
+  } catch { throw new Error("DevTunnel did not return a valid JSON object"); }
+}
 
 export function validateTunnel(raw, expectedId) {
   const tunnel = raw?.tunnel ?? raw;
@@ -124,27 +136,14 @@ export async function verifyLocal(config) {
 
 export function registrationDocument(setup, identity, coordinates, token, certificate, computer) {
   requireValue(setup.platform === "windows-x64", "Windows registration requires a Windows package");
-  return {
-    schema: 2,
-    package: { portalOrigin: setup.portalOrigin, releaseId: setup.releaseId, platform: "windows-x64" },
-    machine: {
-      schema: 1, nodeId: identity.nodeId, name: computer, region: "Windows · DevTunnel",
-      platform: "windows-x64", tlsCertificate: certificate,
-      networkMode: "devtunnel", devTunnel: coordinates,
-    },
-    credentials: Object.fromEntries([
-      "clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey", "updaterCredential",
-      "workspaceSubject", "workspaceUsername",
-    ].map(key => [key, identity[key]])),
-    devTunnelConnectToken: token,
-  };
+  return nativeRegistrationDocument(setup, identity, coordinates, token, certificate, computer);
 }
 
 async function tokenFor(config, coordinates) {
   const result = await exec(config.devtunnelExe, [
     "token", `${coordinates.tunnelId}.${coordinates.clusterId}`, "--scope", "connect", "--json",
   ], { windowsHide: true, timeout: 60000, maxBuffer: 32768 });
-  return validateConnectToken(JSON.parse(result.stdout), coordinates);
+  return validateConnectToken(parseTunnelJson(result.stdout), coordinates);
 }
 
 async function renew(config, identity, coordinates, token) {
@@ -187,21 +186,35 @@ async function main() {
     return;
   }
   const config = await read(file);
-  requireValue(config.kind === "codey-windows-oneclick" && config.schema === 2 &&
+  const target = nativePlatform();
+  requireValue(config.kind === (target === "windows-x64" ? "codey-windows-oneclick" : "codey-macos-oneclick") &&
+    (target === "windows-x64" || config.platform === target) && config.schema === 2 &&
     config.layout === "npm-codey-package", "Invalid runtime configuration");
   if (command === "gateway") { await verifyGateway(config); return; }
   if (command === "verify") { console.log(JSON.stringify(await verifyLocal(config))); return; }
   if (command === "sdk-probe") { await sdkProbe(config); console.log("CODEY_CLOUDCLI_OK"); return; }
+  if (command === "check-registration") {
+    const setup = await read(config.setupFile);
+    await verifyRegistrationFile(process.argv[5], { ...setup, platform: target });
+    return;
+  }
   const identity = await read(config.identityFile);
   const coordinates = validateTunnel(await read(config.tunnelFile), `codey-${identity.nodeId}`);
   if (command === "tunnel") { console.log(JSON.stringify(coordinates)); return; }
   requireValue(command === "renew" || command === "registration", "Unsupported runtime operation");
+  if (command === "registration") await verifyLocal(config);
   const token = await tokenFor(config, coordinates);
   if (command === "renew") { await renew(config, identity, coordinates, token); return; }
-  const document = registrationDocument(
-    await read(config.setupFile), identity, coordinates, token,
+  const setup = await read(config.setupFile);
+  requireValue(setup.platform === target, "Registration platform does not match this native host");
+  const document = nativeRegistrationDocument(
+    setup, identity, coordinates, token,
     await readFile(config.certificate, "utf8"), config.computer,
   );
+  if (target.startsWith("macos-")) {
+    await writeRegistration(path.join(config.ownerHome, "codey-machine-registration.json"), document);
+    return;
+  }
   // Output is initially inside the ACL-protected config root. PowerShell then
   // atomically exports it with an owner-only ACL; it is never printed.
   const temporary = config.registrationStaging + "." + randomBytes(12).toString("hex") + ".next";
@@ -216,7 +229,7 @@ async function main() {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(() => {
     // Child CLI errors may contain credentials. Keep failures intentionally terse.
-    console.error("Windows runtime verification/renewal failed; check authentication and the private installation state.");
+    console.error("Native runtime verification/registration/renewal failed; check authentication and the private installation state.");
     process.exitCode = 1;
   });
 }

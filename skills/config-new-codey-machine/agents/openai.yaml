@@ -1,4 +1,4 @@
 interface:
-  display_name: "Install shared Codey"
-  short_description: "安装 Linux/Windows 共用的 Codey npm 运行包，或部署 Linux 节点"
-  default_prompt: "使用 $config-new-codey-machine，为目标系统安装同一份 Codey npm 包；Linux 完整节点部署走 install-npm.sh，Windows 运行包安装走 install-runtime.mjs，不运行 Linux 托管部署脚本。"
+  display_name: "Install Codey node"
+  short_description: "三平台安装节点、自动接入升级器并生成 Portal 注册 JSON"
+  default_prompt: "使用 $config-new-codey-machine，按真实系统运行完整入口：Linux install-npm.sh、Windows install.ps1、macOS install-macos.py；自动安装启动本机升级器并验证原用户 Home 下的 codey-machine-registration.json 后才报告完成。上传一次 JSON 同时绑定节点和升级器，不要求用户再手动接入升级器。"

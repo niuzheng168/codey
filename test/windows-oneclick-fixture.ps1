@@ -96,6 +96,7 @@ $script:FixtureListeners = @()
 $script:Calls = [Collections.Generic.List[string]]::new()
 $script:BadAnswer = $false
 $script:BadNpm = $false
+$script:BadUpdater = $false
 $script:UserPath = 'C:\fixture-tools;%USERPROFILE%\fixture-bin'
 $global:CodeyFixtureTasks = @{}
 $global:CodeyFixtureTaskCalls = [Collections.Generic.List[string]]::new()
@@ -156,6 +157,11 @@ function Invoke-CodeyProcess {
         [IO.File]::WriteAllText($Arguments[[array]::IndexOf($Arguments, '-keyout') + 1], 'fake-private-key')
         [IO.File]::WriteAllText($Arguments[[array]::IndexOf($Arguments, '-out') + 1], 'fake-public-cert')
     } elseif ($leaf -eq 'powershell.exe') {
+        if (-not $Environment.ContainsKey('CODEX_INSTALL_DIR')) {
+            $script:Calls.Add('automatic-updater')
+            if ($script:BadUpdater) { throw 'Fixture native updater installation failure' }
+            return $result
+        }
         $script:Calls.Add('official-codex-install')
         [IO.Directory]::CreateDirectory($Environment.CODEX_INSTALL_DIR) | Out-Null
         [IO.File]::WriteAllText((Join-Path $Environment.CODEX_INSTALL_DIR 'codex.exe'), 'fixture-only')
@@ -182,6 +188,10 @@ function Invoke-CodeyProcess {
                 -Destination (Join-Path $modules 'codey') -Recurse
         }
         elseif ($Arguments[0] -eq '-e') { $script:Calls.Add('native-addon-probe') }
+        elseif ($Arguments[0] -like '*updater-bootstrap.mjs') {
+            $script:Calls.Add('updater-bootstrap')
+            Check ((Read-CodeyJson $Arguments[1]).ready) 'native updater runs only after application verification'
+        }
         elseif ($Arguments[0] -like '*windows-runtime.mjs') {
             $operation = $Arguments[1]
             $script:Calls.Add('probe:' + $operation)
@@ -233,7 +243,7 @@ $env:CODEX_HOME = ''
 $planArgs = $invoke.Clone(); $planArgs.DoApply = $false
 $before = Fingerprint $Root
 $plan = (Invoke-CodeyWindowsInstall @planArgs) | ConvertFrom-Json
-Check ($plan.mode -eq 'plan' -and $plan.updater -match 'unsupported_platform') 'read-only Windows plan'
+Check ($plan.mode -eq 'plan' -and $plan.updater -match 'automatic') 'read-only Windows plan'
 Check ((Fingerprint $Root) -eq $before -and $script:Calls.Count -eq 0) 'plan has no writes or external commands'
 $bad = $invoke.Clone(); $bad.ApprovedNetwork = $false
 Reject { Invoke-CodeyWindowsInstall @bad } 'explicit network approval gate'
@@ -274,7 +284,9 @@ Check (Test-Path -LiteralPath (Join-Path $config.runtimeRoot 'bin\codey.ps1')) '
 Check ($script:UserPath.StartsWith('C:\fixture-tools;%USERPROFILE%\fixture-bin;')) 'user PATH retains existing entries and expansion variables'
 Check ($script:Calls.IndexOf('user-path') -gt $script:Calls.IndexOf('probe:sdk-probe')) 'PATH registration follows successful runtime probes'
 Check ($config.schema -eq 2 -and $config.layout -eq 'npm-codey-package') 'runtime records the unified npm layout'
-Check ($config.updater -eq 'unsupported_platform' -and $config.logonOnly) 'updater and logon limitations remain explicit'
+Check ($config.updater -eq 'automatic' -and $config.logonOnly) 'automatic updater and native logon behavior remain explicit'
+Check ($script:Calls.Contains('automatic-updater') -and
+    $script:Calls.IndexOf('automatic-updater') -lt $script:Calls.IndexOf('probe:registration')) 'updater installation precedes registration export'
 Check ($script:Calls.Contains('npm-install')) 'installer invokes npm for the package-local tgz'
 Check ($script:Calls.IndexOf('npm-install') -lt $script:Calls.IndexOf('devtunnel:user show')) 'npm staging precedes service and tunnel changes'
 Check ((Get-Content -LiteralPath (Join-Path $script:FixtureHome '.codex\auth.json')) -eq 'original-auth') 'existing auth preserved'
@@ -294,7 +306,24 @@ $script:Calls.Clear(); $global:CodeyFixtureTaskCalls.Clear()
 $verifyArgs = $invoke.Clone(); $verifyArgs.Replace = $false
 Invoke-CodeyWindowsInstall @verifyArgs | Out-Null
 Check ((Fingerprint $script:FixtureHome) -eq $readyBefore) 'ready-node retry does not rewrite configuration'
-Check ($script:Calls.Count -eq 1 -and $script:Calls[0] -eq 'probe:verify' -and $global:CodeyFixtureTaskCalls.Count -eq 0) 'ready-node retry has no download/restart'
+Check ($script:Calls.Count -eq 5 -and $script:Calls[0] -eq 'probe:verify' -and
+    $script:Calls.Contains('probe:registration') -and $script:Calls.Contains('probe:check-registration') -and
+    $global:CodeyFixtureTaskCalls.Count -eq 0) 'ready-node retry refreshes the export without download/restart'
+
+# The reported Windows bug: a ready/runtime-only install must not suppress the final export.
+$registrationPath = Join-Path $script:FixtureHome 'codey-machine-registration.json'
+Remove-Item -LiteralPath $registrationPath
+$script:Calls.Clear(); $global:CodeyFixtureTaskCalls.Clear()
+Invoke-CodeyWindowsInstall @verifyArgs | Out-Null
+Check (Test-Path -LiteralPath $registrationPath -PathType Leaf) 'ready-node retry recreates a missing registration JSON'
+Check ([IO.File]::ReadAllText($config.identityFile) -ceq $identityBefore -and
+    -not $script:Calls.Contains('npm-install') -and $global:CodeyFixtureTaskCalls.Count -eq 0) 'registration repair preserves identity and services'
+$script:BadUpdater = $true
+Remove-Item -LiteralPath $registrationPath
+Reject { Invoke-CodeyWindowsInstall @verifyArgs } 'automatic updater failure cannot be reported as successful installation'
+Check (-not (Test-Path -LiteralPath $registrationPath)) 'failed updater setup does not export registration'
+$script:BadUpdater = $false
+Invoke-CodeyWindowsInstall @verifyArgs | Out-Null
 
 # Upgrade an existing ready install that predates the persistent command, without rotation or restarts.
 $commandPath = Join-Path $config.runtimeRoot 'bin\codey.ps1'

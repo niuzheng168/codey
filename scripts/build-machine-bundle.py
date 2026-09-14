@@ -8,7 +8,7 @@ import shlex
 import urllib.parse
 import zipfile
 
-from codey_package import ROOT, build_package, metadata, write_runtime_installer
+from codey_package import ROOT, MACHINE_SKILL_FILES, RUNTIME_PLATFORMS, build_package, metadata, write_runtime_installer
 
 
 def assemble_bundle(output, built, portal_origin, public_key):
@@ -18,6 +18,7 @@ def assemble_bundle(output, built, portal_origin, public_key):
     artifacts = [built["artifact"]]
     manifest = {
         "schema": 2, "name": "codey", "platform": "linux-x64", "node": built["node"],
+        "runtimePlatforms": RUNTIME_PLATFORMS,
         "codey": built["codey"], "cloudcli": built["cloudcli"], "copilotApi": built["copilotApi"],
         "sharedWorkspaceUiRequired": True, "bunBuildTool": built["bunBuildTool"],
         "nodeDistribution": built["nodeDistribution"], "dependencyMode": "npm-codey-package",
@@ -27,10 +28,7 @@ def assemble_bundle(output, built, portal_origin, public_key):
     manifest["releaseId"] = "machine-" + built["codey"]["entrySha256"][:16]
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     package_root = work / "package" / "config-new-codey-machine"
-    for relative in [
-        "SKILL.md", "agents/openai.yaml", "dependencies.json",
-        "scripts/install.sh", "templates/a100-models.json",
-    ]:
+    for relative in MACHINE_SKILL_FILES:
         source_file = ROOT / "skills/config-new-codey-machine" / relative
         target = package_root / relative
         target.parent.mkdir(parents=True, exist_ok=True)

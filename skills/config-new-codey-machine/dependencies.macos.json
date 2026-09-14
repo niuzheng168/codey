@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "nodeVersion": "24.20.0",
+  "codex": {
+    "url": "https://chatgpt.com/codex/install.sh",
+    "release": "latest"
+  },
+  "platforms": {
+    "macos-arm64": {
+      "node": {
+        "url": "https://nodejs.org/dist/v24.20.0/node-v24.20.0-darwin-arm64.tar.gz",
+        "sha256": "40e5607e5ecb3db9192723776da2d75d966260fc74a7a9e731c1bd67dda96bc8"
+      },
+      "devTunnel": {
+        "url": "https://tunnelsassetsprod.blob.core.windows.net/cli/osx-arm64-devtunnel",
+        "sha256": "004f3cc8ebcce61223bacac80d31937eb2e92eaee9a05600a1cb62fb5f775afe"
+      }
+    },
+    "macos-x64": {
+      "node": {
+        "url": "https://nodejs.org/dist/v24.20.0/node-v24.20.0-darwin-x64.tar.gz",
+        "sha256": "9e5b2644cf107befb6aefca676b96d3296bc10138096f022ed378d6233ed81f4"
+      },
+      "devTunnel": {
+        "url": "https://tunnelsassetsprod.blob.core.windows.net/cli/osx-x64-devtunnel",
+        "sha256": "a34f906bfbb99444ec45a084bfac80284b9f3919c81741a838b3eab75e3acdf3"
+      }
+    }
+  }
+}

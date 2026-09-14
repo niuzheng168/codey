@@ -131,7 +131,8 @@ ASSETS="${CODEY_SETUP_ASSETS:-$ROOT/assets}"
 MODELS_SOURCE="$ROOT/templates/a100-models.json"
 [[ -f "$ASSETS/manifest.json" && -f "$ASSETS/setup.json" && -f "$ASSETS/SHA256SUMS" ]] ||
   die "Package metadata is incomplete."
-[[ -f "$MODELS_SOURCE" ]] || die "models.json template is missing."
+[[ -f "$MODELS_SOURCE" && -f "$ROOT/scripts/registration.mjs" ]] ||
+  die "models.json template or registration helper is missing."
 (cd "$ASSETS" && sha256sum -c SHA256SUMS)
 
 HOME_DIR="$HOME"
@@ -783,13 +784,22 @@ for unit in codey-copilot-api.service codey-cloudcli.service codey-devtunnel.ser
 done
 
 TOKEN_FILE="$STATE_ROOT/connect-token.json"
+for unit in codey-copilot-api.service codey-cloudcli.service codey-devtunnel.service \
+  codey-devtunnel-renew.timer codey-node-updater.service; do
+  [[ "$(systemctl --user is-enabled "$unit")" == enabled ]] || die "$unit is not enabled."
+  [[ "$(systemctl --user is-active "$unit")" == active ]] || die "$unit is not active."
+done
+[[ "$(loginctl show-user "$(id -un)" -p Linger --value)" == yes ]] || die "User linger is not enabled."
+
 "$DEVTUNNEL" token "$QUALIFIED_TUNNEL" --scope connect --json |
   parse_devtunnel_json "$NODE" >"$TOKEN_FILE"
 OUTPUT="$HOME_DIR/codey-machine-registration.json"
-"$NODE" - "$ASSETS/setup.json" "$IDENTITY" "$CONFIG_ROOT/tunnel.json" \
-  "$TOKEN_FILE" "$CERT" "$OUTPUT" "$(hostname)" <<'NODE'
-const fs = require("node:fs");
-const [setupFile, identityFile, tunnelFile, tokenFile, certFile, output, hostname] = process.argv.slice(2);
+"$NODE" --input-type=module - "$ASSETS/setup.json" "$IDENTITY" "$CONFIG_ROOT/tunnel.json" \
+  "$TOKEN_FILE" "$CERT" "$OUTPUT" "$(hostname)" "$ROOT/scripts/registration.mjs" <<'NODE'
+import fs from "node:fs";
+import { pathToFileURL } from "node:url";
+const [setupFile, identityFile, tunnelFile, tokenFile, certFile, output, hostname, helper] = process.argv.slice(2);
+const { registrationDocument, writeRegistration } = await import(pathToFileURL(helper).href);
 const setup = JSON.parse(fs.readFileSync(setupFile, "utf8"));
 const id = JSON.parse(fs.readFileSync(identityFile, "utf8"));
 const raw = JSON.parse(fs.readFileSync(tunnelFile, "utf8"));
@@ -797,37 +807,14 @@ const tunnel = raw.tunnel || raw;
 let tunnelId = tunnel.tunnelId, clusterId = tunnel.clusterId;
 if (tunnelId.includes(".")) [tunnelId, clusterId] = tunnelId.split(".");
 const issued = JSON.parse(fs.readFileSync(tokenFile, "utf8"));
-const document = {
-  schema: 2,
-  package: {portalOrigin: setup.portalOrigin, releaseId: setup.releaseId, platform: setup.platform},
-  machine: {
-    schema: 1, nodeId: id.nodeId, name: hostname, region: "Linux · DevTunnel",
-    platform: "linux-x64", tlsCertificate: fs.readFileSync(certFile, "utf8"),
-    networkMode: "devtunnel", devTunnel: {tunnelId, clusterId},
-  },
-  credentials: {
-    clientSigningKey: id.clientSigningKey, workspaceSsoKey: id.workspaceSsoKey,
-    tunnelUpdateKey: id.tunnelUpdateKey, updaterCredential: id.updaterCredential,
-    workspaceSubject: id.workspaceSubject, workspaceUsername: id.workspaceUsername,
-  },
-  devTunnelConnectToken: issued.token || issued.accessToken,
-};
-fs.writeFileSync(output + ".next", JSON.stringify(document, null, 2) + "\n", {mode: 0o600});
-fs.renameSync(output + ".next", output);
+await writeRegistration(output, registrationDocument(setup, id, {tunnelId, clusterId},
+  issued.token || issued.accessToken, fs.readFileSync(certFile, "utf8"), hostname));
 NODE
-chmod 600 "$OUTPUT"
 
 rm -f "$TOKEN_FILE"
 if [[ -z "$INSTALLED_PACKAGE" ]]; then
   find "$RUNTIME_ROOT/releases" -mindepth 1 -maxdepth 1 -type d ! -name "$RELEASE_ID" -exec rm -rf -- {} +
 fi
-
-for unit in codey-copilot-api.service codey-cloudcli.service codey-devtunnel.service \
-  codey-devtunnel-renew.timer codey-node-updater.service; do
-  [[ "$(systemctl --user is-enabled "$unit")" == enabled ]] || die "$unit is not enabled."
-  [[ "$(systemctl --user is-active "$unit")" == active ]] || die "$unit is not active."
-done
-[[ "$(loginctl show-user "$(id -un)" -p Linger --value)" == yes ]] || die "User linger is not enabled."
 
 echo
 echo "Codey Linux installation completed."

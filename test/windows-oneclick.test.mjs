@@ -8,6 +8,7 @@ import {
   validateTunnel, validateConnectToken, clientTicket, workspaceAssertion, registrationDocument,
 } from "../skills/config-new-codey-machine/scripts/windows-runtime.mjs";
 import { verifyClientTicket } from "../src/client-ticket.mjs";
+import { registrationFixture } from "./helpers/registration-fixture.mjs";
 
 const run = promisify(execFile);
 const coordinates = { tunnelId: "codey-n-" + "a".repeat(24), clusterId: "jpe1" };
@@ -74,16 +75,16 @@ test("Windows local data/SSO probes use the existing gateway authentication prot
   assert.match(claims.nonce, /^[A-Za-z0-9_-]{22}$/);
 });
 
-test("Windows registration is explicitly private schema 2 and never contains the TLS private key", () => {
-  const setup = { platform: "windows-x64", portalOrigin: "https://codey.example.test", releaseId: "machine-" + "a".repeat(16) };
-  const result = registrationDocument(setup, identity, coordinates, token(), "PUBLIC CERT", "fixture-pc");
+test("Windows registration is explicitly private schema 2 and never contains the TLS private key", async t => {
+  const f = await registrationFixture(t, "windows-x64");
+  const result = registrationDocument(f.setup, f.identity, f.coordinates, f.token, f.certificate, "fixture-pc");
   assert.equal(result.schema, 2);
   assert.equal(result.machine.platform, "windows-x64");
-  assert.equal(result.machine.tlsCertificate, "PUBLIC CERT");
-  assert.equal(result.credentials.clientSigningKey, identity.clientSigningKey);
-  assert.equal(result.devTunnelConnectToken, token());
+  assert.equal(result.machine.tlsCertificate, f.certificate);
+  assert.equal(result.credentials.clientSigningKey, f.identity.clientSigningKey);
+  assert.equal(result.devTunnelConnectToken, f.token);
   assert.ok(!("tlsPrivateKey" in result));
-  assert.throws(() => registrationDocument({ ...setup, platform: "linux-x64" }, identity, coordinates, token(), "", ""));
+  assert.throws(() => registrationDocument({ ...f.setup, platform: "linux-x64" }, f.identity, f.coordinates, f.token, f.certificate, ""));
 });
 
 test("Windows implementation never invokes WSL, systemd or firewall commands", async () => {

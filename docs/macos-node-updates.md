@@ -2,15 +2,19 @@
 
 ## 当前实现和上线边界
 
+新版完整安装 Skill 自动安装、启动原生代理，机器注册 JSON 导入时同步完成绑定，
+不需要用户再次接入。下文独立接入入口保留给已有节点和维护场景。
+
 已实现 Apple Silicon (`macos-arm64`) / Intel (`macos-x64`) 的独立升级代理、
-真实安装版本上报、分平台签名发行版和 owner 确认队列。支持已有
+真实安装版本上报、共享整包签名发行版和 owner 确认队列。支持已有
 `schema: 2`、`kind: codey-macos-oneclick`、`layout: npm-codey-package`
 的原用户 LaunchAgent 安装，不以“Workspace 在线”推断 Codey 版本。
 
 **代码实现不等于已上线。** 必须部署新版 Portal，在 Mac 首次接入代理，
-再发布对应平台的签名发行版。已发布的 **0.1.4 包只声明 Linux/Windows**，
+再发布共享签名发行版。已有代理需要刷新到支持共享格式的实现，不需要重装 Codey
+或重新注册节点。已发布的 **0.1.4 包只声明 Linux/Windows**，
 不能重标记或重打同版本当作 Mac 包。**0.1.5** 的共享包已包含 Mac 平台声明，
-依赖版本和已发布 0.1.4 的字节不变。Mac 可先按下文显式发布测试发行版，
+依赖版本和已发布 0.1.4 的字节不变。Mac 与 Windows/Linux 使用同一个发行版，
 再从 Portal 进行首次实机验收；“可选择发行版”不等于“已经实机验收通过”。
 
 接入代理可以直接读取原来的 Mac npm 安装，包括旧三平台包中的 Apple Silicon
@@ -44,11 +48,12 @@ Python、工具和服务绑定必须由首次只读检查确认，不能据 Port
 
 ## 日常更新与保护
 
-- 用户在 Portal 选本平台发行版、预览并确认后才领取任务；预览不触发升级。
+- 用户在 Portal 选择共享 Codey 版本、预览并确认后才领取任务；预览不触发升级。
 - 代理独立于 Codey，在原用户登录期间向 Portal 发起出站 HTTPS 请求。
   不开新入站管理端口；睡眠、离线或注销期间不能更新。
-- 签名、有效期、平台、Node major、版本指纹和防降级序号在 Portal 与 Mac 双端校验。
-  Linux、Windows、Apple Silicon、Intel 不会互相领取发行版。
+- 签名、有效期、包的运行环境声明、Node major、版本指纹和防降级序号仍双端校验。
+  Linux、Windows、Apple Silicon、Intel 使用同一共享签名，但不能伪装另一节点的
+  身份或领取别人的任务；历史单平台签名仍保持原来的适用范围。
 - 原 Node/npm 的 `pacote` 暂存应用；相同依赖直接引用保留的依赖树，不整树复制或重装，
   不同依赖使用锁定的 `npm ci`。候选目录和原生模块
   `codey doctor` 验证通过后，才有可能停应用；不对同名公共 npm 项目做更新。
@@ -72,49 +77,30 @@ DevTunnel、Node、Python 不在本次自动更新范围；Linux/Windows 本地�
 
 ## 运维发布门槛
 
-同一 0.1.5 `.tgz` 可供四个平台使用，但每个平台有独立签名清单/ID，整个 catalog
-的序号严格递增。先部署新版 Portal，再发布 Mac feed，以免旧 Portal 因不认识
-Mac 清单拒绝整个目录。仍不发布新的 Mac 新机安装器。
-
-在原生目标 Mac，用暂存候选包的原 Node 执行 `codey doctor --json`（不可只做
-`--package-only`），保存真实输出为构建目录的 `doctor-macos-arm64.json`
-或 `doctor-macos-x64.json`。发布器要求其平台、版本、包入口/锁文件指纹、
-源 commit、实际 Node major 和五项原生检查与该包完全匹配；没有 Mac 原生
-验证报告则默认拒绝签名发布。常规发布一次只声明这个报告实测的 Node major。
+整包现在使用**一个共享签名清单、ID、序号和 `.tgz`**，不再有单独的 Mac feed。
+先部署新版 Portal 和独立升级器；代理心跳中的 `sharedCodeyReleases: true`
+证明它能读取新格式，旧代理不能被派发无法验证的共享任务。原用户、架构和
+LaunchAgent 的安装检查仍保留，不通过删除平台/身份校验来实现跨平台。
 
 ```sh
 node scripts/publish-node-update.mjs publish \
   --manifest /absolute/build/codey-package.json \
   --output /absolute/feed --private-key /absolute/private.pem \
-  --platform macos-arm64 --sequence NEW_GLOBAL_SEQUENCE --codey-node-majors 24
+  --sequence NEW_GLOBAL_SEQUENCE --codey-node-majors 24
 ```
 
-### 首次实机测试：先发布 canary，再从 Portal 验收
+不要传 `--platform` 或 `--macos-validation`。发布器从实际包读取并校验
+`runtimePlatforms`，不能通过修改外部 manifest 给旧两平台包补出 Mac 支持。
+构建验收的 `artifactSha256` 必须与发布的包一致。已有的
+`doctor-macos-arm64.json` / `doctor-macos-x64.json` 等原生报告若存在，仍须与
+该包、Node major 和全部原生检查匹配；不会忽略已知失败，也不伪造未执行的验收。
 
-用户明确要求先开放 Mac 测试时，可对**同一份已构建、已通过基础验证的包**使用：
-
-```sh
-node scripts/publish-node-update.mjs publish \
-  --manifest /absolute/build/codey-package.json \
-  --output /absolute/feed --private-key /absolute/private.pem \
-  --platform macos-arm64 --sequence NEW_GLOBAL_SEQUENCE --codey-node-majors 22,24 \
-  --macos-validation canary --notes "Owner approved first native macOS testing; acceptance pending"
-```
-
-Intel 使用 `--platform macos-x64` 和下一个全局序号。Node majors 是此次允许测试的
-原有运行时，不是已完成的 Mac 验证矩阵；不升级 Node。没有显式 canary 参数和说明，
-仍要求原生报告。canary 只允许**缺少**报告，不忽略格式损坏、失败或指纹不匹配的报告，
-也不放宽基础构建验证、实际包的平台/指纹、签名、公钥、有效期或防降级检查。
-
-签名说明会强制标注 `[macOS CANARY: native acceptance pending]`，不写假 doctor。
-发布本身不创建升级任务；先由 owner 在 Portal 选择一台 Mac 确认测试。
-代理仍须在**停止 Codey 之前**完成暂存包、锁定依赖和原生 doctor 检查，保留空闲检查、
-已鉴权健康验收和代码回滚，不自动测试模型。已发布包和签名 ID 不可覆盖；后续正式授权需要新的发行 ID/
-全局序号以及真实原生报告，不把 canary 记录改写成已验收。
-
-不能手写假 doctor 成功报告绕过门槛。原生模块通过也不代替 canary 上真实的
-launchd 切换、已鉴权健康、回滚以及睡眠/注销后恢复验收；先一台 Mac，再扩大范围。
-原包、私有运行日志和事务记录保留。具体手工恢复命令见接入包的 `UPGRADE.md`。
+共享发布只解决重复分平台开放的问题，不代表每台 Mac 已完成实机测试。
+发布本身不创建升级任务；首次先由 owner 选择一台 Mac 确认，成功后再扩大范围。
+代理在**停止 Codey 之前**仍完成暂存包、锁定依赖、原生 `doctor` 和空闲检查，
+保留 launchd 切换、鉴权健康、回滚和恢复验收，不自动测试模型。已有包和签名
+不可覆盖；对已有包补共享授权使用新的共享 ID 和更高序号，不重打应用包。
+原包、私有运行日志和事务记录保留。恢复命令见接入包的 `UPGRADE.md`。
 
 ## 回归检查
 

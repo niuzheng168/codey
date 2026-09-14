@@ -15,7 +15,7 @@ import tempfile
 import uuid
 import zipfile
 from urllib.parse import urlsplit
-from codey_package import inspect_npm_package
+from codey_package import MACHINE_SKILL_FILES, RUNTIME_PLATFORMS, inspect_npm_package
 
 MARKER = b'{"schema":1,"kind":"codey-machine-skill-store"}\n'
 RELEASE = re.compile(r"machine-[a-f0-9]{16}")
@@ -72,10 +72,8 @@ def inspect_package(file):
                     or record.file_size > MAX_PACKAGE or record.compress_size != record.file_size):
                 raise PublishError("UNSAFE_PACKAGE_ENTRY")
         root = "config-new-codey-machine/"
-        base = {
-            root + "SKILL.md", root + "dependencies.json", root + "agents/openai.yaml",
-            root + "scripts/install.sh", root + "scripts/install-npm.sh",
-            root + "scripts/install-runtime.mjs", root + "templates/a100-models.json",
+        base = {root + name for name in MACHINE_SKILL_FILES} | {
+            root + "scripts/install-npm.sh", root + "scripts/install-runtime.mjs",
             root + "assets/manifest.json",
             root + "assets/setup.json", root + "assets/SHA256SUMS",
         }
@@ -102,6 +100,7 @@ def inspect_package(file):
             raise PublishError("INVALID_PUBLIC_SETUP_METADATA")
         if (manifest.get("schema") != 2 or manifest.get("name") != "codey"
                 or manifest.get("platform") != "linux-x64"
+                or manifest.get("runtimePlatforms") != RUNTIME_PLATFORMS
                 or manifest.get("dependencyMode") != "npm-codey-package"
                 or not RELEASE.fullmatch(manifest.get("releaseId", ""))
                 or setup.get("schema") != 1 or setup.get("platform") != "linux-x64"
@@ -137,13 +136,14 @@ def inspect_package(file):
                 try:
                     bundled_setup = json.load(npm.extractfile("package/onboarding/setup.json"))
                     for required in ["package/lib/setup.mjs", "package/onboarding/scripts/install.sh",
+                                     "package/onboarding/scripts/registration.mjs",
                                      "package/onboarding/templates/a100-models.json"]:
                         if not npm.getmember(required).isfile():
                             raise KeyError(required)
                 except (KeyError, TypeError, ValueError, AttributeError) as error:
                     raise PublishError("MISSING_NPM_SETUP") from error
-            # The one npm application is shared; the outer Skill remains a
-            # platform-specific managed deployment workflow.
+            # The outer Linux fields preserve the legacy download API. Native
+            # installers resolve the shared artifact and public config locally.
             comparable_setup = {**bundled_setup}
             if comparable_setup.get("platform") == "auto":
                 comparable_setup["platform"] = setup["platform"]
@@ -178,6 +178,8 @@ def inspect_package(file):
         "releaseId": "machine-" + package_sha[:16],
         "installerReleaseId": manifest["releaseId"],
         "platform": "linux-x64",
+        "runtimePlatforms": RUNTIME_PLATFORMS,
+        "managedInstallPlatforms": RUNTIME_PLATFORMS,
         "registrationSchema": 2,
         "node": manifest["node"],
         "cloudcli": manifest["cloudcli"],

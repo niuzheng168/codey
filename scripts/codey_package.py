@@ -16,6 +16,13 @@ import zlib
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "packages/codey"
 RUNTIME_PLATFORMS = ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]
+MACHINE_SKILL_FILES = [
+    "SKILL.md", "agents/openai.yaml", "dependencies.json", "dependencies.windows.json", "dependencies.macos.json",
+    "scripts/install.sh", "scripts/install.ps1", "scripts/install-macos.py", "scripts/macos-service.py",
+    "scripts/registration.mjs", "scripts/updater-bootstrap.mjs", "scripts/windows-common.ps1", "scripts/windows-process.cs",
+    "scripts/windows-service.ps1", "scripts/windows-runtime.mjs", "scripts/windows-command.ps1",
+    "templates/a100-models.json",
+]
 MAX_PACKAGE_BYTES = 8 * 1024 * 1024
 TEXT_SUFFIXES = {".js", ".mjs", ".cjs", ".json", ".map", ".md", ".html", ".css", ".svg", ".txt", ".sh", ".ps1"}
 
@@ -215,6 +222,9 @@ def inspect_npm_package(file):
         "package/lib/codex-sdk/index.js",
         "package/dist/index.html", "package/gateway/main.js", "package/pages/index.html",
         "package/updater/install.py", "package/updater/engine.py", "package/updater/updater.py",
+        *("package/updater/native/" + target + "/" + file
+          for target in ("windows-x64", "macos-arm64", "macos-x64")
+          for file in ("agent-files.json", "install.ps1" if target == "windows-x64" else "install.py")),
     }
     options = {"fileobj": file} if hasattr(file, "read") else {"name": file}
     with tarfile.open(mode="r:gz", **options) as archive:
@@ -260,6 +270,19 @@ def inspect_npm_package(file):
                 or build.get("lockSha256") != hashlib.sha256(lock_raw).hexdigest()):
             raise RuntimeError("Invalid Codey npm metadata")
         validate_runtime_lock(package, lock)
+        for target in RUNTIME_PLATFORMS[1:]:
+            prefix = "updater/native/" + target + "/"
+            agent = json.loads(body(prefix + "agent-files.json", 65536))
+            if (agent.get("schema") != 1 or agent.get("platform") != target
+                    or not isinstance(agent.get("files"), dict) or not 5 < len(agent["files"]) <= 100
+                    or "package/" + prefix + "config.json" in files):
+                raise RuntimeError("Native updater must be complete and credential-free")
+            for name, checksum in agent["files"].items():
+                if (not re.fullmatch(r"[\w.-]+(?:/[\w.-]+)*", name) or
+                        any(part in {".", "..", "config.json", "agent-files.json"} for part in name.split("/")) or
+                        not re.fullmatch(r"[a-f0-9]{64}", checksum) or
+                        hashlib.sha256(body(prefix + name, 1024 * 1024)).hexdigest() != checksum):
+                    raise RuntimeError("Native updater source checksum mismatch")
         if build.get("runtimePlatforms") != RUNTIME_PLATFORMS or "platform" in build:
             raise RuntimeError("Codey must declare one shared Linux/Windows/macOS runtime, not a build-host platform")
         for group in ("dependencies", "optionalDependencies"):
@@ -325,8 +348,9 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     copy_required(ROOT / "node-updater", runtime / "updater", [
         "install.py", "updater.py", "engine.py", "probe.mjs", "UPGRADE.md",
     ])
+    run([node / "bin/node", ROOT / "scripts/build-native-updaters.mjs", runtime / "updater/native"], env=env)
     copy_required(ROOT / "skills/config-new-codey-machine", runtime / "onboarding", [
-        "scripts/install.sh", "templates/a100-models.json", "dependencies.json",
+        "scripts/install.sh", "scripts/registration.mjs", "templates/a100-models.json", "dependencies.json",
     ])
     if setup_config is not None:
         (runtime / "onboarding/setup.json").write_text(json.dumps(setup_config, indent=2) + "\n")
@@ -344,7 +368,7 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     source_dirty = bool(run([
         "git", "-C", ROOT, "status", "--porcelain", "--",
         "packages/codey", "scripts/codey_package.py", "scripts/build-machine-bundle.py",
-        "scripts/install-codey-runtime.mjs", "node-updater", "skills/config-new-codey-machine",
+        "scripts/install-codey-runtime.mjs", "scripts/build-native-updaters.mjs", "node-updater", "skills/config-new-codey-machine",
     ], capture=True).stdout.strip())
     provenance = {
         "schema": 1, "name": "codey", "version": package["version"], "sourceCommit": source_commit,

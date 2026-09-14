@@ -96,6 +96,18 @@ export async function loadMachineBundle(root, platformId = "linux-x64") {
     throw new Error("Invalid machine bundle manifest");
   }
   if (manifest.releaseId !== machineReleaseId(manifest)) throw new Error("Release digest mismatch");
+  if (manifest.runtimePlatforms !== undefined &&
+      ![["linux-x64", "windows-x64"], ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]]
+        .some(platforms => JSON.stringify(platforms) === JSON.stringify(manifest.runtimePlatforms))) {
+    throw new Error("Invalid shared machine runtime platforms");
+  }
+  if (manifest.managedInstallPlatforms !== undefined &&
+      (JSON.stringify(manifest.managedInstallPlatforms) !==
+        JSON.stringify(["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]) ||
+       JSON.stringify(manifest.managedInstallPlatforms) !== JSON.stringify(manifest.runtimePlatforms) ||
+       !manifest.runtimeInstaller || manifest.npmSetup !== 1)) {
+    throw new Error("Invalid native installation platforms");
+  }
   const packageFile = path.join(release, packageInfo.file);
   const info = await lstat(packageFile);
   if (!info.isFile() || info.isSymbolicLink() || await realpath(packageFile) !== packageFile ||
@@ -191,7 +203,9 @@ export class MachineSetup {
         bytes: npmPackage?.size ?? packageInfo.size,
         npmAvailable: Boolean(npmPackage && installer),
         sharedSkillAvailable: Boolean(runtimeInstaller),
-        ...(runtimeInstaller ? { sharedSkillBytes: packageInfo.size, runtimePlatforms: ["linux-x64", "windows-x64"] } : {}),
+        ...(runtimeInstaller ? { sharedSkillBytes: packageInfo.size,
+          runtimePlatforms: manifest.runtimePlatforms ?? ["linux-x64", "windows-x64"],
+          managedInstallPlatforms: manifest.managedInstallPlatforms ?? ["linux-x64"] } : {}),
         ...(npmPackage ? { npmFile: npmPackage.file, entrypoint: "codey setup" } : {}),
         node: manifest.node, cloudcli: manifest.cloudcli.version, copilotApi: manifest.copilotApi.version,
         ...(manifest.codey ? { codey: manifest.codey.version } : {}),
@@ -220,7 +234,7 @@ export class MachineSetup {
     if (!this.cloudCliGateway || !this.nodeDataGateway) {
       return { enabled: false, reason: "运维尚未启用机器注册所需的 Workspace 和数据网关" };
     }
-    if (definition.updater && !this.machineUpdates?.catalog?.configured) {
+    if ((definition.updater || definition.portalUpdater) && !this.machineUpdates?.catalog?.configured) {
       return { enabled: false, reason: "请先配置节点升级器签名公钥，确保新机器可持续更新" };
     }
     return { enabled: true };
@@ -296,11 +310,12 @@ export class MachineSetup {
         registration.credentials,
         registration.connectToken,
       );
-      if (definition.updater && !staged.activated) {
+      if ((definition.updater || definition.portalUpdater) && !staged.activated) {
         await this.machineUpdates.registerClientMachine(
           req.codeyPrincipal.id,
           registration.machine.id,
           registration.credentials.updaterCredential,
+          platformId,
         );
       }
       const node = staged.activated
