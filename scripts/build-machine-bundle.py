@@ -2,6 +2,7 @@
 """Build a one-click Skill containing exactly one installable Codey npm package."""
 import argparse
 import json
+import os
 from pathlib import Path
 import shutil
 import shlex
@@ -11,7 +12,8 @@ import zipfile
 from codey_package import ROOT, MACHINE_SKILL_FILES, RUNTIME_PLATFORMS, build_package, metadata, write_runtime_installer
 
 
-def assemble_bundle(output, built, portal_origin, public_key):
+def assemble_bundle(output, built, portal_origin, public_key, source_root=None):
+    source_root = Path(source_root or ROOT)
     output = Path(output).resolve()
     work = output / ".build-machine"
     work.mkdir()
@@ -20,6 +22,7 @@ def assemble_bundle(output, built, portal_origin, public_key):
         "schema": 2, "name": "codey", "platform": "linux-x64", "node": built["node"],
         "runtimePlatforms": RUNTIME_PLATFORMS,
         "codey": built["codey"], "cloudcli": built["cloudcli"], "copilotApi": built["copilotApi"],
+        "releaseSource": built.get("releaseSource"),
         "sharedWorkspaceUiRequired": True, "bunBuildTool": built["bunBuildTool"],
         "nodeDistribution": built["nodeDistribution"], "dependencyMode": "npm-codey-package",
         "artifacts": artifacts, "bundledRuntimes": ["cloudcli", "copilot-api", "updater"],
@@ -29,18 +32,18 @@ def assemble_bundle(output, built, portal_origin, public_key):
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     package_root = work / "package" / "config-new-codey-machine"
     for relative in MACHINE_SKILL_FILES:
-        source_file = ROOT / "skills/config-new-codey-machine" / relative
+        source_file = source_root / "skills/config-new-codey-machine" / relative
         target = package_root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_file, target)
-    installer = (ROOT / "scripts/linux/install-codey.sh").read_text()
+    installer = (source_root / "scripts/linux/install-codey.sh").read_text()
     if installer.count('DEFAULT_PACKAGE_FILE=""') != 1:
         raise RuntimeError("Invalid npm installer template")
     installer = installer.replace('DEFAULT_PACKAGE_FILE=""',
                                   "DEFAULT_PACKAGE_FILE=" + shlex.quote(artifacts[0]["file"]))
     (output / "install-codey-linux.sh").write_text(installer)
     (package_root / "scripts/install-npm.sh").write_text(installer)
-    runtime_installer = write_runtime_installer(output, artifacts[0])
+    runtime_installer = write_runtime_installer(output, artifacts[0], source_root)
     shutil.copy2(output / runtime_installer["file"], package_root / "scripts/install-runtime.mjs")
     assets = package_root / "assets"
     assets.mkdir()
@@ -93,8 +96,13 @@ def build(args):
         "updater": {"protocol": 1, "releasePublicKey": public_key},
     }
     built = build_package(args.output, allow_reviewed_diff=args.allow_reviewed_diff,
-                          node_dir=args.node_dir, keep_work=args.keep_work, setup_config=setup)
-    return assemble_bundle(args.output, built, args.portal_origin, public_key)
+                          node_dir=args.node_dir, keep_work=True, setup_config=setup,
+                          source_commit=getattr(args, "source_commit", None))
+    source_root = Path(args.output).resolve() / ".build-codey/source/portal" if built.get("releaseSource") else ROOT
+    result = assemble_bundle(args.output, built, args.portal_origin, public_key, source_root)
+    if not args.keep_work:
+        shutil.rmtree(Path(args.output).resolve() / ".build-codey")
+    return result
 
 
 if __name__ == "__main__":
@@ -103,7 +111,9 @@ if __name__ == "__main__":
     parser.add_argument("--platform", choices=["linux-x64"], default="linux-x64")
     parser.add_argument("--portal-origin", required=True)
     parser.add_argument("--updater-public-key-file", required=True)
-    parser.add_argument("--allow-reviewed-diff", action="store_true")
+    parser.add_argument("--allow-reviewed-diff", action="store_true", help="Development-only build; cannot be published")
+    parser.add_argument("--source-commit", help="Expected origin/main SHA; components use its recorded gitlinks")
     parser.add_argument("--node-dir", help="Use an existing Node distribution for the build")
     parser.add_argument("--keep-work", action="store_true")
+    os.umask(0o077)
     print(json.dumps(build(parser.parse_args()), indent=2))

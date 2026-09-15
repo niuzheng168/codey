@@ -15,7 +15,7 @@ import tempfile
 import uuid
 import zipfile
 from urllib.parse import urlsplit
-from codey_package import MACHINE_SKILL_FILES, RUNTIME_PLATFORMS, inspect_npm_package
+from codey_package import MACHINE_SKILL_FILES, RUNTIME_PLATFORMS, inspect_npm_package, release_source
 
 MARKER = b'{"schema":1,"kind":"codey-machine-skill-store"}\n'
 RELEASE = re.compile(r"machine-[a-f0-9]{16}")
@@ -133,6 +133,9 @@ def inspect_package(file):
             if npm_info != manifest["codey"]:
                 raise PublishError("CODEY_NPM_METADATA_MISMATCH")
             with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as npm:
+                build = json.load(npm.extractfile("package/codey-build.json"))
+                if manifest.get("releaseSource") is not None:
+                    release_source.verify_package_source(build, manifest["releaseSource"])
                 try:
                     bundled_setup = json.load(npm.extractfile("package/onboarding/setup.json"))
                     for required in ["package/lib/setup.mjs", "package/onboarding/scripts/install.sh",
@@ -191,6 +194,7 @@ def inspect_package(file):
         "runtimeInstaller": {"file": "install-codey.mjs", "size": len(runtime_installer),
                              "sha256": hashlib.sha256(runtime_installer).hexdigest()},
         "codey": manifest["codey"],
+        "releaseSource": manifest.get("releaseSource"),
         "bundledRuntimes": ["cloudcli", "copilot-api", "updater"],
         "downloadedOfficialRuntimes": ["node", "codex", "devtunnel"],
         "package": {"file": PACKAGE_NAME, "size": size, "sha256": package_sha},
@@ -326,6 +330,7 @@ def active(raw):
 
 
 def publish(store, package_file, manifest, manifest_raw, expected_current):
+    release_source.validate_source(manifest.get("releaseSource"))
     expected = None if expected_current == "none" else expected_current
     if expected is not None and not RELEASE.fullmatch(expected):
         raise PublishError("INVALID_EXPECTED_CURRENT")
@@ -427,6 +432,7 @@ def main():
             "package": manifest["package"], "azureRequests": 0,
         }, indent=2))
         return
+    release_source.validate_source(manifest.get("releaseSource"))
     report = publish(
         AzureStore(load_config(args.config)), package_file, manifest, manifest_raw,
         args.expected_current,

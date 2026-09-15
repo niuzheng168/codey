@@ -12,6 +12,7 @@ import time
 
 from common import archive_tree, canonical, command, read, release_name, require, safe_extract, save, sha
 from gateway_routes import freeze as freeze_gateway_routes, verify_frozen as verify_gateway_routes
+from release_source import commits as source_commits, export_sources, select_main, verify_export, verify_source_files
 
 
 REMOVED_MCP_ENV = frozenset({"PORTAL_MCP_PROXY_URL", "SESSION_SHARE_PORTAL_CONFIG"})
@@ -42,6 +43,7 @@ def portal_deployment_template(before, portal_image):
 
 class Builder:
     def __init__(self, request):
+        require(not request.get("portalSnapshot"), "Uncommitted snapshots are forbidden in production")
         self.request = request
         self.root = Path(request["root"]).resolve()
         self.job = Path(__file__).resolve().parent.parent
@@ -67,49 +69,34 @@ class Builder:
         return self.az(["containerapp", "show", "-g", self.config["resourceGroup"], "-n", "codey"])
 
     def publisher(self):
-        file = self.root / "scripts/publish-cloudcli-ui.py"
+        file = self.source / "portal/scripts/publish-cloudcli-ui.py"
         spec = importlib.util.spec_from_file_location("codey_ui_publisher", file)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
 
+    def production_source(self):
+        require(not self.request.get("portalSnapshot"), "Uncommitted snapshots are forbidden in production")
+        source = verify_export(self.source, read(self.job / "release-source.json"))
+        require(source_commits(source) == read(self.job / "source.json"), "Frozen source commits changed")
+        expected = self.request.get("expectedCommits", {})
+        require(all(source_commits(source).get(name) == commit for name, commit in expected.items()),
+                "Frozen source does not match the selected main release")
+        return source
+
     def prepare(self):
         require(not self.source.exists(), "This run already has frozen source")
+        require(not self.request.get("portalSnapshot"), "Uncommitted snapshots are forbidden in production")
+        source = select_main(self.root, self.release, self.request.get("expectedCommits", {}).get("portal"))
+        refs = source_commits(source)
+        require(all(refs.get(name) == commit for name, commit in self.request.get("expectedCommits", {}).items()),
+                "Expected component commits must match main's recorded gitlinks")
         self.lease.mkdir(mode=0o700)
         save(self.lease / "owner.json", {"release": self.release})
-        refs = {}
-
-        def snapshot(name, checkout, branch):
-            # Fetch explicit remote refs without checkout/reset/stash or touching dirty user files.
-            ref = f"refs/codey-deploy/{self.release}/{name}"
-            command(["git", "fetch", "--no-tags", "origin", f"refs/heads/{branch}:{ref}"],
-                    cwd=checkout, timeout=45, log=self.job / f"fetch-{name}.log")
-            commit, _ = command(["git", "rev-parse", ref], cwd=checkout)
-            expected = self.request.get("expectedCommits", {}).get(name)
-            require(not expected or commit == expected, "Remote source does not match the explicitly selected " + name + " commit")
-            archive = self.job / f"source-{name}.tar.gz"
-            reviewed = self.request.get("portalSnapshot") if name == "portal" else None
-            if reviewed:
-                require(commit == reviewed["baseCommit"], "Remote main advanced beyond the reviewed snapshot")
-                archive = self.job / "portal-reviewed.tar.gz"
-                require(sha(archive) == reviewed["archiveSha256"], "Reviewed source transfer checksum mismatch")
-                save(self.job / "reviewed-source.json", reviewed)
-            else:
-                command(["git", "archive", "--format=tar.gz", "--output", archive, commit], cwd=checkout)
-            safe_extract(archive, self.source / name, allow_source_symlinks=True)
-            return name, commit
-
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            jobs = [
-                pool.submit(snapshot, "portal", self.root, "main"),
-                pool.submit(snapshot, "cloudcli", self.root / "cloudcli", "main"),
-                pool.submit(snapshot, "copilot-api", self.root / "copilot-api", "dev"),
-                pool.submit(self.app),
-            ]
-            for future in jobs[:3]:
-                name, commit = future.result()
-                refs[name] = commit
-            before = jobs[3].result()
+        export_sources(self.root, source, self.source)
+        save(self.job / "source.json", refs)
+        save(self.job / "release-source.json", source)
+        before = self.app()
         properties = before["properties"]
         require(properties["provisioningState"] == "Succeeded"
                 and properties["latestRevisionName"] == properties["latestReadyRevisionName"],
@@ -136,7 +123,7 @@ class Builder:
                 "fqdn": properties["configuration"]["ingress"]["fqdn"], "previousUi": active["release"],
                 "nodes": {row["id"]: {"tlsServerName": row["tlsServerName"]}
                           for row in read(self.root / "config/cloudcli-nodes.aca.json")["nodes"]},
-                "reviewedSnapshot": self.request.get("portalSnapshot"),
+                "releaseSource": source,
                 "gatewayRoutes": gateway_routes,
                 "worktreesModified": False, "legacyMcpPresent": legacy_mcp}
 
@@ -200,6 +187,7 @@ class Builder:
         }
 
     def build_cloudcli(self, commits, env):
+        self.production_source()
         source = self.source / "cloudcli"
         mode = self.dependency_cache("cloudcli", env)
         command(["git", "init", "--quiet"], cwd=source)
@@ -228,6 +216,8 @@ class Builder:
                 "entrySha256": sha(source / "dist-server/server/index.js")}
 
     def build_workspace(self):
+        provenance = self.production_source()
+        verify_source_files(self.root, provenance, self.source)
         require(self.request.get("components") == ["cloudcli"], "Workspace scope may only publish CloudCLI")
         # Retain honest, previously validated gateway metadata for the existing
         # manifest contract. Its archive is neither rebuilt nor signed/published.
@@ -244,6 +234,7 @@ class Builder:
             cloudcli = self.build_cloudcli(commits, self.test_environment(temporary))
         manifest = {
             "release": self.release, "scope": "workspace", "components": ["cloudcli"],
+            "releaseSource": provenance,
             "commits": commits, "cloudcli": cloudcli, "gateway": gateway,
             "gatewayPreservedFrom": preserved["releaseId"], "images": {},
             "ui": read(self.job / "ui/latest-build.json"),
@@ -267,7 +258,9 @@ class Builder:
         return result
 
     def resume_workspace(self):
+        source = self.production_source()
         manifest = read(self.job / "manifest.json")
+        require(manifest.get("releaseSource") == source, "Recovery requires a committed main source manifest")
         require(manifest.get("scope") == "workspace" and manifest.get("components") == ["cloudcli"]
                 and read(self.job / "validation.json")["passed"], "Not a validated CloudCLI-only release")
         require(sha(self.job / "cloudcli.tar.gz") == manifest["cloudcli"]["archiveSha256"],
@@ -303,19 +296,24 @@ class Builder:
         return manifest
 
     def build(self):
+        provenance = self.production_source()
+        verify_source_files(self.root, provenance, self.source)
         commits = read(self.job / "source.json")
         with self.test_directory("codey-fast-") as temporary:
             env = self.test_environment(temporary)
 
             def image(name, directory, repository):
-                tag = self.release
+                verify_source_files(self.root, provenance, self.source)
+                tag = provenance["commit"] + "-" + self.release
                 self.az(["acr", "build", "-r", self.registry, "-t", f"{repository}:{tag}",
+                         "--build-arg", "CODEY_SOURCE_COMMIT=" + provenance["commit"],
                          "--file", str(directory / "Dockerfile"), "--no-logs", str(directory)], timeout=210)
                 # A unique tag attributes this build even when the installed CLI returns no JSON.
                 digest = self.az(["acr", "repository", "show", "-n", self.registry,
                                   "--image", f"{repository}:{tag}", "--query", "digest"])
                 require(isinstance(digest, str) and digest.startswith("sha256:"), "Missing image digest")
-                return name, {"image": f"{self.registry}.azurecr.io/{repository}@{digest}", "tag": tag}
+                return name, {"image": f"{self.registry}.azurecr.io/{repository}@{digest}", "tag": tag,
+                              "sourceCommit": provenance["commit"]}
 
             def portal():
                 if read(self.source / "portal/package.json").get("dependencies"):
@@ -356,7 +354,8 @@ class Builder:
                 cc_job, cp_job = pool.submit(self.build_cloudcli, commits, env), pool.submit(gateway)
                 images = dict([portal_job.result()])
                 cc, cp = cc_job.result(), cp_job.result()
-        manifest = {"release": self.release, "commits": commits, "cloudcli": cc, "gateway": cp, "images": images,
+        manifest = {"release": self.release, "commits": commits, "releaseSource": provenance,
+                    "cloudcli": cc, "gateway": cp, "images": images,
                     "ui": read(self.job / "ui/latest-build.json")}
         self.report.update({"passed": True, "cloudcli": cc, "gateway": cp})
         save(self.job / "validation.json", self.report)
@@ -364,8 +363,11 @@ class Builder:
         return manifest
 
     def activate(self):
+        source = self.production_source()
+        verify_source_files(self.root, source, self.source)
         before = read(self.job / "aca-before.private.json")
         manifest = read(self.job / "manifest.json")
+        require(manifest.get("releaseSource") == source, "Image manifest is not bound to the main source")
         verify_gateway_routes(self.root, self.job, before)
         require(read(self.job / "validation.json")["passed"], "Source validation did not pass")
         current = self.app()
@@ -428,6 +430,8 @@ class Builder:
 
     def build_portal(self):
         """Portal-only release: no Workspace UI or node package build."""
+        provenance = self.production_source()
+        verify_source_files(self.root, provenance, self.source)
         with self.test_directory("codey-portal-") as temporary:
             env = {
                 "PATH": os.environ["PATH"], "HOME": temporary, "TMPDIR": temporary,
@@ -445,14 +449,18 @@ class Builder:
             ]:
                 self.check("portal", label, args, env)
         source = self.source / "portal"
-        self.az(["acr", "build", "-r", self.registry, "-t", "codey:" + self.release,
+        verify_source_files(self.root, provenance, self.source)
+        tag = provenance["commit"] + "-" + self.release
+        self.az(["acr", "build", "-r", self.registry, "-t", "codey:" + tag,
+                 "--build-arg", "CODEY_SOURCE_COMMIT=" + provenance["commit"],
                  "--file", str(source / "Dockerfile"), "--no-logs", str(source)], timeout=210)
         digest = self.az(["acr", "repository", "show", "-n", self.registry,
-                          "--image", "codey:" + self.release, "--query", "digest"])
+                          "--image", "codey:" + tag, "--query", "digest"])
         require(isinstance(digest, str) and digest.startswith("sha256:"), "Missing Portal digest")
         before = read(self.job / "aca-before.private.json")
         legacy_mcp = portal_topology(before["properties"]["template"])
-        images = {"portal": {"image": f"{self.registry}.azurecr.io/codey@{digest}", "tag": self.release}}
+        images = {"portal": {"image": f"{self.registry}.azurecr.io/codey@{digest}", "tag": tag,
+                             "sourceCommit": provenance["commit"]}}
         files = {"/": sha(source / "public/index.html"), "/app.js": sha(source / "public/app.js")}
         files["/settings"] = sha(source / "public/settings.html")
         for name in ["settings.css", "machine-updates.js", "client-aggregator.js", "node-transport.js", "styles.css"]:
@@ -468,7 +476,7 @@ class Builder:
             features = json.loads(output)
         result = {
             "release": self.release, "scope": "portal", "commits": read(self.job / "source.json"),
-            "reviewedSnapshot": self.request.get("portalSnapshot"), "images": images,
+            "releaseSource": provenance, "images": images,
             "sharedUi": read(self.job / "ui-before.json"), "publicSha256": files,
             "features": features,
             "nodePackagesChanged": False, "deploymentContainers": ["portal"],
@@ -480,6 +488,7 @@ class Builder:
         return result
 
     def publish_ui(self):
+        self.production_source()
         manifest = read(self.job / "manifest.json")
         publisher = self.publisher()
         result = publisher.publish_package(publisher.AzureStore(self.config), manifest["ui"]["directory"],

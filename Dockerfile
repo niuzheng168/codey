@@ -7,6 +7,9 @@ RUN node scripts/build-node-skill.mjs
 
 FROM node:22.21.0-bookworm-slim
 
+ARG CODEY_SOURCE_COMMIT
+LABEL org.opencontainers.image.revision=$CODEY_SOURCE_COMMIT
+
 ENV NODE_ENV=production \
     PORTAL_HOST=0.0.0.0 \
     PORTAL_PORT=8080 \
@@ -29,11 +32,15 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY --chown=node:node public ./public
 COPY --from=node-skill-builder --chown=node:node /build/public/downloads ./public/downloads
 COPY --chown=node:node src ./src
+COPY --chown=node:node codey-source.json ./codey-source.json
 COPY --chown=node:node node-updater ./node-updater
 COPY --chown=node:node packages/codey/lib/update-windows.ps1 packages/codey/lib/update-probe.mjs packages/codey/lib/update-files.mjs packages/codey/lib/update-archive.mjs packages/codey/lib/update-dependencies.mjs packages/codey/lib/package-info.mjs ./packages/codey/lib/
 COPY --chown=node:node config/nodes.aca.json config/cloudcli-nodes.aca.json config/node-data.aca.json config/codey-node-ca.pem ./config/
 
 USER node
+
+# The immutable file, not an ACA environment override, identifies this image.
+RUN node --input-type=module -e "import { readBuildInfo } from './src/build-info.mjs'; const source = await readBuildInfo(); if (!source || source.commit !== process.env.CODEY_SOURCE_COMMIT) throw new Error('Missing or mismatched main build provenance')"
 
 # Fail the build, rather than the production revision, if any runtime input is unreadable.
 RUN node -e "const fs=require('node:fs'); const check=p=>{if(fs.statSync(p).isDirectory()){for(const name of fs.readdirSync(p))check(p+'/'+name)}else fs.accessSync(p,fs.constants.R_OK)}; for(const p of ['package.json','src','public','config','node-updater','packages/codey/lib'])check(p)"

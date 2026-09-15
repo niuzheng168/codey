@@ -1,6 +1,7 @@
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from "node:crypto";
 import { copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { validateReleaseSource, verifyPackageSource } from "../src/release-source.mjs";
 import { pathToFileURL } from "node:url";
 import { UPDATE_SHARED_PLATFORM, validateNodeRelease, verifyNodeRelease } from "../src/node-update-release.mjs";
 import { knownRuntimePlatforms } from "../packages/codey/lib/package-info.mjs";
@@ -73,6 +74,7 @@ export async function createNodeUpdateRelease({
           JSON.stringify(artifact.build.runtimePlatforms) !== JSON.stringify(source.runtimePlatforms)) {
         throw new Error("Shared platform/build fingerprints differ from the actual Codey package");
       }
+      verifyPackageSource(artifact.build, source.releaseSource);
       // Native reports are evidence, not separate release targets. Missing
       // reports do not split a shared release, but known failed/stale evidence
       // must never be silently ignored.
@@ -86,6 +88,11 @@ export async function createNodeUpdateRelease({
             ["sqlite", "bcrypt", "ripgrep", "pty", "codexSdk"].some(name => native.native?.[name] !== true)) {
           throw new Error("Supplied native validation does not match the shared package or Node major");
         }
+      }
+    } else {
+      const main = validateReleaseSource(source.releaseSource);
+      if (item.sourceCommit !== main.submodules[name === "copilotApi" ? "copilot-api" : name]) {
+        throw new Error("Component source differs from main's recorded gitlink");
       }
     }
     release.components[name] = {

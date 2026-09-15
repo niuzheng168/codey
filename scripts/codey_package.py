@@ -1,5 +1,6 @@
 """Build the single Codey npm application; component repositories are build inputs only."""
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -15,6 +16,10 @@ import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "packages/codey"
+_source_spec = importlib.util.spec_from_file_location(
+    "codey_release_source", ROOT / "skills/codey-deploy/scripts/release_source.py")
+release_source = importlib.util.module_from_spec(_source_spec)
+_source_spec.loader.exec_module(release_source)
 RUNTIME_PLATFORMS = ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]
 MACHINE_SKILL_FILES = [
     "SKILL.md", "agents/openai.yaml", "dependencies.json", "dependencies.windows.json", "dependencies.macos.json",
@@ -58,8 +63,8 @@ def normalize_runtime_text(runtime):
                 file.write_bytes(body.replace(b"\r\n", b"\n"))
 
 
-def write_runtime_installer(output, artifact):
-    source = (ROOT / "scripts/install-codey-runtime.mjs").read_text()
+def write_runtime_installer(output, artifact, source_root=None):
+    source = (Path(source_root or ROOT) / "scripts/install-codey-runtime.mjs").read_text()
     for marker, value in [
         ('const DEFAULT_PACKAGE_FILE = "";', artifact["file"]),
         ('const DEFAULT_PACKAGE_SHA256 = "";', artifact["sha256"]),
@@ -309,16 +314,27 @@ def pack_runtime(runtime, output, node, env):
     return metadata(package)
 
 
-def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work=False, setup_config=None):
+def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work=False, setup_config=None,
+                  source_commit=None):
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise RuntimeError("Build and validate Codey on Linux x86_64")
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    if (output / "codey-package.json").exists() or (output / "manifest.json").exists():
-        raise RuntimeError("Choose a new output directory")
+    if any(output.iterdir()):
+        raise RuntimeError("Choose a new empty output directory; never overwrite build artifacts")
     work = output / ".build-codey"
-    work.mkdir()
-    dependencies = json.loads((ROOT / "skills/config-new-codey-machine/dependencies.json").read_text())
+    work.mkdir(mode=0o700)
+    if allow_reviewed_diff and source_commit:
+        raise RuntimeError("Development diffs cannot be combined with a production main commit")
+    frozen = None
+    source_root = ROOT
+    if not allow_reviewed_diff:
+        import secrets
+        frozen = release_source.select_main(ROOT, "package-" + secrets.token_hex(8), source_commit)
+        release_source.verify_tooling(ROOT, frozen)
+        source_root = release_source.export_sources(ROOT, frozen, work / "source")
+    package_root = source_root / "packages/codey"
+    dependencies = json.loads((source_root / "skills/config-new-codey-machine/dependencies.json").read_text())
     if node_dir:
         node, distribution = Path(node_dir).resolve(), None
     else:
@@ -330,26 +346,39 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     }
     node_version = run([node / "bin/node", "-p", "process.versions.node"], env=env, capture=True).stdout.strip()
     cloud, copilot = work / "cloudcli-source", work / "copilot-source"
-    cloud_info = source(ROOT / "cloudcli", cloud, allow_reviewed_diff)
-    copilot_info = source(ROOT / "copilot-api", copilot, allow_reviewed_diff)
+    if frozen:
+        for name, destination in [("cloudcli", cloud), ("copilot-api", copilot)]:
+            shutil.copytree(work / "source" / name, destination, symlinks=True)
+        cloud_info, copilot_info = [
+            {"commit": frozen["submodules"][name],
+             "version": json.loads((directory / "package.json").read_text())["version"], "patchSha256": None}
+            for name, directory in [("cloudcli", cloud), ("copilot-api", copilot)]
+        ]
+    else:
+        cloud_info = source(ROOT / "cloudcli", cloud, True)
+        copilot_info = source(ROOT / "copilot-api", copilot, True)
     cloud_info["repository"] = "https://github.com/niuzheng168/claudecodeui.git"
     copilot_info["repository"] = "https://github.com/niuzheng168/copilot-api.git"
-    package = json.loads((PACKAGE / "package.json").read_text())
-    locked_bytes = (PACKAGE / "package-lock.json").read_bytes().replace(b"\r\n", b"\n")
+    package = json.loads((package_root / "package.json").read_text())
+    locked_bytes = (package_root / "package-lock.json").read_bytes().replace(b"\r\n", b"\n")
     validate_runtime_lock(package, json.loads(locked_bytes))
     validate_dependencies(package, json.loads((cloud / "package.json").read_text()),
                           json.loads((copilot / "package.json").read_text()))
     runtime = work / "codey"
-    copy_required(PACKAGE, runtime, [
+    copy_required(package_root, runtime, [
         "package.json", "bin", "lib", "README.md", "scripts",
     ])
     (runtime / "npm-shrinkwrap.json").write_bytes(locked_bytes)
     sdk_info = compile_sources(cloud, copilot, runtime, node, work, package["version"], env)
-    copy_required(ROOT / "node-updater", runtime / "updater", [
+    if frozen:
+        release_source.verify_source_files(ROOT, frozen, work / "source")
+        for name, directory in [("cloudcli", cloud), ("copilot-api", copilot)]:
+            release_source.verify_source_tree(ROOT / name, frozen["submodules"][name], directory, frozen, name)
+    copy_required(source_root / "node-updater", runtime / "updater", [
         "install.py", "updater.py", "engine.py", "probe.mjs", "UPGRADE.md",
     ])
-    run([node / "bin/node", ROOT / "scripts/build-native-updaters.mjs", runtime / "updater/native"], env=env)
-    copy_required(ROOT / "skills/config-new-codey-machine", runtime / "onboarding", [
+    run([node / "bin/node", source_root / "scripts/build-native-updaters.mjs", runtime / "updater/native"], env=env)
+    copy_required(source_root / "skills/config-new-codey-machine", runtime / "onboarding", [
         "scripts/install.sh", "scripts/registration.mjs", "templates/a100-models.json", "dependencies.json",
     ])
     if setup_config is not None:
@@ -364,8 +393,8 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
          "--registry=https://registry.npmjs.org"], cwd=runtime, env=env)
     if (runtime / "npm-shrinkwrap.json").read_bytes() != locked_bytes:
         raise RuntimeError("npm changed the canonical shared dependency lock")
-    source_commit = run(["git", "-C", ROOT, "rev-parse", "HEAD"], capture=True).stdout.strip()
-    source_dirty = bool(run([
+    source_commit = frozen["commit"] if frozen else run(["git", "-C", ROOT, "rev-parse", "HEAD"], capture=True).stdout.strip()
+    source_dirty = False if frozen else bool(run([
         "git", "-C", ROOT, "status", "--porcelain", "--",
         "packages/codey", "scripts/codey_package.py", "scripts/build-machine-bundle.py",
         "scripts/install-codey-runtime.mjs", "scripts/build-native-updaters.mjs", "node-updater", "skills/config-new-codey-machine",
@@ -373,6 +402,7 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     provenance = {
         "schema": 1, "name": "codey", "version": package["version"], "sourceCommit": source_commit,
         "sourceDirty": source_dirty,
+        "releaseSource": frozen,
         "runtimePlatforms": RUNTIME_PLATFORMS,
         "cloudcli": cloud_info, "copilotApi": copilot_info, "codexSdk": sdk_info,
         "lockSha256": metadata(runtime / "npm-shrinkwrap.json")["sha256"],
@@ -406,6 +436,7 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     artifact = pack_runtime(runtime, output, node, env)
     result = {
         "schema": 1, "name": "codey", "node": node_version, "nodeDistribution": distribution,
+        "releaseSource": frozen,
         "runtimePlatforms": RUNTIME_PLATFORMS,
         "bunBuildTool": "1.4.2", "cloudcli": cloud_info, "copilotApi": copilot_info,
         "codey": {
@@ -414,7 +445,7 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
             "lockSha256": provenance["lockSha256"],
         },
         "artifact": artifact,
-        "runtimeInstaller": write_runtime_installer(output, artifact),
+        "runtimeInstaller": write_runtime_installer(output, artifact, source_root),
     }
     (output / "codey-package.json").write_text(json.dumps(result, indent=2) + "\n")
     if not keep_work:

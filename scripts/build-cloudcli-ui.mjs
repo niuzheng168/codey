@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import { promisify, isDeepStrictEqual } from "node:util";
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,7 @@ import {
   UI_ASSET_PREFIX, UI_MANIFEST_MARKER, UI_PACKAGE_FILE, UI_RUNTIME_MARKER,
   readUiPackage, readUiPackageFile, uiContentType, validateUiManifest, validateUiRelease, validateUiTemplate,
 } from "../src/cloudcli-ui-package.mjs";
+import { validateReleaseSource } from "../src/release-source.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const INPUTS = [
@@ -16,6 +18,42 @@ const INPUTS = [
   "vitest.config.ts", "vitest.setup.ts",
 ];
 const sha256 = (body) => createHash("sha256").update(body).digest("hex");
+const execute = promisify(execFile);
+
+/** Bind build inputs to the gitlink export; a dirty folder cannot borrow a SHA. */
+export async function committedUiSource(source) {
+  const file = path.join(source, ".codey-component-source.json");
+  let info;
+  try { info = await lstat(file); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  if (!info.isFile() || info.isSymbolicLink() || info.size > 4 * 1024 * 1024) {
+    throw new Error("Invalid committed UI source proof");
+  }
+  const proof = JSON.parse(await readFile(file, "utf8"));
+  if (proof.schema !== 1 || proof.component !== "cloudcli" || !proof.files || Array.isArray(proof.files)) {
+    throw new Error("Invalid committed UI source proof");
+  }
+  const releaseSource = validateReleaseSource(proof.source);
+  const actual = [];
+  for (const name of INPUTS) actual.push(...await filesUnder(source, path.join(source, name)));
+  const expected = Object.keys(proof.files).filter(file => INPUTS.some(name => file === name || file.startsWith(name + "/")));
+  if (!isDeepStrictEqual(actual.sort(), expected.sort())) throw new Error("Committed UI input files changed");
+  for (const name of actual) {
+    const bytes = await readFile(path.join(source, name));
+    if (sha256(bytes) === proof.files[name]) continue;
+    // The unified npm compiler substitutes only the committed Codey version.
+    if (name === "package.json" && typeof proof.packageJson === "string" &&
+        sha256(proof.packageJson) === proof.files[name]) {
+      const original = JSON.parse(proof.packageJson), changed = JSON.parse(bytes);
+      if (changed.version === releaseSource.codeyVersion) {
+        changed.version = original.version;
+        if (isDeepStrictEqual(original, changed)) continue;
+      }
+    }
+    throw new Error("Committed UI source changed: " + name);
+  }
+  return releaseSource;
+}
 
 async function filesUnder(root, directory = root) {
   const info = await lstat(directory);
@@ -48,7 +86,7 @@ function command(args, cwd, env) {
 }
 
 /** The build command and tests package only static browser assets, never the node backend or .env. */
-export async function packageCloudCliUi(buildRoot, destination, { release, cloudCliVersion, sourceSha256 }) {
+export async function packageCloudCliUi(buildRoot, destination, { release, cloudCliVersion, sourceSha256, releaseSource = null }) {
   validateUiRelease(release);
   const assetBase = `${UI_ASSET_PREFIX}${release}/`;
   let html = await readFile(path.join(buildRoot, "index.html"), "utf8");
@@ -74,7 +112,7 @@ export async function packageCloudCliUi(buildRoot, destination, { release, cloud
   }
   const manifest = validateUiManifest({
     schema: 1, kind: "codey-cloudcli-ui", release, assetBase, apiContract: 1,
-    cloudCliVersion, sourceSha256, files,
+    cloudCliVersion, sourceSha256, files, ...(releaseSource ? { releaseSource: validateReleaseSource(releaseSource) } : {}),
   });
   for (const [, url] of html.matchAll(/(?:src|href)=["']([^"']+)["']/g)) {
     if (url.startsWith(assetBase) && !Object.hasOwn(files, url.slice(assetBase.length))) {
@@ -93,8 +131,34 @@ export async function buildCloudCliUi({
   output = path.join(projectRoot, "dist", "cloudcli-ui"),
   release = `ui-${new Date().toISOString().replace(/[-:.]/g, "").toLowerCase()}-${randomBytes(4).toString("hex")}`,
   test = false,
+  production = false,
+  sourceCommit,
 } = {}) {
   validateUiRelease(release);
+  if (production) {
+    if (path.resolve(source) !== path.join(projectRoot, "cloudcli")) {
+      throw new Error("Production UI source must come from the parent main checkout");
+    }
+    const temporary = await mkdtemp(path.join(os.tmpdir(), "codey-main-ui-"));
+    try {
+      const exported = path.join(temporary, "source");
+      await execute("python3", [
+        path.join(projectRoot, "skills/codey-deploy/scripts/release_source.py"),
+        "--workspace", projectRoot, "--output", exported,
+        ...(sourceCommit ? ["--source-commit", sourceCommit] : []),
+      ], { timeout: 180000, maxBuffer: 1024 * 1024 });
+      const selected = path.join(exported, "cloudcli");
+      const home = path.join(temporary, "home");
+      await mkdir(home, { mode: 0o700 });
+      await command(["ci", "--no-audit", "--no-fund"], selected, {
+        PATH: process.env.PATH, HOME: home, CI: "true", HUSKY: "0",
+        SKIP_INSTALL_SIMPLE_GIT_HOOKS: "1", ELECTRON_SKIP_BINARY_DOWNLOAD: "1",
+      });
+      return await buildCloudCliUi({ source: selected, output, release, test });
+    } finally { await rm(temporary, { recursive: true, force: true }); }
+  }
+  const releaseSource = await committedUiSource(source);
+  if (sourceCommit && releaseSource?.commit !== sourceCommit) throw new Error("UI source does not match selected main commit");
   const fingerprint = await sourceFingerprint(source);
   const temporary = await mkdtemp(path.join(os.tmpdir(), "codey-shared-ui-"));
   try {
@@ -116,7 +180,7 @@ export async function buildCloudCliUi({
     if (await sourceFingerprint(source) !== fingerprint) throw new Error("UI source changed during build");
     const version = JSON.parse(await readFile(path.join(snapshot, "package.json"), "utf8")).version;
     const result = await packageCloudCliUi(built, path.join(output, release), {
-      release, cloudCliVersion: version, sourceSha256: fingerprint,
+      release, cloudCliVersion: version, sourceSha256: fingerprint, releaseSource,
     });
     await writeFile(path.join(output, "latest-build.json"), `${JSON.stringify(result, null, 2)}\n`);
     return result;
@@ -132,11 +196,13 @@ async function main() {
   for (let index = 0; index < args.length; index++) {
     const option = args[index];
     if (option === "--test") options.test = true;
+    else if (option === "--production") options.production = true;
+    else if (option === "--source-commit" && args[index + 1]) options.sourceCommit = args[++index];
     else if (["--source", "--output", "--release", "--verify"].includes(option) && args[index + 1]) {
       const value = args[++index];
       if (option === "--verify") verify = path.resolve(value);
       else options[option.slice(2)] = option === "--release" ? value : path.resolve(value);
-    } else throw new Error("Usage: workspace:build [--test] [--release ID] [--source DIR] [--output DIR] | --verify PACKAGE_DIR");
+    } else throw new Error("Usage: workspace:build [--production] [--source-commit SHA] [--test] [--release ID] [--source DIR] [--output DIR] | --verify PACKAGE_DIR");
   }
   if (verify) {
     const bundle = await readUiPackage(verify);

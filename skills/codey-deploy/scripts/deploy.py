@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""One timed release command. SSH remains the only node distribution channel."""
+"""Deploy one committed main release without editing the development worktree."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,10 +15,13 @@ import time
 import zipfile
 
 from common import NODES, command, phase, read, release_name, require, save, sha
+from release_source import commits as source_commits, git, select_main, validate_source, verify_tooling
 
 
 class Deploy:
     def __init__(self, args):
+        require(not getattr(args, "reviewed_working_tree", False),
+                "Uncommitted production snapshots are disabled; merge changes into main first")
         expected = {name: value for name, value in [
             ("portal", getattr(args, "expected_portal_commit", None)),
             ("cloudcli", getattr(args, "expected_cloudcli_commit", None)),
@@ -36,6 +40,7 @@ class Deploy:
         self.job = self.root / "artifacts" / self.release
         self.job.mkdir(mode=0o700, parents=True, exist_ok=bool(resumed))
         self.scripts = Path(__file__).resolve().parent
+        self.workers_ready = False
         self.nodes = tuple(args.nodes)
         require(self.nodes and len(set(self.nodes)) == len(self.nodes), "Choose distinct target nodes")
         self.remote = args.remote_root + "/artifacts/" + self.release
@@ -154,25 +159,30 @@ class Deploy:
         return proof
 
     def freeze_portal(self):
-        """Use a temporary Git index; never commit, stash or modify the user's index."""
-        base = command(["git", "rev-parse", "HEAD"], cwd=self.root)[0]
-        files = command(["git", "ls-files", "--modified", "--others", "--exclude-standard", "-z"], cwd=self.root)[0]
-        files = sorted(set(name for name in files.split("\0") if name))
-        allowed = ("public/", "src/", "test/", "docs/", "skills/", "scripts/", "node-updater/")
-        require(files and all(name.startswith(allowed) or name in {"README.md", "Dockerfile", ".dockerignore", ".env.example", "package.json", "package-lock.json"}
-                              for name in files), "Review unexpected source/config changes before snapshotting")
-        require(not command(["git", "ls-files", "--deleted"], cwd=self.root)[0],
-                "Reviewed Portal snapshot must not silently delete code")
-        env = {**os.environ, "GIT_INDEX_FILE": str(self.job / "reviewed.index")}
-        command(["git", "read-tree", "HEAD"], cwd=self.root, env=env)
-        command(["git", "add", "--", *files], cwd=self.root, env=env)
-        tree = command(["git", "write-tree"], cwd=self.root, env=env)[0]
-        archive = self.job / "portal-reviewed.tar.gz"
-        command(["git", "archive", "--format=tar.gz", "--output", archive, tree], cwd=self.root)
-        result = {"kind": "reviewed-working-tree", "baseCommit": base, "tree": tree,
-                  "archiveSha256": sha(archive), "changedFiles": files, "commitCreated": False, "pushed": False}
-        save(self.job / "reviewed-source.json", result)
-        return result
+        raise RuntimeError("Uncommitted production snapshots are disabled; merge changes into main first")
+
+    def pin_source(self):
+        resumed = getattr(self.args, "resume_release", None)
+        requested = self.base.get("expectedCommits", {})
+        current = select_main(self.root, self.release, None if resumed else requested.get("portal"))
+        require(self.scripts == self.root / "skills/codey-deploy/scripts",
+                "Run the deployer from the selected production checkout, not another worktree")
+        verify_tooling(self.root, current)
+        self.main_source = current
+        source = validate_source(read(self.job / "manifest.json").get("releaseSource")) if resumed else current
+        if resumed:
+            git(self.root, "merge-base", "--is-ancestor", source["commit"], current["commit"])
+        require(all(source_commits(source).get(name) == commit for name, commit in requested.items()),
+                "Component overrides cannot differ from main's recorded gitlinks")
+        self.base["expectedCommits"] = source_commits(source)
+        self.report["releaseSource"] = source
+        return source
+
+    def upload_workers(self):
+        self.pin_source()
+        self.upload(self.args.builder, [str(file) for file in self.scripts.iterdir()
+                                       if file.suffix in {".py", ".mjs"}], self.remote + "/scripts")
+        self.workers_ready = True
 
     def node_services(self, nodes=None, services=("codey-cloudcli.service", "copilot-api.service")):
         def inspect(node):
@@ -227,22 +237,25 @@ class Deploy:
                 "nodes": {node: row["gateway"] for node, row in rows.items()}}
 
     def refresh_reviewed_updater(self):
+        # A recovery may use newer committed maintenance code, but never local
+        # edits. The application's original immutable manifest remains pinned.
+        source = validate_source(self.main_source)
         attempt = len(self.report.get("previousAttempts", []))
         archive = self.job / f"reviewed-updater-source-{attempt}.zip"
         require(not archive.exists(), "Do not overwrite reviewed updater evidence")
         hashes = {}
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
             for name in ["updater.py", "engine.py", "probe.mjs", "install.py", "UPGRADE.md"]:
-                file = self.root / "node-updater" / name
-                hashes[name] = sha(file)
-                bundle.write(file, "codey-updater/" + name)
+                body = git(self.root, "show", source["commit"] + ":node-updater/" + name, binary=True)
+                hashes[name] = hashlib.sha256(body).hexdigest()
+                bundle.writestr("codey-updater/" + name, body)
         self.upload(self.args.builder, [str(archive)], self.remote)
         results = [self.install_updater({
             "node": node, "alreadyEnrolled": True, "useExistingConfig": True,
             "file": self.remote + "/" + archive.name, "sha256": sha(archive),
         }) for node in self.nodes]
         return {"nodes": results, "reviewedFiles": hashes, "archiveSha256": sha(archive),
-                "credentialReused": True, "applicationServicesRestarted": False}
+                "releaseSource": source, "credentialReused": True, "applicationServicesRestarted": False}
 
     def run_workspace(self):
         self.report["scope"] = "workspace-only"
@@ -252,8 +265,7 @@ class Deploy:
         try:
             if self.args.resume_release:
                 with phase(self.report, "resume-existing-signed-workspace-release", self.record):
-                    self.upload(self.args.builder, [str(file) for file in self.scripts.iterdir()
-                                                   if file.suffix in {".py", ".mjs"}], self.remote + "/scripts")
+                    self.upload_workers()
                     self.manifest = self.worker("resume_workspace", timeout=60)
                     if self.manifest.get("acaReconciliation"):
                         self.report["acaReconciliation"] = self.manifest["acaReconciliation"]
@@ -273,8 +285,7 @@ class Deploy:
                     self.report["gatewayBefore"] = self.node_services(services=("copilot-api.service",))
                     self.report["updaterBefore"] = self.node_services(services=("codey-node-updater.service",))
                     self.report["worktreeBefore"] = command(["git", "status", "--short"], cwd=self.root)[0]
-                    self.upload(self.args.builder, [str(file) for file in self.scripts.iterdir()
-                                                   if file.suffix in {".py", ".mjs"}], self.remote + "/scripts")
+                    self.upload_workers()
                     self.report["source"] = self.worker("prepare", timeout=110)
                     self.idle(self.nodes)
                     self.report["nativeBefore"] = self.native_idle()
@@ -333,11 +344,7 @@ class Deploy:
         self.report["nodeChecksPerformed"] = False
         try:
             with phase(self.report, "portal-preflight-and-source-snapshot", self.record):
-                self.upload(self.args.builder, [str(file) for file in self.scripts.iterdir()
-                                               if file.suffix in {".py", ".mjs"}], self.remote + "/scripts")
-                if self.args.reviewed_working_tree:
-                    self.base["portalSnapshot"] = self.freeze_portal()
-                    self.upload(self.args.builder, [str(self.job / "portal-reviewed.tar.gz")], self.remote)
+                self.upload_workers()
                 self.report["source"] = self.worker("prepare", timeout=100)
             with phase(self.report, "portal-checks-and-image-build", self.record):
                 self.manifest = self.worker("build_portal", timeout=480)
@@ -365,8 +372,7 @@ class Deploy:
             with phase(self.report, "preflight-source-and-node-snapshots", self.record):
                 self.report["localBefore"] = self.protected_local()
                 self.report["worktreeBefore"] = command(["git", "status", "--short"], cwd=self.root)[0]
-                self.upload(self.args.builder, [str(file) for file in self.scripts.iterdir()
-                                               if file.suffix in {".py", ".mjs"}], self.remote + "/scripts")
+                self.upload_workers()
                 nodes = {node: self.pool.submit(self.prepare_node, node) for node in self.nodes}
                 prepared = self.worker("prepare", timeout=100)
                 self.topology = prepared["nodes"]
@@ -487,14 +493,10 @@ print(json.dumps({'node':json.loads(config.read_text())['nodeId'],'updaterInstal
         self.report["scope"] = "fleet-updater"
         self.report["forceActualRollout"] = False
         try:
-            with phase(self.report, "preflight-and-reviewed-source", self.record):
+            with phase(self.report, "preflight-and-committed-source", self.record):
                 self.report["localBefore"] = self.protected_local()
                 self.report["nodesBefore"] = self.node_services()
-                self.upload(self.args.builder, [str(file) for file in self.scripts.iterdir()
-                                               if file.suffix in {".py", ".mjs"}], self.remote + "/scripts")
-                if self.args.reviewed_working_tree:
-                    self.base["portalSnapshot"] = self.freeze_portal()
-                    self.upload(self.args.builder, [str(self.job / "portal-reviewed.tar.gz")], self.remote)
+                self.upload_workers()
                 self.report["source"] = self.worker("prepare", timeout=100)
                 self.idle(self.nodes)
                 self.report["nativeBefore"] = self.native_idle()
@@ -535,11 +537,12 @@ print(json.dumps({'node':json.loads(config.read_text())['nodeId'],'updaterInstal
     def finish(self):
         # Wait for mutation/rollback workers; cleanup time is part of the measurement.
         self.pool.shutdown(wait=True, cancel_futures=True)
-        try:
-            self.report["releaseLock"] = self.worker("unlock", timeout=30)
-        except Exception as error:
-            self.report["lockCleanupError"] = str(error)
-            self.report["status"] = "needs-attention"
+        if self.workers_ready:
+            try:
+                self.report["releaseLock"] = self.worker("unlock", timeout=30)
+            except Exception as error:
+                self.report["lockCleanupError"] = str(error)
+                self.report["status"] = "needs-attention"
         if read(self.lock)["release"] == self.release:
             self.lock.unlink()
         self.report["finishedAt"] = time.time()
@@ -565,8 +568,8 @@ def arguments():
     parser.add_argument("--scope", choices=("fleet", "portal", "workspace"), default="fleet")
     parser.add_argument("--verify-steering", action="store_true",
                         help="Workspace scope: prove a correction reaches the same native Codex turn")
-    parser.add_argument("--expected-cloudcli-commit", help="Fail rather than publishing an unexpected remote CloudCLI tip")
-    parser.add_argument("--expected-copilot-api-commit", help="Fail rather than publishing an unexpected remote copilot-api tip")
+    parser.add_argument("--expected-cloudcli-commit", help="Assert main's recorded CloudCLI gitlink (not an override)")
+    parser.add_argument("--expected-copilot-api-commit", help="Assert main's recorded gateway gitlink (not an override)")
     parser.add_argument("--expected-portal-commit", help="Fail rather than publishing an unexpected remote parent tip")
     parser.add_argument("--resume-release", help="Explicitly resume a failed Workspace release without rebuilding or signing again")
     parser.add_argument("--refresh-updater", action="store_true",
@@ -577,23 +580,23 @@ def arguments():
                         help="Default: signed owner-confirmed pull updates. SSH is legacy-only before updater adoption.")
     parser.add_argument("--nodes", nargs="+", choices=NODES, default=list(NODES),
                         help="Explicit subset, e.g. skip a machine with a long-running user job")
-    parser.add_argument("--reviewed-working-tree", action="store_true",
-                        help="Deploy explicitly reviewed root-repository changes without committing/pushing")
+    parser.add_argument("--reviewed-working-tree", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--apply", action="store_true", help="Authorized real ACA and remote-node deployment")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.reviewed_working_tree:
+        parser.error("Uncommitted production snapshots are disabled; merge changes into main first")
+    return args
 
 
 if __name__ == "__main__":
     args = arguments()
     require(args.apply, "Read SKILL.md and obtain release authorization, then pass --apply")
     require(not args.verify_steering or args.scope == "workspace", "Steering acceptance is Workspace-scoped")
-    require(args.scope != "workspace" or (args.node_transport == "updater" and not args.reviewed_working_tree),
+    require(args.scope != "workspace" or args.node_transport == "updater",
             "Workspace-only releases require enrolled updaters and committed application source")
     require(not args.resume_release or args.scope == "workspace", "Resume is Workspace-scoped")
     require(not args.refresh_updater or (args.scope == "workspace" and args.resume_release),
             "Updater repair requires explicit recovery of a failed Workspace release")
     require(not args.reconcile_aca or (args.scope == "workspace" and args.resume_release),
             "ACA baseline reconciliation requires explicit Workspace recovery")
-    require(not args.reviewed_working_tree or args.scope == "portal" or args.node_transport == "updater",
-            "Reviewed source is supported by Portal-only and independent-updater releases, not legacy SSH")
     raise SystemExit(Deploy(args).run())

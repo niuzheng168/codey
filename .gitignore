@@ -1,4 +1,6 @@
 # Credentials and machine-specific configuration
+/codey-source.json
+/.codey-component-source.json
 .env
 .env.*
 !.env.example

@@ -127,6 +127,11 @@ class CodeyPackageTests(unittest.TestCase):
             file.write_text("fixture only\n")
         self.cloud = {"version": "1.37.2", "commit": "c" * 40}
         self.copilot = {"version": "2.5.3", "commit": "d" * 40}
+        self.release_source = {
+            "schema": 1, "kind": "codey-main-source", "ref": "refs/heads/main",
+            "commit": "b" * 40, "tree": "a" * 40, "sourceDirty": False, "codeyVersion": pkg["version"],
+            "submodules": {"cloudcli": self.cloud["commit"], "copilot-api": self.copilot["commit"]},
+        }
         self.setup = {
             "schema": 1, "portalOrigin": "https://codey.example.test", "platform": "auto",
             "network": {"mode": "devtunnel"}, "tunnelAuthProvider": "github",
@@ -140,6 +145,7 @@ class CodeyPackageTests(unittest.TestCase):
                         str(self.runtime / "updater/native")], check=True)
         write_json(self.runtime / "codey-build.json", {
             "schema": 1, "name": "codey", "version": pkg["version"], "sourceCommit": "b" * 40,
+            "sourceDirty": False, "releaseSource": self.release_source,
             "runtimePlatforms": package.RUNTIME_PLATFORMS,
             "cloudcli": self.cloud, "copilotApi": self.copilot,
             "lockSha256": package.metadata(self.runtime / "npm-shrinkwrap.json")["sha256"],
@@ -154,6 +160,7 @@ class CodeyPackageTests(unittest.TestCase):
             "node": "24.20.0", "nodeDistribution": {}, "bunBuildTool": "1.4.2",
             "cloudcli": self.cloud, "copilotApi": self.copilot,
             "codey": package.inspect_npm_package(self.file), "artifact": self.artifact,
+            "releaseSource": self.release_source,
         }
         bundle.assemble_bundle(self.root, built, "https://codey.example.test",
                                self.setup["updater"]["releasePublicKey"])
@@ -375,6 +382,17 @@ class CodeyPackageTests(unittest.TestCase):
                 publisher.publish(failed, file, manifest, raw, "none")
             self.assertNotIn("active.json", failed.files)
             self.assertNotIn("publish.lock", failed.directories)
+
+    def test_production_machine_publication_refuses_missing_or_dirty_main_proof_before_store_access(self):
+        file = self.machine_bundle()
+        _, manifest, raw = publisher.inspect_package(file)
+        for source in (None, {**self.release_source, "sourceDirty": True},
+                       {**self.release_source, "ref": "refs/heads/dev"}):
+            store = MemoryStore()
+            with self.subTest(source=source), self.assertRaisesRegex(RuntimeError, "main provenance"):
+                publisher.publish(store, file, {**manifest, "releaseSource": source}, raw, "none")
+            self.assertEqual(store.files, {})
+            self.assertEqual(store.directories, set())
 
     def test_publisher_rejects_extra_split_archives_or_payload_corruption(self):
         file = self.machine_bundle()

@@ -44,6 +44,23 @@ class UiPublishTests(unittest.TestCase):
         (directory / "ui-package.json").write_text(json.dumps(manifest))
         return directory
 
+    def test_production_store_requires_main_proof_before_any_mutation(self):
+        first = self.package("ui-main-proof")
+        self.store.production = True  # Same gate as Azure, without cloud credentials.
+        with self.assertRaisesRegex(RuntimeError, "main provenance"):
+            publisher.publish_package(self.store, first, "none")
+        self.assertFalse(self.store.root.exists())
+        file = first / "ui-package.json"
+        manifest = json.loads(file.read_text())
+        manifest["releaseSource"] = {
+            "schema": 1, "kind": "codey-main-source", "ref": "refs/heads/main",
+            "commit": "a" * 40, "tree": "b" * 40, "sourceDirty": False, "codeyVersion": "0.1.0",
+            "submodules": {"cloudcli": "c" * 40, "copilot-api": "d" * 40},
+        }
+        file.write_text(json.dumps(manifest))
+        publisher.publish_package(self.store, first, "none")
+        self.assertEqual(json.loads(self.store.read("active.json", 1024))["release"], "ui-main-proof")
+
     def active(self):
         return json.loads((self.root / "store/active.json").read_text())
 

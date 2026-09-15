@@ -13,7 +13,9 @@ description: 快速发布 Codey 的 ACA Portal、共享 Workspace UI 和 jpe2/jp
 - **Windows 本地 copilot-api 受保护**：不安装、更新、停止或重启。发布器前后核对本地 4141 的 PID、进程路径和启动时间。
 - 仅更新四个既有远程节点的 CloudCLI 和 copilot-api 包；保留 Node/Codex 安装、认证、TLS、SSO、systemd 配置和用户数据。不自动升级全局 CLI。
 - 独立模型 API key 必须已迁移完成。缺少 key、调用方未加载 key 或节点正在运行任务时，停止并报告具体前置条件；不取消任务，不放宽鉴权。
-- 默认拉取 `origin/main`、CloudCLI `origin/main`、copilot-api `origin/dev` 到发布专用 ref，从 Git archive 构建。**不 checkout/reset/stash/clean 开发工作树，不替用户提交或推送。** 未提交改动默认不发布；明确授权的根仓库冻结快照模式允许例外。
+- 生产只接受干净、与选定 `origin/main` 一致的 checkout。根提交确定后，两个子模块只取该提交记录的 gitlink；不得独立追踪其分支最新版。**不 checkout/reset/stash/clean 开发工作树，不替用户提交、推送或修改版本号。**
+- `--reviewed-working-tree` 和 worker 的 `portalSnapshot` 已禁用。发现必须修代码才能发布时停止，先完成审查和 main 合入；不得在导出的源码里热修、伪造 provenance 或绕过检查后重发。
+- 发布器、安装包和 Azure 共享 UI 的来源门禁统一见 [main-only 发布说明](../../docs/main-only-releases.md)。首次从未提交快照迁移、CI 启用及版本准备时读取该说明。CI 自动流程仅发布 Portal，不自动重启个人节点。
 - `codex-session-share-mcp/` 源码仅保留供本地参考；不构建镜像、不进入 Portal
   镜像、不部署 ACA sidecar，也不配置 Portal MCP/session-share upstream。
 
@@ -76,9 +78,9 @@ python3 skills/codey-deploy/scripts/deploy.py --workspace /home/zhn/g/codey \
   --remote-root /home/zhn/g/codey --local-builder --scope portal --apply
 ```
 
-本机入口仅允许 Portal-only 且两个根目录相同；仍执行原有冻结、测试、镜像构建、
-ACA 配置漂移检查、登录/静态文件验收与锁清理。未提交的已审核改动仍须显式
-附加下述 `--reviewed-working-tree`，不会自动提交或推送。
+本机入口仅允许 Portal-only 且两个根目录相同；执行干净 main 检查、固定 gitlinks、
+隔离构建、ACA 配置漂移检查、登录/静态文件和 `/api/version` SHA 验收与锁清理。
+有未提交改动时使用独立的干净 checkout，或先审查合入 main；不自动 stash、提交或推送。
 
 仅更新 Portal 镜像并确保 ACA 只部署 `portal` 容器；首次执行会删除旧 `mcp` sidecar
 及 Portal 中两个旧 upstream 环境变量。保留共享 UI、远程节点的包和进程，验证生产
@@ -105,32 +107,29 @@ python <skill-dir>/scripts/deploy.py --scope workspace --nodes zhn-a100 --apply 
   必须确认队列已消费、重复 receipt 被拒绝、普通草稿不变，且迟到的自动保存不会
   恢复队列或在完成后再发一轮。仅测试旧 `chat.steer` WebSocket 不算该功能通过。
   不重复通用 Codey/Codex 连通性验收；该额外功能验证单独记录。
-- 可用 `--expected-cloudcli-commit <完整 SHA>`、`--expected-portal-commit <完整 SHA>`
-  锁定已审核的远端源码，远端变化即停止，不夹带工作树改动。
+- 可用 `--expected-portal-commit <完整 SHA>` 锁定父仓库 main。
+  `--expected-cloudcli-commit` / `--expected-copilot-api-commit` 只是对 main
+  gitlinks 的断言，不能覆盖它们；不匹配时停止。
 - 保留未选择节点及所有 copilot-api 的 PID/启动时间，核对 ACA 修订不变；
   共享 UI 成功发布不代表其它节点的后端也已更新。
 - 失败事务已回滚且无未完成 job 后，可明确使用 `--resume-release <原 release>`
   重试同一已验证、已签名的应用包，不重复构建/签名或启动整个发布。
-  若根因是已审查并测试的升级器缺陷，再附加 `--refresh-updater`：
-  只安装所选节点的升级器代码，复用本地凭据，核对应用 PID 不变。
+  若根因是已审查、测试并合入 main 的升级器缺陷，再附加 `--refresh-updater`：
+  只从 main 读取所选节点的升级器代码，记录其独立源码提交，复用本地凭据，
+  核对应用 PID 不变；不能读取工作树修补原应用包。
   旧失败报告、job 记录和诊断间隔均保留在同一发布的总耗时内。
   并行 ACA 重启导致修订号变化时，先确认其已就绪；只有镜像、配置及共享 UI
   完全相同才可加 `--reconcile-aca` 接受纯 `revisionSuffix` 变化。
   原始基线另存留档；真实配置变化或未就绪的发布仍拒绝，不回退另一发布者。
 
-当用户明确要求“修改本地代码并部署”，且提交尚未获准或明确要求部署后才提交时，先审阅全部本地变更；
-仅确认这些改动都属于本次授权范围后，附加 `--reviewed-working-tree`。它使用独立临时
-Git index 生成不可变 tree/archive，不改真实 index、不创建 commit、不 push。
-报告记录 Git 基线、tree SHA、压缩包 SHA-256 和文件清单；远端 main 若已前进则停止。
-此模式支持 Portal-only 和新版 updater 全量部署；仅冻结根仓库，子模块仍取明确的远程 ref。
-不要用这个选项夹带无关的 dirty 文件，也不要把工作树快照描述为已提交的源码。
-已上线的快照尚未提交时，下次常规 origin 发布可能回退这些功能；必须先提醒用户提交/
-推送，或取得明确的回退授权，不能默默覆盖该快照。
+“修改并部署”仍须先完成 main 合入。若尚未获准提交/推送，就完成代码和测试后说明
+发布前置条件，不将修改授权扩张为提交授权，也不临时开启未提交发布的例外。
+旧的未提交生产快照需先审核收齐到 main；不得直接部署较旧 main 导致功能回退。
 
 ## 固定执行流程
 
 1. 记录完整开始时间。全量/Workspace 模式并行获取干净源码快照、ACA 基线、节点基线和已认证的任务空闲状态；Portal-only 只获取源码与 ACA 基线。
-2. Portal、CloudCLI、copilot-api 的检查/测试各做一次；CloudCLI 后端只编译一次。只构建 Portal ACA 镜像，用唯一 tag 解析不可变 digest，不依赖 `az acr build --no-wait` 返回 run ID。
+2. Portal、CloudCLI、copilot-api 的检查/测试各做一次；CloudCLI 后端只编译一次。构建前后校验冻结输入未变。Portal 镜像 tag 包含完整 main SHA 和唯一构建 ID，解析不可变 digest；发布后核对镜像内 `/api/version`，不能只相信外部报告。
 3. 对两个预编译包签名，校验后发布到已有 `session-data/node-updates`，最后原子更新 catalog。签名私钥只存在构建机 `~/.config/codey-node-release-signing/`，不进 ACA/Git/节点。当前四节点已验证的矩阵是 CloudCLI Node 22/24、gateway Node 22/24/26；新版本需重新核对，不能盲目扩大支持矩阵。
 4. 并行更新 ACA 与共享 UI。首次启用只额外添加两个 `PORTAL_NODE_UPDATE_*` 路径，复用既有 `/data` 挂载，不改网络/身份/其他配置；后续保留。未绑定的既有节点通过 owner API 下载私密引导包，SSH 只安装独立 Python 升级器，并核对两个应用 PID 未变。使用健康的既有 Python 3.12+，`-I -S` 排除 CWD/PYTHONPATH/site 定制；诊断脚本也必须隔离并只加入已审核的模块目录，不从用户 HOME 隐式导入 `copy.py` 等文件。不修补/升级全局解释器。
 5. 用与页面相同的 owner API 预览并确认四台。第一台空闲上线者作为 canary；成功才放行其余，最多三台并发。只更新变化的组件；相同 lockfile/安装指纹复用依赖，否则锁定生产安装。包完全相同时不重启，但新签名发行版仍执行 Codey/Codex 真调用。失败只回退本次代码和版本标记，未知/API key 迁移不硬闯。

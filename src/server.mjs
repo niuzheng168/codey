@@ -30,6 +30,7 @@ import { VoiceRewriteService, resolveVoiceRewriteConfig } from "./voice-rewrite-
 import { ComposerCompletionService, resolveComposerCompletionConfig } from "./composer-completion-service.mjs";
 import { ComposerCompletionGateway } from "./composer-completion-gateway.mjs";
 import { CloudCliUi } from "./cloudcli-ui.mjs";
+import { publicBuildInfo, readBuildInfo } from "./build-info.mjs";
 import {
   createCloudCliGateway,
   resolveCloudCliGatewayConfig,
@@ -669,6 +670,11 @@ export function createPortalServer(options) {
         return;
       }
 
+      if (url.pathname === "/api/version") {
+        sendJson(res, 200, publicBuildInfo(options.buildInfo));
+        return;
+      }
+
       if (url.pathname === "/api/client-nodes") {
         if (!clientRelaySigningKey || clientRelaySigningKey.length < 32) {
           sendJson(res, 503, { error: "Node data access is not configured" });
@@ -1110,6 +1116,7 @@ async function main() {
   }) : null;
   if (settingsApi) settingsApi.machineSetup = machineSetup;
   const commonOptions = {
+    buildInfo: await readBuildInfo(),
     config,
     configPath,
     auth,

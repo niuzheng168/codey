@@ -19,6 +19,7 @@ from azure.storage.fileshare import ShareFileClient
 from builder import Builder
 from common import NODES, command, read, require, save
 from gateway_routes import PROOF_FILE, verify_published as verify_published_gateway
+from release_source import validate_source
 
 logging.disable(logging.CRITICAL)
 
@@ -152,8 +153,18 @@ class Portal:
                 "Served UI entry checksum mismatch")
         model_nodes = self.request.get("modelNodes", targets)
         models = self.models(model_nodes) if model_nodes else {"passed": True, "nodes": []}
-        return {"nodes": nodes, "codeyModels": models, "portalHealth": 200,
+        source = self.image_source(manifest) if manifest.get("images", {}).get("portal") else {}
+        return {**source, "nodes": nodes, "codeyModels": models, "portalHealth": 200,
                 "sharedUiEntryVerified": True, "allPublishedAssetsVerifiedDuringUpload": True}
+
+    def image_source(self, manifest):
+        source = validate_source(manifest.get("releaseSource"))
+        actual = self.http("/api/version").json()
+        require(actual.get("sourceCommit") == source["commit"] and actual.get("sourceTree") == source["tree"]
+                and actual.get("componentCommits") == source["submodules"]
+                and actual.get("sourceRef") == "refs/heads/main" and actual.get("sourceDirty") is False,
+                "Deployed Portal source SHA does not match the selected main release")
+        return {"sourceCommit": source["commit"], "sourceCommitVerified": True}
 
     def verify_portal(self):
         manifest = read(self.job / "manifest.json")
@@ -171,7 +182,7 @@ class Portal:
             html = self.http("/?view=sessions").text
             require(re.search(r'<button[^>]+data-portal-view="sessions"[^>]+\bhidden\b', html),
                     "Session History navigation is not hidden before hydration")
-        return {"portalHealth": 200, "sessionHistoryHidden": history_hidden,
+        return {**self.image_source(manifest), "portalHealth": 200, "sessionHistoryHidden": history_hidden,
                 "publicFilesVerified": len(manifest["publicSha256"]), "authenticatedPortalSession": True,
                 "nodeChecksPerformed": False, "realModelCalls": 0,
                 "deploymentContainers": ["portal"], "mcpDeployed": False,

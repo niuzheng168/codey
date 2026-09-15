@@ -1,0 +1,89 @@
+name: Deploy committed main to Codey Portal
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codey-production-portal
+  cancel-in-progress: false
+
+jobs:
+  portal:
+    # Explicit cutover: adding this workflow does not enable a production rollout.
+    if: github.ref == 'refs/heads/main' && vars.CODEY_DEPLOY_ENABLED == 'true'
+    runs-on: [self-hosted, linux, x64, codey-deploy]
+    environment: production
+    timeout-minutes: 30
+    steps:
+      - name: Checkout the triggering main commit and its recorded submodules
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+          token: ${{ secrets.CODEY_SOURCE_READ_TOKEN || github.token }}
+
+      - name: Prepare only external runtime configuration in the isolated CI checkout
+        env:
+          CODEY_RUNTIME_CONFIG_DIR: ${{ vars.CODEY_RUNTIME_CONFIG_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 - <<'PY'
+          import os, shutil, subprocess
+          from pathlib import Path
+          source = Path(os.environ["CODEY_RUNTIME_CONFIG_DIR"])
+          root = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          if not source.is_absolute() or not source.is_dir() or source.resolve().is_relative_to(root):
+              raise SystemExit("Configure an existing private runtime-config directory outside the CI checkout.")
+          for name in ("workspace-ui-publish.json", "cloudcli-tunnels.required.json", "nodes.aca.json", "cloudcli-nodes.aca.json",
+                       "node-data.aca.json", "codey-node-ca.pem"):
+              target = root / "config" / name
+              if not (source / name).is_file() or target.exists():
+                  raise SystemExit("Missing external configuration or occupied CI target: " + name)
+              subprocess.run(["git", "check-ignore", "--quiet", str(target)], cwd=root, check=True)
+              shutil.copyfile(source / name, target)
+              target.chmod(0o600)
+          PY
+          /opt/az/bin/python3 -I -c 'import azure.storage.fileshare, requests'
+          python3 -B skills/codey-deploy/scripts/test_release_source.py
+          python3 -B skills/codey-deploy/scripts/test_deploy.py
+
+      - name: Deploy the exact main SHA without changing source or version files
+        env:
+          CODEY_SOURCE_READ_TOKEN: ${{ secrets.CODEY_SOURCE_READ_TOKEN || github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          auth=$(printf 'x-access-token:%s' "$CODEY_SOURCE_READ_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
+          python3 skills/codey-deploy/scripts/deploy.py \
+            --workspace "$GITHUB_WORKSPACE" --remote-root "$GITHUB_WORKSPACE" \
+            --local-builder --scope portal --expected-portal-commit "$GITHUB_SHA" --apply
+          test -z "$(git status --porcelain --untracked-files=all --ignore-submodules=none)"
+
+      - name: Retain sanitized provenance and acceptance reports only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: codey-portal-${{ github.sha }}
+          if-no-files-found: ignore
+          retention-days: 30
+          path: |
+            artifacts/fast-*/report.json
+            artifacts/fast-*/manifest.json
+            artifacts/fast-*/source.json
+            artifacts/fast-*/release-source.json
+            artifacts/fast-*/validation.json
+            artifacts/fast-*/portal-verify_portal.json

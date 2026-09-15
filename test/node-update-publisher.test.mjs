@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { createNodeUpdateRelease } from "../scripts/publish-node-update.mjs";
 import { NodeUpdateCatalog, validateNodeRelease, verifyNodeRelease, releaseSupportsPlatform } from "../src/node-update-release.mjs";
 import { digest, jsonFile, packageFixture, packFixture } from "./codey-update-fixture.mjs";
+import { mainSource } from "./release-source-fixture.mjs";
 
 test("publisher verifies evidence/checksums and publishes immutable, monotonic, signed component releases", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "codey-publish-test-"));
@@ -22,7 +23,8 @@ test("publisher verifies evidence/checksums and publishes immutable, monotonic, 
   const checksum = createHash("sha256").update(bytes).digest("hex");
   const component = { version: "2.0.0", sourceCommit: "a".repeat(40), entrySha256: "b".repeat(64),
     archiveSha256: checksum, lockSha256: "c".repeat(64) };
-  const manifest = { release: "publisher-test-one", cloudcli: component, gateway: component };
+  const manifest = { release: "publisher-test-one", cloudcli: component, gateway: component,
+    releaseSource: mainSource({ cloudcli: component.sourceCommit, copilotApi: component.sourceCommit }) };
   const manifestPath = path.join(build, "manifest.json");
   await writeFile(manifestPath, JSON.stringify(manifest));
   for (const name of ["cloudcli.tar.gz", "gateway.tar.gz"]) await writeFile(path.join(build, name), bytes);
@@ -62,9 +64,15 @@ async function sharedPublisherFixture(t) {
   });
   const app = await packageFixture(path.join(root, "candidate"), "0.1.5");
   const build = JSON.parse(await readFile(path.join(app, "codey-build.json")));
+  build.sourceDirty = false;
+  build.releaseSource = mainSource({
+    commit: build.sourceCommit, cloudcli: build.cloudcli.commit,
+    copilotApi: build.copilotApi.commit, version: build.version,
+  });
+  await jsonFile(path.join(app, "codey-build.json"), build);
   const file = await packFixture(app, path.join(root, "codey-0.1.5.tgz"));
   const bytes = await readFile(file);
-  const source = { name: "codey", runtimePlatforms: build.runtimePlatforms,
+  const source = { name: "codey", runtimePlatforms: build.runtimePlatforms, releaseSource: build.releaseSource,
     artifact: { file: path.basename(file), size: bytes.length, sha256: digest(bytes) },
     codey: { version: build.version, commit: build.sourceCommit, lockSha256: build.lockSha256,
       entrySha256: digest(await readFile(path.join(app, "codey-build.json"))) } };
@@ -74,6 +82,27 @@ async function sharedPublisherFixture(t) {
   const options = { manifestPath, output: path.join(root, "feed"), privateKey: keys.privateKey, sequence: 1 };
   return { root, keys, app, build, file, bytes, source, manifestPath, options };
 }
+
+test("production signing refuses missing main proof, dirty packages and mismatched gitlinks before writing", async t => {
+  const f = await sharedPublisherFixture(t);
+  for (const releaseSource of [undefined, { ...f.source.releaseSource, sourceDirty: true },
+    { ...f.source.releaseSource, ref: "refs/heads/dev" },
+    { ...f.source.releaseSource, submodules: { ...f.source.releaseSource.submodules, cloudcli: "e".repeat(40) } }]) {
+    await jsonFile(f.manifestPath, { ...f.source, releaseSource });
+    await assert.rejects(createNodeUpdateRelease(f.options), /main|provenance/);
+    await assert.rejects(readFile(path.join(f.options.output, "catalog.json")), { code: "ENOENT" });
+  }
+  await jsonFile(path.join(f.app, "codey-build.json"), { ...f.build, sourceDirty: true });
+  await packFixture(f.app, f.file);
+  const bytes = await readFile(f.file);
+  const source = { ...f.source,
+    artifact: { ...f.source.artifact, sha256: digest(bytes), size: bytes.length },
+    codey: { ...f.source.codey, entrySha256: digest(await readFile(path.join(f.app, "codey-build.json"))) } };
+  await jsonFile(f.manifestPath, source);
+  await jsonFile(path.join(f.root, "validation.json"), { passed: true, artifactSha256: source.artifact.sha256 });
+  await assert.rejects(createNodeUpdateRelease(f.options), /main provenance/);
+  await assert.rejects(readFile(path.join(f.options.output, "catalog.json")), { code: "ENOENT" });
+});
 
 test("one Codey publication creates one artifact, signature and sequence for every supported runtime", async t => {
   const f = await sharedPublisherFixture(t);

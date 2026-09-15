@@ -11,6 +11,21 @@ from types import SimpleNamespace
 
 from common import archive_tree, canonical, read, release_name, require, safe_extract, save, sha
 from node import protected_hash
+from release_source import SOURCE_FILE, commits as source_commits
+
+MAIN_SOURCE = {
+    "schema": 1, "kind": "codey-main-source", "ref": "refs/heads/main",
+    "commit": "b" * 40, "tree": "d" * 40, "sourceDirty": False, "codeyVersion": "0.1.0",
+    "submodules": {"cloudcli": "a" * 40, "copilot-api": "c" * 40},
+}
+
+
+def committed_fixture(worker):
+    worker.source = worker.job / "source"
+    (worker.source / "portal").mkdir(parents=True, exist_ok=True)
+    save(worker.source / "portal" / SOURCE_FILE, MAIN_SOURCE)
+    save(worker.job / "release-source.json", MAIN_SOURCE)
+    save(worker.job / "source.json", source_commits(MAIN_SOURCE))
 
 
 class DeploymentSafety(unittest.TestCase):
@@ -226,6 +241,7 @@ class DeploymentSafety(unittest.TestCase):
             "verify_portal": {"portalHealth": 200, "nodeChecksPerformed": False},
         }
         with patch("deploy.phase", side_effect=lambda *_: nullcontext()), \
+                patch.object(worker, "pin_source", return_value=MAIN_SOURCE), \
                 patch.object(worker, "upload"), patch.object(worker, "finish"), \
                 patch.object(worker, "protected_local", side_effect=AssertionError("local state is out of scope")), \
                 patch.object(worker, "node_services", side_effect=AssertionError("node state is out of scope")), \
@@ -325,6 +341,7 @@ class DeploymentSafety(unittest.TestCase):
         public = b"frozen portal settings"
         save(worker.job / "manifest.json", {
             "scope": "portal",
+            "releaseSource": MAIN_SOURCE,
             "publicSha256": {"/settings": hashlib.sha256(public).hexdigest()},
             "features": {"sessionHistory": False},
         })
@@ -340,11 +357,18 @@ class DeploymentSafety(unittest.TestCase):
                 return SimpleNamespace(content=public, text=public.decode())
             if path == "/?view=sessions":
                 return SimpleNamespace(content=b"", text='<button data-portal-view="sessions" hidden>')
+            if path == "/api/version":
+                return SimpleNamespace(json=lambda: {
+                    "sourceCommit": MAIN_SOURCE["commit"], "sourceTree": MAIN_SOURCE["tree"],
+                    "sourceRef": MAIN_SOURCE["ref"], "sourceDirty": False,
+                    "componentCommits": MAIN_SOURCE["submodules"],
+                })
             return SimpleNamespace(content=b"ok", text="ok")
 
         worker.http = http
         result = worker.verify_portal()
-        self.assertEqual(paths, ["/api/health", "/settings", "/?view=sessions"])
+        self.assertEqual(paths, ["/api/health", "/settings", "/?view=sessions", "/api/version"])
+        self.assertTrue(result["sourceCommitVerified"])
         self.assertFalse(result["nodeChecksPerformed"])
         self.assertTrue(result["authenticatedPortalSession"])
         self.assertEqual(result["deploymentContainers"], ["portal"])
@@ -389,6 +413,11 @@ class DeploymentSafety(unittest.TestCase):
 
     def test_workspace_build_preserves_gateway_metadata_and_never_builds_it(self):
         from builder import Builder
+        # This test isolates component selection; real Git byte verification is
+        # exercised by test_release_source.py and the isolated build fixture.
+        source_check = patch("builder.verify_source_files")
+        source_check.start()
+        self.addCleanup(source_check.stop)
         worker = object.__new__(Builder)
         worker.root = self.root
         worker.job = self.root / "job"
@@ -406,7 +435,7 @@ class DeploymentSafety(unittest.TestCase):
         }}
         save(prior / "validation.json", {"passed": True})
         save(prior / "manifest.json", {"gateway": gateway})
-        save(worker.job / "source.json", {"cloudcli": "a" * 40})
+        committed_fixture(worker)
         (worker.job / "ui").mkdir()
         save(worker.job / "ui/latest-build.json", {"directory": "/isolated/ui"})
         with patch("builder.tempfile.TemporaryDirectory", return_value=nullcontext(str(self.root))) as temporary, \
@@ -463,6 +492,7 @@ class DeploymentSafety(unittest.TestCase):
                 )
                 states = [{}] * busy_at + [RuntimeError("A native Codex task is still active")]
                 with patch("deploy.phase", side_effect=lambda *_: nullcontext()), \
+                        patch.object(worker, "pin_source", return_value=MAIN_SOURCE), \
                         patch.object(worker, "protected_local", return_value={}), \
                         patch.object(worker, "node_services", return_value={}), \
                         patch.object(worker, "upload"), patch.object(worker, "idle") as idle, \
@@ -505,7 +535,8 @@ class DeploymentSafety(unittest.TestCase):
         artifact = worker.job / "cloudcli.tar.gz"
         artifact.write_bytes(b"already-reviewed-artifact")
         manifest = {"scope": "workspace", "components": ["cloudcli"], "commits": {"cloudcli": "a" * 40},
-                    "cloudcli": {"archiveSha256": sha(artifact)}}
+                    "releaseSource": MAIN_SOURCE, "cloudcli": {"archiveSha256": sha(artifact)}}
+        committed_fixture(worker)
         save(worker.job / "manifest.json", manifest)
         save(worker.job / "validation.json", {"passed": True})
         with patch.object(worker, "verify_aca_unchanged", return_value={"unchanged": True}), \
@@ -528,12 +559,16 @@ class DeploymentSafety(unittest.TestCase):
         worker.args = SimpleNamespace(builder="westus2")
         worker.nodes = ("zhn-a100",)
         worker.report = {"previousAttempts": [{}]}
+        worker.main_source = MAIN_SOURCE
         source = self.root / "node-updater"
         source.mkdir()
         for name in ["updater.py", "engine.py", "probe.mjs", "install.py", "UPGRADE.md"]:
             (source / name).write_text("reviewed code, no credentials")
-        with patch.object(worker, "upload"), patch.object(worker, "install_updater", return_value={"node": "zhn-a100"}) as install:
+        with patch("deploy.git", return_value=b"committed code, no credentials") as git_read, \
+                patch.object(worker, "upload"), patch.object(worker, "install_updater", return_value={"node": "zhn-a100"}) as install:
             result = worker.refresh_reviewed_updater()
+        self.assertTrue(all(call.args[2].startswith(MAIN_SOURCE["commit"] + ":node-updater/")
+                            for call in git_read.call_args_list))
         self.assertEqual(install.call_count, 1)
         row = install.call_args.args[0]
         self.assertEqual(row["node"], "zhn-a100")
@@ -542,6 +577,8 @@ class DeploymentSafety(unittest.TestCase):
         with zipfile.ZipFile(worker.job / "reviewed-updater-source-1.zip") as archive:
             self.assertEqual(len(archive.namelist()), 5)
             self.assertNotIn("codey-updater/config.json", archive.namelist())
+            self.assertTrue(all(archive.read(name) == b"committed code, no credentials"
+                                for name in archive.namelist()))
 
     def test_aca_reconciliation_accepts_only_a_ready_metadata_only_restart(self):
         from builder import Builder
@@ -555,7 +592,8 @@ class DeploymentSafety(unittest.TestCase):
         artifact = worker.job / "cloudcli.tar.gz"
         artifact.write_bytes(b"reviewed")
         save(worker.job / "manifest.json", {"scope": "workspace", "components": ["cloudcli"],
-             "cloudcli": {"archiveSha256": sha(artifact)}, "commits": {}})
+             "cloudcli": {"archiveSha256": sha(artifact)}, "commits": {}, "releaseSource": MAIN_SOURCE})
+        committed_fixture(worker)
         save(worker.job / "validation.json", {"passed": True})
         old = {"provisioningState": "Succeeded", "latestRevisionName": "old", "latestReadyRevisionName": "old",
                "template": {"revisionSuffix": "old", "containers": [{"image": "same-digest"}]},
@@ -592,7 +630,7 @@ class DeploymentSafety(unittest.TestCase):
             worker.az(["storage", "account", "keys", "list"])
             self.assertIsNone(run.call_args.kwargs["log"])
 
-    def test_reviewed_snapshot_preserves_real_index_head_and_dirty_files(self):
+    def test_disabled_snapshot_does_not_touch_real_index_head_or_dirty_files(self):
         from common import command
         from deploy import Deploy
         repository = self.root / "repository"
@@ -610,21 +648,42 @@ class DeploymentSafety(unittest.TestCase):
         file.write_text("after\n")
         (repository / "public/portal-features.js").write_text("export const enabled = false;\n")
         (repository / "README.md").write_text("Reviewed Portal documentation.\n")
+        (repository / "packages/codey/lib").mkdir(parents=True)
+        (repository / "packages/codey/lib/setup.mjs").write_text("Reviewed onboarding code.\n")
         worker = object.__new__(Deploy)
         worker.root = repository
         worker.job = self.root / "snapshot-job"
         worker.job.mkdir()
-        result = worker.freeze_portal()
-        self.assertEqual(result["baseCommit"], head)
-        self.assertFalse(result["commitCreated"])
-        self.assertFalse(result["pushed"])
+        with self.assertRaisesRegex(RuntimeError, "disabled"):
+            worker.freeze_portal()
         self.assertEqual(index, sha(repository / ".git/index"))
         self.assertEqual(head, command(["git", "rev-parse", "HEAD"], cwd=repository)[0])
         self.assertEqual(file.read_text(), "after\n")
-        safe_extract(worker.job / "portal-reviewed.tar.gz", self.root / "snapshot")
-        self.assertEqual((self.root / "snapshot/public/app.js").read_text(), "after\n")
-        self.assertTrue((self.root / "snapshot/public/portal-features.js").is_file())
-        self.assertEqual((self.root / "snapshot/README.md").read_text(), "Reviewed Portal documentation.\n")
+        self.assertEqual(list(worker.job.iterdir()), [])
+
+    def test_both_controller_and_worker_refuse_the_old_uncommitted_snapshot_escape_hatch(self):
+        import sys
+        from builder import Builder
+        from deploy import Deploy, arguments
+        with patch.object(sys, "argv", ["deploy.py", "--reviewed-working-tree"]), \
+                self.assertRaises(SystemExit):
+            arguments()
+        with self.assertRaisesRegex(RuntimeError, "disabled"):
+            Deploy(SimpleNamespace(reviewed_working_tree=True))
+        with self.assertRaisesRegex(RuntimeError, "forbidden"):
+            Builder({"portalSnapshot": {"kind": "reviewed-working-tree"}})
+
+    def test_activation_rejects_unproven_or_mutated_source_before_contacting_azure(self):
+        from builder import Builder
+        worker = object.__new__(Builder)
+        worker.job = self.root / "job"
+        worker.job.mkdir()
+        worker.request = {}
+        committed_fixture(worker)
+        save(worker.source / "portal" / SOURCE_FILE, {**MAIN_SOURCE, "commit": "e" * 40})
+        with patch.object(worker, "app", side_effect=AssertionError("No Azure side effects")):
+            with self.assertRaisesRegex(RuntimeError, "provenance changed"):
+                worker.activate()
 
 
 if __name__ == "__main__":

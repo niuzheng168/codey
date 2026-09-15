@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, open, realpath } from "node:fs/promises";
 import path from "node:path";
+import { validateReleaseSource } from "./release-source.mjs";
 
 // Shared by the single-build packager and Portal's authenticated UI host.
 export const UI_ASSET_PREFIX = "/cloudcli-ui/";
@@ -56,6 +57,7 @@ export function validateUiManifest(value) {
     throw new Error("Unsupported workspace UI package");
   }
   validateUiRelease(value.release);
+  if (value.releaseSource !== undefined) validateReleaseSource(value.releaseSource);
   if (value.assetBase !== `${UI_ASSET_PREFIX}${value.release}/` ||
       typeof value.cloudCliVersion !== "string" || !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(value.cloudCliVersion) ||
       !HASH_PATTERN.test(value.sourceSha256 || "") || !value.files || Array.isArray(value.files)) {

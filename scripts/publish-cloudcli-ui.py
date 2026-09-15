@@ -6,6 +6,7 @@ writer lock and atomic active.json rename retain older releases for open tabs.
 import argparse
 import datetime
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -17,6 +18,10 @@ import uuid
 
 logging.disable(logging.CRITICAL)
 PROJECT = Path(__file__).resolve().parent.parent
+_source_spec = importlib.util.spec_from_file_location(
+    "codey_ui_release_source", PROJECT / "skills/codey-deploy/scripts/release_source.py")
+release_source = importlib.util.module_from_spec(_source_spec)
+_source_spec.loader.exec_module(release_source)
 MARKER = b'{"schema":1,"kind":"codey-cloudcli-ui-store"}\n'
 RELEASE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
@@ -85,6 +90,8 @@ class LocalStore:
 
 
 class AzureStore:
+    production = True
+
     def __init__(self, config):
         from azure.storage.fileshare import ShareClient
         from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
@@ -209,6 +216,8 @@ def active_descriptor(raw):
 
 def publish_package(store, directory, expected_current):
     package, manifest, manifest_bytes, verified = read_package(directory)
+    if getattr(store, "production", False):
+        release_source.validate_source(manifest.get("releaseSource"))
     expected = None if expected_current == "none" else expected_current
     if expected is not None and not RELEASE.fullmatch(expected):
         raise PublishError("INVALID_EXPECTED_CURRENT")
@@ -315,6 +324,7 @@ def main():
     parser.add_argument("--package", help="Previously built package directory; omit to build and test once")
     parser.add_argument("--apply", action="store_true", help="Actually publish; default is offline dry-run")
     parser.add_argument("--expected-current", help="Current release ID, or 'none' for the first publication")
+    parser.add_argument("--source-commit", help="Expected parent main SHA for a new production UI build")
     args = parser.parse_args()
     if args.apply and args.expected_current is None:
         parser.error("--apply requires --expected-current RELEASE (or none)")
@@ -322,8 +332,13 @@ def main():
     directory = args.package
     if not directory:
         print("Building and testing one shared Workspace UI package...", flush=True)
-        directory = node_command(["--test"])["directory"]
+        directory = node_command(["--test", *(["--production"] if config else []),
+                                  *(["--source-commit", args.source_commit] if args.source_commit else [])])["directory"]
     _, manifest, _, verified = read_package(directory)
+    if config and args.apply:
+        source = release_source.validate_source(manifest.get("releaseSource"))
+        if args.source_commit and source["commit"] != args.source_commit:
+            raise PublishError("UI_SOURCE_COMMIT_MISMATCH")
     if not args.apply:
         print(json.dumps({
             "dryRun": True, "azureRequests": 0, "nodeDeployments": 0,

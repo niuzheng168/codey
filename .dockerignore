@@ -3,6 +3,7 @@
 !package-lock.json
 !README.md
 !Dockerfile
+!codey-source.json
 !public/**
 public/downloads/**
 !src/**
