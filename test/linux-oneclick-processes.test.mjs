@@ -149,6 +149,8 @@ test("Codey PATH setup preserves dotfile symlinks/settings and is idempotent for
   const original = 'export CODEY_TEST_SETTING="keep this user setting"'; // No final newline.
   await writeFile(profile, original, { mode: 0o640 });
   await writeFile(target, original, { mode: 0o640 });
+  // Set the fixture's initial permissions independently of a private CI umask.
+  await Promise.all([profile, target].map(file => chmod(file, 0o640)));
   await symlink(target, bashrc);
   await f.install();
   const before = await Promise.all([profile, bashrc].map(file => readFile(file, "utf8")));
