@@ -20,6 +20,30 @@ function Assert-UpdaterTask {
         $actions[0].Arguments -eq (Join-CodeyArguments @($config.nodeExe, $agentFile)) -and
         $actions[0].WorkingDirectory -eq $Binding.directory) 'Existing updater task is not owned by this installation.'
 }
+function Test-UpdaterCurrent {
+    param($Task, $Binding, $Saved, $Wanted, $Files)
+    if (-not $Task -or -not $Binding -or -not $Saved -or -not $Task.Enabled -or $Task.State -ne 4 -or
+        -not $Binding.PSObject.Properties['source'] -or
+        @($Binding.source.PSObject.Properties).Count -ne @($Files.PSObject.Properties).Count -or
+        @($Saved.PSObject.Properties).Count -ne @($Wanted.PSObject.Properties).Count) { return $false }
+    foreach ($field in $Wanted.PSObject.Properties) {
+        if (-not $Saved.PSObject.Properties[$field.Name] -or $Saved.($field.Name) -cne $field.Value) { return $false }
+    }
+    try {
+        Assert-UpdaterTask $Task $Binding
+        $directory = Assert-HomePath $Binding.directory $owner.Home
+        $hostFile = Assert-HomePath $Binding.host $owner.Home
+        if ($hostFile -ne (Join-Path $directory 'codey-updater-host.exe') -or
+            (Get-UpdateHash $hostFile) -ne $Binding.hostSha256) { return $false }
+        foreach ($entry in $Files.PSObject.Properties) {
+            if (-not $Binding.source.PSObject.Properties[$entry.Name] -or
+                $Binding.source.($entry.Name) -cne $entry.Value) { return $false }
+            $file = Assert-HomePath (Join-Path $directory $entry.Name.Replace('/', '\')) $owner.Home
+            if ((Get-UpdateHash $file) -ne $entry.Value) { return $false }
+        }
+        return $true
+    } catch { return $false }
+}
 function Register-UpdaterTask {
     param($Binding)
     $scheduler = Get-CodeyTaskFolder
@@ -83,6 +107,7 @@ $scheduler = Get-CodeyTaskFolder
 $existing = @($scheduler.Folder.GetTasks(1) | Where-Object Name -eq $taskName)
 Require-Update (-not $existing.Count -or $previous) 'An unrecognized updater task already exists.'
 if ($existing.Count) { Assert-UpdaterTask $existing[0] $previous }
+$saved = $null
 if (Test-Path -LiteralPath $agentFile) {
     $saved = Read-UpdateJson $agentFile
     Require-Update ($saved.platform -eq 'windows-x64' -and $saved.nodeId -eq $agentConfig.nodeId -and $saved.ownerId -eq $agentConfig.ownerId -and
@@ -90,8 +115,9 @@ if (Test-Path -LiteralPath $agentFile) {
     if ($saved.minimumSequence -gt $agentConfig.minimumSequence) { $agentConfig.minimumSequence = $saved.minimumSequence }
 }
 Require-Update (-not (Test-Path -LiteralPath (Join-Path $private 'pending.json')) -and
-    -not (Test-Path -LiteralPath (Join-Path $owner.Home '.local\share\codey-local-update\active.json'))) `
-    'Finish/recover the current update before installing or replacing its agent.'
+    -not (Test-Path -LiteralPath (Join-Path $owner.Home '.local\share\codey-local-update\active.json')) -and
+    -not (Test-Path -LiteralPath (Join-Path $private 'stop.json'))) `
+    'Finish/recover the current update or agent stop before installing or replacing its agent.'
 @{ nodeId = $config.nodeId; platform = 'windows-x64'; version = $version; task = $taskName
     applicationServicesRestarted = $false; mode = $(if ($Apply) { 'apply' } else { 'check' })
     scope = 'Independent owner-confirmed signed updater only; no setup, tool update, login or model calls.' } | ConvertTo-Json
@@ -104,6 +130,10 @@ $guardPath = Assert-CodeyPath (Join-Path $private 'installer.lock') $private
 $maintenance = [IO.FileStream]::new($guardPath, [IO.FileMode]::OpenOrCreate,
     [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
 try {
+if ($existing.Count -and (Test-UpdaterCurrent $existing[0] $previous $saved $agentConfig $manifest.files)) {
+    Write-Output 'WINDOWS_UPDATER_ALREADY_CURRENT_NO_RESTART'
+    return
+}
 $oldAgentBytes = if (Test-Path -LiteralPath $agentFile) { [IO.File]::ReadAllBytes($agentFile) } else { $null }
 $oldBindingBytes = if (Test-Path -LiteralPath $bindingFile) { [IO.File]::ReadAllBytes($bindingFile) } else { $null }
 $oldTaskXml = if ($existing.Count) { [string]$existing[0].Definition.XmlText } else { $null }

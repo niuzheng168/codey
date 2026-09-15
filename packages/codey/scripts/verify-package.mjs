@@ -4,6 +4,7 @@ for (const name of [
   "npm-shrinkwrap.json", "codey-build.json", "dist-server/server/index.js",
   "dist/index.html", "gateway/main.js", "pages/index.html", "lib/codex-sdk/index.js",
   "lib/setup.mjs", "onboarding/scripts/install.sh", "onboarding/templates/a100-models.json",
+  "onboarding/scripts/install-devtunnel-health.sh", "onboarding/scripts/linux-devtunnel-health.mjs",
   "lib/package-info.mjs", "lib/doctor.mjs",
   "lib/update.mjs", "lib/update-files.mjs", "lib/update-archive.mjs",
   "lib/update-probe.mjs", "lib/update-service.py", "lib/update-windows.ps1",

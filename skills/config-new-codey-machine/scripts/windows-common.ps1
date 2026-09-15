@@ -140,7 +140,7 @@ function Initialize-CodeyJob {
 function Invoke-CodeyProcess {
     param([string]$Executable, [string[]]$Arguments = @(), [hashtable]$Environment = @{},
         [string]$WorkingDirectory = $PWD.Path, [int]$TimeoutSeconds = 300,
-        [string]$InputText = '', [switch]$Interactive, [switch]$AllowFailure)
+        [string]$InputText = '', [switch]$Interactive, [switch]$AllowFailure, [string]$Activity = '')
     if (-not [IO.Path]::IsPathRooted($Executable) -or
         -not (Test-Path -LiteralPath $Executable -PathType Leaf)) { throw 'Missing absolute native executable.' }
     Initialize-CodeyJob
@@ -174,7 +174,16 @@ function Invoke-CodeyProcess {
             $process.StandardInput.BaseStream.Write($inputBytes, 0, $inputBytes.Length)
             $process.StandardInput.Close()
         }
-        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) { throw 'Native command timed out; its owned process tree was stopped.' }
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            $remaining = [Math]::Max(1, $TimeoutSeconds * 1000 - $timer.ElapsedMilliseconds)
+            if ($process.WaitForExit([int][Math]::Min(5000, $remaining))) { break }
+            if ($timer.ElapsedMilliseconds -ge $TimeoutSeconds * 1000) {
+                throw 'Native command timed out; its owned process tree was stopped.'
+            }
+            # Report only a caller-supplied activity, not potentially secret CLI output.
+            if ($Activity) { Write-Host "[progress] $Activity ($([int]$timer.Elapsed.TotalSeconds)s)" }
+        } while ($true)
         $process.WaitForExit()
         $result = [pscustomobject]@{
             ExitCode = $process.ExitCode
@@ -185,6 +194,9 @@ function Invoke-CodeyProcess {
             # Never echo command arguments, provider keys, tokens or raw CLI output.
             throw "Native command failed ($([IO.Path]::GetFileName($Executable)), exit $($result.ExitCode))."
         }
+        if ($Activity -and $result.ExitCode -eq 0) {
+            Write-Host "[done] $Activity ($([int]$timer.Elapsed.TotalSeconds)s)"
+        }
         return $result
     } finally { $job.Dispose(); $process.Dispose() }
 }
@@ -193,6 +205,11 @@ function Get-CodeyDownload {
     param([string]$Url, [string]$Destination, [string]$Sha256)
     if (([uri]$Url).Scheme -ne 'https') { throw 'Only official HTTPS downloads are allowed.' }
     $full = Assert-CodeyPath $Destination
+    if ($Sha256 -and (Test-Path -LiteralPath $full -PathType Leaf) -and
+        (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash -eq $Sha256) {
+        Protect-CodeyPath $full
+        return
+    }
     $temporary = "$full.$([Guid]::NewGuid().ToString('N')).part"
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12

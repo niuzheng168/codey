@@ -24,6 +24,7 @@ RUNTIME_PLATFORMS = ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]
 MACHINE_SKILL_FILES = [
     "SKILL.md", "agents/openai.yaml", "dependencies.json", "dependencies.windows.json", "dependencies.macos.json",
     "scripts/install.sh", "scripts/install.ps1", "scripts/install-macos.py", "scripts/macos-service.py",
+    "scripts/install-devtunnel-health.sh", "scripts/linux-devtunnel-health.mjs",
     "scripts/registration.mjs", "scripts/updater-bootstrap.mjs", "scripts/windows-common.ps1", "scripts/windows-process.cs",
     "scripts/windows-service.ps1", "scripts/windows-runtime.mjs", "scripts/windows-command.ps1",
     "templates/a100-models.json",
@@ -380,6 +381,7 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     run([node / "bin/node", source_root / "scripts/build-native-updaters.mjs", runtime / "updater/native"], env=env)
     copy_required(source_root / "skills/config-new-codey-machine", runtime / "onboarding", [
         "scripts/install.sh", "scripts/registration.mjs", "templates/a100-models.json", "dependencies.json",
+        "scripts/install-devtunnel-health.sh", "scripts/linux-devtunnel-health.mjs",
     ])
     if setup_config is not None:
         (runtime / "onboarding/setup.json").write_text(json.dumps(setup_config, indent=2) + "\n")

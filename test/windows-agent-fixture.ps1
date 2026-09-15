@@ -254,4 +254,56 @@ $script:otherTask.Enabled = $false
 Expect-BeforeRefusal 'Disabled other task'
 $script:otherTask.Enabled = $true
 Assert-AgentBefore $before
-@{ passed = $true; nativeServices = $false; modelCalls = 0; hostCompiled = $true; hostEnvironmentVerified = $true } | ConvertTo-Json -Compress
+
+# An unchanged running agent must not be recompiled or restarted; drift must
+# still select the normal checked installation path.
+$script:owner | Add-Member NoteProperty Home $Root -Force
+$agentDirectory = Join-Path $Root 'current-agent'
+$null = [IO.Directory]::CreateDirectory($agentDirectory)
+$hostFile = Join-Path $agentDirectory 'codey-updater-host.exe'
+$sourceFile = Join-Path $agentDirectory 'agent.mjs'
+[IO.File]::WriteAllText($hostFile, 'fixture-host')
+[IO.File]::WriteAllText($sourceFile, 'fixture-agent')
+function Get-UpdateHash($File) { (Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLowerInvariant() }
+function Assert-HomePath($File, $OwnerHome) {
+    Check ($File.StartsWith($OwnerHome) -and -not $script:unownedAgent) 'Unowned agent path.'
+    return $File
+}
+$script:unownedAgent = $false
+$files = [pscustomobject]@{ 'agent.mjs' = (Get-UpdateHash $sourceFile) }
+$binding = [pscustomobject]@{ directory = $agentDirectory; host = $hostFile
+    hostSha256 = (Get-UpdateHash $hostFile); source = $files }
+$script:definition.Actions.Clear()
+$registered = Register-UpdaterTask $binding
+$registered | Add-Member NoteProperty Enabled $true
+$registered | Add-Member NoteProperty State 4
+$wanted = [pscustomobject]@{ credential = 'fixture-credential'; minimumSequence = 12 }
+$saved = $wanted | ConvertTo-Json | ConvertFrom-Json
+Check (Test-UpdaterCurrent $registered $binding $saved $wanted $files) 'Unchanged agent was not reused.'
+$saved.credential = 'other-credential'
+Check (-not (Test-UpdaterCurrent $registered $binding $saved $wanted $files)) 'Changed credentials were skipped.'
+$saved.credential = $wanted.credential
+$saved.minimumSequence = 11
+Check (-not (Test-UpdaterCurrent $registered $binding $saved $wanted $files)) 'Changed sequence floor was skipped.'
+$saved.minimumSequence = 12
+$changed = [pscustomobject]@{ 'agent.mjs' = ('f' * 64) }
+Check (-not (Test-UpdaterCurrent $registered $binding $saved $wanted $changed)) 'New agent source was skipped.'
+[IO.File]::WriteAllText($sourceFile, 'tampered')
+Check (-not (Test-UpdaterCurrent $registered $binding $saved $wanted $files)) 'Corrupted installed agent was reused.'
+[IO.File]::WriteAllText($sourceFile, 'fixture-agent')
+[IO.File]::WriteAllText($hostFile, 'tampered')
+Check (-not (Test-UpdaterCurrent $registered $binding $saved $wanted $files)) 'Corrupted host was reused.'
+[IO.File]::WriteAllText($hostFile, 'fixture-host')
+$registered.Enabled = $false
+Check (-not (Test-UpdaterCurrent $registered $binding $saved $wanted $files)) 'Disabled agent was skipped.'
+$registered.Enabled = $true; $registered.State = 3
+Check (-not (Test-UpdaterCurrent $registered $binding $saved $wanted $files)) 'Stopped agent was skipped.'
+$registered.State = 4; $script:unownedAgent = $true
+Check (-not (Test-UpdaterCurrent $registered $binding $saved $wanted $files)) 'Unowned agent was reused.'
+$script:unownedAgent = $false
+$script:definition.Actions[0].Path = 'C:\unrelated.exe'
+Check (-not (Test-UpdaterCurrent $registered $binding $saved $wanted $files)) 'Foreign task was reused.'
+$script:definition.Actions[0].Path = $hostFile
+Check (Test-UpdaterCurrent $registered $binding $saved $wanted $files) 'Restored matching agent failed no-op checks.'
+@{ passed = $true; nativeServices = $false; modelCalls = 0; hostCompiled = $true
+    hostEnvironmentVerified = $true; unchangedAgentReused = $true } | ConvertTo-Json -Compress

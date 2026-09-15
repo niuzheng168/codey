@@ -121,6 +121,7 @@ class CodeyPackageTests(unittest.TestCase):
             "lib/codex-sdk/index.js",
             "updater/install.py", "updater/engine.py", "updater/updater.py", "updater/probe.mjs",
             "onboarding/scripts/install.sh", "onboarding/scripts/registration.mjs", "onboarding/templates/a100-models.json",
+            "onboarding/scripts/install-devtunnel-health.sh", "onboarding/scripts/linux-devtunnel-health.mjs",
         ):
             file = self.runtime / name
             file.parent.mkdir(parents=True, exist_ok=True)

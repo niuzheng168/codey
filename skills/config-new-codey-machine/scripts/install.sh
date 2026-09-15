@@ -133,6 +133,8 @@ MODELS_SOURCE="$ROOT/templates/a100-models.json"
   die "Package metadata is incomplete."
 [[ -f "$MODELS_SOURCE" && -f "$ROOT/scripts/registration.mjs" ]] ||
   die "models.json template or registration helper is missing."
+[[ -f "$ROOT/scripts/install-devtunnel-health.sh" && -f "$ROOT/scripts/linux-devtunnel-health.mjs" ]] ||
+  die "DevTunnel health monitoring helpers are missing."
 (cd "$ASSETS" && sha256sum -c SHA256SUMS)
 
 HOME_DIR="$HOME"
@@ -296,6 +298,8 @@ setTimeout(() => process.exit(1), 5000).unref();
 NODE
 
 log 1 "Install and configure private GitHub DevTunnel"
+stop_user_unit codey-devtunnel-health.timer
+stop_user_unit codey-devtunnel-health.service
 stop_user_unit codey-devtunnel-renew.timer
 stop_user_unit codey-devtunnel-renew.service
 stop_user_unit codey-devtunnel.service
@@ -783,9 +787,11 @@ for unit in codey-copilot-api.service codey-cloudcli.service codey-devtunnel.ser
   systemctl --user enable --now "$unit"
 done
 
+bash "$ROOT/scripts/install-devtunnel-health.sh" "$NODE" "$DEVTUNNEL" "$QUALIFIED_TUNNEL"
+
 TOKEN_FILE="$STATE_ROOT/connect-token.json"
 for unit in codey-copilot-api.service codey-cloudcli.service codey-devtunnel.service \
-  codey-devtunnel-renew.timer codey-node-updater.service; do
+  codey-devtunnel-renew.timer codey-devtunnel-health.timer codey-node-updater.service; do
   [[ "$(systemctl --user is-enabled "$unit")" == enabled ]] || die "$unit is not enabled."
   [[ "$(systemctl --user is-active "$unit")" == active ]] || die "$unit is not active."
 done

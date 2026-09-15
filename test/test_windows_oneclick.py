@@ -101,7 +101,9 @@ def make_codey_tgz(root, shared=True):
 def fixture(root, shared=True):
     package = root / "package"
     shutil.copytree(SKILL / "scripts", package / "scripts")
-    shutil.copy2(SKILL / "dependencies.windows.json", package / "dependencies.json")
+    pins = json.loads((SKILL / "dependencies.windows.json").read_text())
+    pins["devTunnel"]["sha256"] = hashlib.sha256(b"fixture-only-not-executable").hexdigest()
+    write_json(package / "dependencies.json", pins)
     shutil.copytree(SKILL / "templates", package / "templates")
     runtime, artifact, built = make_codey_tgz(root, shared)
     assets = package / "assets"
@@ -155,10 +157,30 @@ def fixture(root, shared=True):
     return runtime
 
 
-@unittest.skipUnless(os.environ.get("CODEY_TEST_PWSH") or shutil.which("pwsh"), "Portable PowerShell is optional")
+POWERSHELLS = list(dict.fromkeys(filter(None, [
+    os.environ.get("CODEY_TEST_PWSH"), shutil.which("pwsh"),
+    shutil.which("powershell.exe") if os.name == "nt" else None,
+])))
+
+
+@unittest.skipUnless(POWERSHELLS, "Portable PowerShell is optional")
 class PortablePowerShellTests(unittest.TestCase):
+    def test_system_certificate_verified_cache_and_secret_safe_progress(self):
+        for shell in POWERSHELLS:
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory(prefix="codey-simple-") as directory:
+                result = subprocess.run([
+                    shell, "-NoProfile", "-NonInteractive", "-File",
+                    str(ROOT / "test/windows-simplified-fixture.ps1"), "-Root", directory,
+                    "-Source", str(SKILL / "scripts"), "-Node", shutil.which("node"),
+                ], capture_output=True, text=True, timeout=45)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                proof = json.loads(result.stdout.strip().splitlines()[-1])
+                self.assertTrue(proof["passed"] and proof["certificate"] and proof["tls"]
+                                and proof["cache"] and proof["secretSafeProgress"])
+                self.assertFalse(proof["nativeServices"])
+
     def test_shared_and_legacy_windows_metadata_and_registration_reexport(self):
-        shell = os.environ.get("CODEY_TEST_PWSH") or shutil.which("pwsh")
+        shell = POWERSHELLS[0]
         for shared in (True, False):
             with self.subTest(shared=shared), tempfile.TemporaryDirectory(prefix="codey-pwsh-package-") as directory:
                 root = Path(directory)

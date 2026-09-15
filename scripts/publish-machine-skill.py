@@ -140,6 +140,8 @@ def inspect_package(file):
                     bundled_setup = json.load(npm.extractfile("package/onboarding/setup.json"))
                     for required in ["package/lib/setup.mjs", "package/onboarding/scripts/install.sh",
                                      "package/onboarding/scripts/registration.mjs",
+                                     "package/onboarding/scripts/install-devtunnel-health.sh",
+                                     "package/onboarding/scripts/linux-devtunnel-health.mjs",
                                      "package/onboarding/templates/a100-models.json"]:
                         if not npm.getmember(required).isfile():
                             raise KeyError(required)

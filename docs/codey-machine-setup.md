@@ -44,7 +44,10 @@ powershell -NoProfile -File .\scripts\install.ps1 -Apply -NetworkApproved -Expec
 python3 -I -B scripts/install-macos.py --apply --network-approved --expected-computer "$(hostname)"
 ```
 
-Windows 需要外部非管理员 PowerShell 和 OpenSSL 3；macOS 需要原生 Python 3.12+、
+Windows 使用外部非管理员 PowerShell 和系统 .NET Framework 4.7.2+ 生成 TLS 证书，
+无需为证书安装 Git/OpenSSL。已校验的 Node/DevTunnel 下载可复用，正常运行且源码、
+凭据未变化的升级器不会重新编译/重启；耗时命令显示不含凭据的进度和用时。
+macOS 需要原生 Python 3.12+、
 GUI 登录会话，不使用 Rosetta/root。已有 Codex config/models 需另行批准
 `-ReplaceExisting` / `--replace-existing`；保留 auth/sessions，不终止无关服务或 Desktop。
 
@@ -124,7 +127,41 @@ Portal，部署时需显式提供 `codey setup --config <公开配置.json>`。
 3. 停止旧 Codex，从 OpenAI 官方 installer 更新或安装 latest，覆盖模型配置并做真实请求。
 4. 停止旧 CloudCLI，使用同一 npm 包启动 Workspace，并通过 Codex SDK 做真实请求。
 5. 安装包内签名 updater。
-6. 启用 systemd 用户服务、DevTunnel renew timer 和 user linger，验证异常退出自动恢复。
+6. 启用 systemd 用户服务、DevTunnel renew/health timer 和 user linger，验证异常退出与隧道失联自动恢复。
+
+### Linux 隧道进程存活但节点离线
+
+DevTunnel 的 host 进程可能在网络断线、重连鉴权失败后继续存活，此时
+`Restart=always` 不会触发。Linux 安装器额外启用
+`codey-devtunnel-health.timer`，每分钟通过 `devtunnel show --json` 检查**云端主机连接数**，
+不以进程存活或 Portal 升级器心跳代替隧道连通性。
+
+- 同一服务实例连续三次明确返回 `hostConnections: 0`，才只对
+  `codey-devtunnel.service` 请求 `try-restart`；不重启 Workspace、网关或 Codex。
+- 启动有两分钟宽限期，恢复尝试之间至少间隔十分钟；过密、过期或跨启动的样本不累积。
+- 服务被手动停止、存在待执行的服务操作、进程不匹配或检查期间实例改变时不恢复，
+  不覆盖管理员的停止/更新任务。定时服务不并发运行。
+- 网络超时、管理接口鉴权失败或无法识别的 JSON 是“无法确认”，不是离线证据：
+  清零连续失败计数，不自动登录、不生成 token、不输出 CLI 原始内容或凭据。
+  这与每六小时续期 Portal **connect token** 的任务独立。
+
+已有节点可仅安装监测，无需重新注册、升级应用或执行会停止 Codex 的完整 `setup`。
+从本仓库运行以下命令，参数必须与现有 `codey-devtunnel.service` 的 Node 工具环境、
+DevTunnel 稳定入口及私有隧道匹配（也可使用新 npm 包 `onboarding/scripts/` 下的同名脚本）：
+
+```bash
+bash skills/config-new-codey-machine/scripts/install-devtunnel-health.sh \
+  /absolute/path/to/node /absolute/path/to/devtunnel codey-NODE_ID.CLUSTER
+systemctl --user status codey-devtunnel-health.timer
+journalctl --user -u codey-devtunnel-health.service -n 20
+```
+
+只读检查可给已安装的 `~/.local/share/codey-machine/linux-devtunnel-health.mjs`
+传入 `DEVTUNNEL TUNNEL.CLUSTER STATE_FILE --check`，不会写状态或重启。
+故障计数及冷却时间保存在私有的
+`~/.local/state/codey-machine/devtunnel-health.json`。
+停用监测时运行 `systemctl --user disable --now codey-devtunnel-health.timer`，
+再 `systemctl --user stop codey-devtunnel-health.service`；不会停止隧道本身。
 
 ## 包内容
 

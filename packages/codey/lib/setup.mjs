@@ -81,6 +81,7 @@ export async function installedSetup(root, configFile, nodeVersion = process.ver
   }
   for (const name of [
     "onboarding/scripts/install.sh", "onboarding/scripts/registration.mjs", "onboarding/templates/a100-models.json",
+    "onboarding/scripts/install-devtunnel-health.sh", "onboarding/scripts/linux-devtunnel-health.mjs",
     "updater/install.py", "updater/updater.py", "updater/engine.py", "updater/probe.mjs",
   ]) {
     if (!(await stat(path.join(root, name))).isFile()) throw new Error(`Missing Codey setup file: ${name}`);

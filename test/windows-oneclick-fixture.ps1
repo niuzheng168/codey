@@ -105,7 +105,12 @@ function Get-CodeyOwner {
 }
 function Get-CodeyProcesses { param($OwnerSid); return $script:FixtureProcesses }
 function Get-CodeyListeners { return $script:FixtureListeners }
-function Get-CodeyOpenSsl { param($Explicit); return (Join-Path $Root 'openssl.exe') }
+function New-CodeyCertificate {
+    param($Node, $ServerName, $CertificateFile, $KeyFile)
+    $script:Calls.Add('tls')
+    [IO.File]::WriteAllText($KeyFile, 'fake-private-key')
+    [IO.File]::WriteAllText($CertificateFile, 'fake-public-cert')
+}
 function Set-CodeyUserModelKey { param($Key); $script:Calls.Add('user-environment'); Check ($Key.Length -eq 43) 'model key is locally generated' }
 function Install-CodeyTaskHost {
     param($Directory)
@@ -140,7 +145,7 @@ function Get-CodeyDownload {
 }
 function Invoke-CodeyProcess {
     param($Executable, $Arguments, $Environment = @{}, $WorkingDirectory, $TimeoutSeconds,
-        $InputText, [switch]$Interactive, [switch]$AllowFailure)
+        $InputText, [switch]$Interactive, [switch]$AllowFailure, $Activity)
     $leaf = [IO.Path]::GetFileName($Executable)
     $result = [pscustomobject]@{ ExitCode = 0; Stdout = ''; Stderr = '' }
     if ($leaf -eq 'devtunnel.exe') {
@@ -152,10 +157,6 @@ function Invoke-CodeyProcess {
                 @{ portNumber = 3001; protocol = 'https' }, @{ portNumber = 8443; protocol = 'https' })
             } | ConvertTo-Json -Depth 8)
         }
-    } elseif ($leaf -eq 'openssl.exe') {
-        $script:Calls.Add('tls')
-        [IO.File]::WriteAllText($Arguments[[array]::IndexOf($Arguments, '-keyout') + 1], 'fake-private-key')
-        [IO.File]::WriteAllText($Arguments[[array]::IndexOf($Arguments, '-out') + 1], 'fake-public-cert')
     } elseif ($leaf -eq 'powershell.exe') {
         if (-not $Environment.ContainsKey('CODEX_INSTALL_DIR')) {
             $script:Calls.Add('automatic-updater')
@@ -237,7 +238,7 @@ function Get-CodeyTaskFolder {
 }
 $invoke = @{
     DoApply = $true; ApprovedNetwork = $true; Replace = $true; ExpectedComputer = 'FIXTURE-PC'
-    RequestedCodexHome = ''; RequestedOpenSsl = ''
+    RequestedCodexHome = ''
 }
 $env:CODEX_HOME = ''
 $planArgs = $invoke.Clone(); $planArgs.DoApply = $false

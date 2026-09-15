@@ -15,8 +15,7 @@ param(
     [switch]$ReplaceExisting,
     [switch]$RepairServices,
     [string]$ExpectedComputerName = '',
-    [string]$CodexHome = '',
-    [string]$OpenSslExe = ''
+    [string]$CodexHome = ''
 )
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
 $ProgressPreference = 'SilentlyContinue'
@@ -112,23 +111,49 @@ function Read-CodeyWindowsPackage {
     }
 }
 
-function Get-CodeyOpenSsl {
-    param([string]$Explicit)
-    $candidates = @()
-    if ($Explicit) { $candidates += (Assert-CodeyPath $Explicit) }
-    else {
-        $command = Get-Command openssl.exe -CommandType Application -ErrorAction SilentlyContinue
-        if ($command) { $candidates += $command.Source }
-        $candidates += @((Join-Path $env:ProgramFiles 'Git\usr\bin\openssl.exe'),
-            (Join-Path $env:ProgramFiles 'Git\mingw64\bin\openssl.exe'))
-    }
-    foreach ($file in $candidates) {
-        if (Test-Path -LiteralPath $file -PathType Leaf) {
-            $version = Invoke-CodeyProcess $file @('version') -TimeoutSeconds 10 -AllowFailure
-            if ($version.ExitCode -eq 0 -and $version.Stdout -match '^OpenSSL 3\.') { return $file }
+function New-CodeyCertificate {
+    param([string]$Node, [string]$ServerName, [string]$CertificateFile, [string]$KeyFile)
+    if ($ServerName -notmatch '^n-[a-f0-9]{24}\.nodes\.codey\.internal$') { throw 'Invalid node certificate name.' }
+    # Use system cryptography in memory, not Git/OpenSSL or the Windows certificate store.
+    $rsa = [Security.Cryptography.RSA]::Create()
+    $certificate = $null
+    try {
+        $rsa.KeySize = 3072
+        if ($rsa -is [Security.Cryptography.RSACryptoServiceProvider]) { $rsa.PersistKeyInCsp = $false }
+        $request = [Security.Cryptography.X509Certificates.CertificateRequest]::new(
+            "CN=$ServerName", $rsa, [Security.Cryptography.HashAlgorithmName]::SHA256,
+            [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        $request.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new(
+            $false, $false, 0, $true))
+        $request.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new(
+            [Security.Cryptography.X509Certificates.X509KeyUsageFlags]'DigitalSignature, KeyEncipherment', $true))
+        $purposes = [Security.Cryptography.OidCollection]::new()
+        $null = $purposes.Add([Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.1'))
+        $request.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($purposes, $false))
+        $san = [Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
+        $san.AddDnsName($ServerName)
+        $request.CertificateExtensions.Add($san.Build($false))
+        $now = [DateTimeOffset]::UtcNow
+        $certificate = $request.CreateSelfSigned($now.AddMinutes(-5), $now.AddDays(365))
+        $parameters = $rsa.ExportParameters($true)
+        $jwk = @{ kty = 'RSA' }
+        $fields = @{ n = 'Modulus'; e = 'Exponent'; d = 'D'; p = 'P'; q = 'Q'; dp = 'DP'; dq = 'DQ'; qi = 'InverseQ' }
+        foreach ($name in $fields.Keys) {
+            $jwk[$name] = [Convert]::ToBase64String($parameters.($fields[$name])).TrimEnd('=').Replace('+', '-').Replace('/', '_')
         }
+        # Node performs the standard JWK -> PKCS#8 conversion. Private material
+        # travels only through stdin/stdout pipes, never arguments or log files.
+        $convert = 'const {createPrivateKey}=require("node:crypto"); const fs=require("node:fs");' +
+            'process.stdout.write(createPrivateKey({key:JSON.parse(fs.readFileSync(0,"utf8")),format:"jwk"}).export({type:"pkcs8",format:"pem"}));'
+        $key = (Invoke-CodeyProcess $Node @('-e', $convert) -InputText ($jwk | ConvertTo-Json -Compress) -TimeoutSeconds 20).Stdout
+        Write-CodeyFile $KeyFile $key
+        Write-CodeyFile $CertificateFile ("-----BEGIN CERTIFICATE-----`n" +
+            [Convert]::ToBase64String($certificate.RawData, [Base64FormattingOptions]::InsertLineBreaks) +
+            "`n-----END CERTIFICATE-----`n")
+    } finally {
+        if ($certificate) { $certificate.Dispose() }
+        $rsa.Dispose()
     }
-    throw 'OpenSSL 3 is required, as on Linux. Install Git for Windows or specify -OpenSslExe with its absolute path.'
 }
 
 function Get-CodeyListeners {
@@ -162,10 +187,13 @@ function Wait-CodeyPortsFree {
 
 function Wait-CodeyProbe {
     param($Config, [string]$ConfigPath, [string]$Operation)
-    for ($i = 0; $i -lt 30; $i++) {
+    $deadline = [DateTime]::UtcNow.AddMinutes(2)
+    for ($i = 0; $i -lt 30 -and [DateTime]::UtcNow -lt $deadline; $i++) {
+        $remaining = [Math]::Max(1, [Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalSeconds))
         $result = Invoke-CodeyProcess $Config.nodeExe @($Config.helperPath, $Operation, $ConfigPath) `
-            -WorkingDirectory $Config.releaseDirectory -TimeoutSeconds 40 -AllowFailure
+            -WorkingDirectory $Config.releaseDirectory -TimeoutSeconds ([Math]::Min(40, $remaining)) -AllowFailure
         if ($result.ExitCode -eq 0) { return }
+        Write-Host "[verify] Waiting for $Operation (attempt $($i + 1)/30; total limit 120s)"
         Start-Sleep -Seconds 2
     }
     throw "Windows $Operation verification failed; installation is not marked ready."
@@ -194,7 +222,7 @@ function Install-CodeyAutomaticUpdater {
         ) -WorkingDirectory $Config.ownerHome -TimeoutSeconds 60
         $null = Invoke-CodeyProcess $Config.powershellExe @(
             '-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $bootstrap 'install.ps1'), '-Apply'
-        ) -WorkingDirectory $Config.ownerHome -TimeoutSeconds 300
+        ) -WorkingDirectory $Config.ownerHome -TimeoutSeconds 300 -Activity 'Ensure automatic updater'
     } finally { Remove-Item -LiteralPath $bootstrap -Recurse }
 }
 
@@ -413,7 +441,7 @@ function Repair-CodeyWindowsServices {
                 npm_config_cache = Join-Path $Previous.runtimeRoot 'downloads\npm'
                 PATH = (Split-Path -Parent $node) + ';' + $env:PATH
                 NODE_USE_SYSTEM_CA = '1'; ELECTRON_SKIP_BINARY_DOWNLOAD = '1'; CI = 'true' } `
-            -WorkingDirectory $stage -TimeoutSeconds 1200
+            -WorkingDirectory $stage -TimeoutSeconds 1200 -Activity 'Stage Codey dependencies'
         $codey = Join-Path $prefix 'node_modules\codey'
         Assert-CodeyInstalledPackage $codey $Package $node
         $supervisor = Join-Path $stage 'supervisor'
@@ -484,7 +512,7 @@ function Repair-CodeyWindowsServices {
 
 function Invoke-CodeyWindowsInstall {
     param([bool]$DoApply, [bool]$ApprovedNetwork, [bool]$Replace, [string]$ExpectedComputer,
-        [string]$RequestedCodexHome, [string]$RequestedOpenSsl, [bool]$Repair = $false)
+        [string]$RequestedCodexHome, [bool]$Repair = $false)
     $owner = Get-CodeyOwner
     if ($DoApply -and (-not $ApprovedNetwork -or $ExpectedComputer -cne $owner.Computer)) {
         throw 'Apply requires -NetworkApproved and -ExpectedComputerName matching this computer exactly.'
@@ -576,7 +604,9 @@ function Invoke-CodeyWindowsInstall {
     if (($previous -or @($overwrites).Count -gt 0) -and -not $Replace) {
         throw 'Replacing this installation or existing Codex configuration requires -ReplaceExisting.'
     }
-    $openssl = Get-CodeyOpenSsl $RequestedOpenSsl
+    if (-not ('System.Security.Cryptography.X509Certificates.CertificateRequest' -as [type])) {
+        throw 'Windows certificate support requires .NET Framework 4.7.2 or newer. Update Windows; no Git/OpenSSL installation is needed.'
+    }
     $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($runtimeRoot))
     if ($drive.AvailableFreeSpace -lt 8GB) { throw 'At least 8 GiB of free space is required.' }
     if ($previous) {
@@ -606,10 +636,7 @@ function Invoke-CodeyWindowsInstall {
         $cache = Join-Path $runtimeRoot 'downloads'
         New-CodeyDirectory $cache
         $nodeZip = Join-Path $cache "node-$($package.Pins.node.version)-win-x64.zip"
-        if (-not (Test-Path -LiteralPath $nodeZip) -or
-            (Get-FileHash -LiteralPath $nodeZip -Algorithm SHA256).Hash -ne $package.Pins.node.sha256) {
-            Get-CodeyDownload $package.Pins.node.url $nodeZip $package.Pins.node.sha256
-        }
+        Get-CodeyDownload $package.Pins.node.url $nodeZip $package.Pins.node.sha256
         Expand-CodeyZip $nodeZip (Join-Path $release 'node')
         $node = Join-Path $release "node\node-v$($package.Pins.node.version)-win-x64\node.exe"
         if ((Invoke-CodeyProcess $node @('--version') -TimeoutSeconds 10).Stdout.Trim() -ne "v$($package.Pins.node.version)") {
@@ -632,17 +659,21 @@ function Invoke-CodeyWindowsInstall {
             $npmCli, 'install', '--global', '--prefix', $appPrefix, '--omit=dev',
             '--no-audit', '--no-fund', '--registry', $package.Manifest.dependencyRegistry,
             $package.Artifact
-        ) -Environment $npmEnvironment -WorkingDirectory $release -TimeoutSeconds 1200
+        ) -Environment $npmEnvironment -WorkingDirectory $release -TimeoutSeconds 1200 -Activity 'Install Codey dependencies'
         $codey = Join-Path $appPrefix 'node_modules\codey'
         $codeyBin = Join-Path $codey 'bin\codey.mjs'
         Assert-CodeyInstalledPackage $codey $package $node
 
         Write-Host '[1/5] Install/configure private GitHub DevTunnel'
         $devtunnel = Join-Path $release 'devtunnel.exe'
-        Get-CodeyDownload $package.Pins.devTunnel.url $devtunnel $package.Pins.devTunnel.sha256
+        $tunnelCache = Join-Path $cache "devtunnel-$($package.Pins.devTunnel.sha256).exe"
+        Get-CodeyDownload $package.Pins.devTunnel.url $tunnelCache $package.Pins.devTunnel.sha256
+        Copy-Item -LiteralPath $tunnelCache -Destination $devtunnel
+        Protect-CodeyPath $devtunnel
         $signature = Get-AuthenticodeSignature -LiteralPath $devtunnel
-        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
-            throw 'DevTunnel Authenticode verification failed.'
+        if ((Get-FileHash -LiteralPath $devtunnel -Algorithm SHA256).Hash -ne $package.Pins.devTunnel.sha256 -or
+            $signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+            throw 'DevTunnel checksum or Authenticode verification failed.'
         }
         $login = Invoke-CodeyProcess $devtunnel @('user', 'show', '--json') -TimeoutSeconds 30 -AllowFailure
         $user = if ($login.ExitCode -eq 0) { ConvertFrom-CodeyTunnelJson $login.Stdout } else { $null }
@@ -717,12 +748,7 @@ function Invoke-CodeyWindowsInstall {
             auth = @{ apiKeys = @($modelKey); adminApiKey = New-CodeySecret; sessionHistoryApiKey = New-CodeySecret }
         } -Backup
         Write-CodeyFile (Join-Path $configRoot 'provider.env') "CODEY_MODEL_API_KEY=$modelKey`n" -Backup
-        $null = Invoke-CodeyProcess $openssl @('req', '-x509', '-newkey', 'rsa:3072', '-noenc', '-days', '365',
-            '-keyout', $key, '-out', $cert, '-subj', "/CN=$serverName", '-addext', "subjectAltName=DNS:$serverName",
-            '-addext', 'basicConstraints=critical,CA:FALSE', '-addext', 'keyUsage=critical,digitalSignature,keyEncipherment',
-            '-addext', 'extendedKeyUsage=serverAuth') -TimeoutSeconds 60
-        Protect-CodeyPath $key
-        Protect-CodeyPath $cert
+        New-CodeyCertificate $node $serverName $cert $key
         $signingFile = Join-Path $configRoot 'client-signing.key'
         Write-CodeyFile $signingFile "$($identity.clientSigningKey)`n"
         $supervisor = Join-Path $runtimeRoot 'supervisor'
@@ -814,7 +840,7 @@ function Invoke-CodeyWindowsInstall {
         # Official installer performs its own release digest verification and owns
         # its junctions/companions. Never overwrite a Desktop cache or npm shim.
         $null = Invoke-CodeyProcess $powershell @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $installer) `
-            -Environment $codexEnvironment -TimeoutSeconds 900
+            -Environment $codexEnvironment -TimeoutSeconds 900 -Activity 'Install official Codex'
         $version = (Invoke-CodeyProcess $config.codexExe @('--version') -TimeoutSeconds 20).Stdout.Trim()
         if ($version -notmatch '^codex-cli \S+') { throw 'Official native Codex did not report a version.' }
         if (-not (Test-Path -LiteralPath $codexRoot)) { New-CodeyDirectory $codexRoot }
@@ -824,7 +850,7 @@ function Invoke-CodeyWindowsInstall {
         $answerFile = Join-Path $stateRoot ('codex-answer-' + [Guid]::NewGuid().ToString('N') + '.txt')
         $null = Invoke-CodeyProcess $config.codexExe @('exec', '--skip-git-repo-check', '--output-last-message', $answerFile,
             'Reply with only CODEY_CODEX_OK. Do not use tools.') -Environment $codexEnvironment -TimeoutSeconds 300 `
-            -WorkingDirectory $owner.Home
+            -WorkingDirectory $owner.Home -Activity 'Verify Codex response'
         if ((Get-Content -LiteralPath $answerFile -Raw -Encoding UTF8).Trim() -cne 'CODEY_CODEX_OK') {
             throw 'Real Codex response mismatch; a prompt echo is not accepted.'
         }
@@ -832,7 +858,7 @@ function Invoke-CodeyWindowsInstall {
         Write-Host '[4/5] Verify the unified Codey gateway, Workspace, TLS, SSO and Codex SDK'
         Wait-CodeyProbe ([pscustomobject]$config) $configPath 'verify'
         $null = Invoke-CodeyProcess $node @($config.helperPath, 'sdk-probe', $configPath) `
-            -Environment $codexEnvironment -WorkingDirectory $codey -TimeoutSeconds 300
+            -Environment $codexEnvironment -WorkingDirectory $codey -TimeoutSeconds 300 -Activity 'Verify Workspace response'
 
         Write-CodeyJson (Join-Path $release 'release.json') $package.Manifest
         Write-CodeyJson (Join-Path $copilotHome 'portal-build.json') @{
@@ -871,6 +897,6 @@ function Invoke-CodeyWindowsInstall {
 
 if ($MyInvocation.InvocationName -ne '.') {
     Invoke-CodeyWindowsInstall -DoApply $Apply -ApprovedNetwork $NetworkApproved -Replace $ReplaceExisting `
-        -ExpectedComputer $ExpectedComputerName -RequestedCodexHome $CodexHome -RequestedOpenSsl $OpenSslExe `
+        -ExpectedComputer $ExpectedComputerName -RequestedCodexHome $CodexHome `
         -Repair $RepairServices
 }

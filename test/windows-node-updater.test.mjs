@@ -554,6 +554,7 @@ test("native agent transactions and installer Task Scheduler rules parse and run
   const proof = JSON.parse(result.stdout);
   assert.equal(proof.passed, true);
   assert.equal(proof.hostEnvironmentVerified, true);
+  assert.equal(proof.unchangedAgentReused, true);
   assert.equal(proof.nativeServices, false);
   assert.equal(proof.modelCalls, 0);
 });
