@@ -56,10 +56,11 @@ upgrade, stop, or restart the daemon.
 - **Events:** forward the tracked turn's text, tool progress, and completion
   notifications, including desktop turns steered from Codey. Buffer events that
   precede the submission acknowledgement; ignore other threads and turns.
-- **Safety:** steering never transfers ownership of a desktop turn. Abort only
-  a turn started by this Codey runtime. A stale turn ID, timeout or disconnect
-  never retries the prompt or redirects it through exec or a new turn; the
-  user should check the original conversation before retrying.
+- **Safety:** steering never transfers ownership of a desktop turn. Automatic
+  cancellation affects only Codey-started work; an authenticated, explicit Stop
+  bound to the observed run can also interrupt its verified desktop turn
+  (updated 2026-09-15). A stale turn ID, timeout or disconnect never retries the
+  prompt or redirects it through exec or a new turn.
 - **Local lifecycle:** preserve Codey renames/archives and exclude locally
   removed sessions from subsequent imports. These actions do not rename,
   archive, or delete the original Codex thread. Permanent deletion of native
@@ -113,10 +114,10 @@ to the existing owner and append input to that same turn:
   desktop settings remain in effect. Native `/goal` activations and Plan Mode
   changes still require an idle session.
 - After acknowledgement, the existing Codey correction UI can send further
-  same-turn input. Advertise `canSteer: true` but `canInterrupt: false`.
-  Runtime Stop also rejects attempts to interrupt the desktop turn, including
-  during attachment, so a stale browser cannot bypass this ownership boundary.
-  Desktop approval requests remain in the desktop client.
+  same-turn input. The original 2026-09-13 implementation advertised
+  `canSteer: true` but `canInterrupt: false` and required Stop in the desktop.
+  The explicit-Stop/observation correction below supersedes that restriction;
+  automatic cancellation and desktop approval ownership remain unchanged.
 - If the turn ends or changes before steering, or an acknowledgement is lost,
   fail without an automatic retry, queue submission, fork, or `turn/start`.
   Closing Codey's observer connection does not stop the original task.
@@ -163,6 +164,82 @@ Deploy the corrected node backend **and shared Workspace UI**, then refresh the
 browser. Backend-only publication does not update the browser store, and a UI-only
 publication cannot invent identities for older native submissions. Browser
 refresh clears old transient echoes; no native history repair is required.
+
+### Mobile handoff, transcript order and explicit Stop (2026-09-15)
+
+A read-only comparison of the reported native session index and `thread/read`
+found both in chronological order. The reversed-looking transcript came from
+Codey's merge, not reversed native execution:
+
+- Codey's native-history adapter had assigned every item the enclosing turn's start time,
+  while websocket snapshots used their arrival time. Replaying earlier output
+  against a newer history page could place the earlier output below that page.
+- Native input/output can arrive before `turn/steer` acknowledges acceptance.
+  The later gateway user echo could therefore appear below its own answer.
+- An ID match also let an older, partial history snapshot hide newer cumulative
+  live text after joining an already-streaming item.
+- Equal turn timestamps could stop history-page bridging too early. Page
+  boundaries now use native positions, and distinct native positions or input
+  receipts cannot masquerade as overlapping rows just because their text matches.
+
+Native history and runtime projections now carry `nativePosition`: the turn
+identity, its start time, and the item index counting **all** native items,
+including hidden reasoning/tools. The store uses this order rather than
+comparing synthetic history timestamps with arrival times. It reconciles
+identity-bearing native user receipts with optimistic/accepted echoes in either
+arrival order and retains a newer cumulative snapshot until history catches up.
+Legacy JSONL keeps its existing clock-based compatibility path.
+
+Opening a Codey session now checks for an already-active shared-daemon turn
+before acknowledging `chat.subscribe`. Preparation is read-only and does not
+reserve an idle Codey session. After registry admission, observation attaches
+without input or settings changes, verifies the same native turn again, and
+checks for completion during attachment. Concurrent subscribers share admission;
+a concurrent real send wins without being replaced by an observer.
+
+Consequently, after switching from the desktop to a phone:
+
+- The running state and queue/steer capabilities are available **before the
+  first Codey message**. Send can persist the normal queue, and its existing
+  steering action can promote that exact queued receipt immediately.
+- Explicit Stop carries the displayed gateway run ID. The gateway checks the
+  requesting user and run, then the runtime interrupts only its captured native
+  thread/turn. Reconnect and capability-only status events restore
+  `canInterrupt` instead of retaining an older non-interruptible state.
+- Automatic scheduled interruption, cleanup and disconnects do not gain the
+  ability to stop desktop turns. Unverified attachment, stale run IDs and failed
+  interruption acknowledgements do not falsely complete a run or flush its queue.
+- Native completion is forwarded after this runtime releases its slot/connection,
+  so a queued successor cannot race the previous adapter's cleanup.
+- The old warning is not emitted merely for opening an active session. If a
+  send races observation and uses the existing direct-steer path, its informational
+  receipt appears only after native acceptance and no longer says Stop is desktop-only.
+
+These controls apply to an accessible **shared daemon**, not the separate
+Windows foreign-writer queue transport. Desktop approvals remain in Codex app.
+Observation follows the verified turn; it does not silently follow a newer turn,
+start a parallel writer, fork history, retry a prompt, remove locks, or restart
+the desktop. It is not continuous discovery of every later desktop-initiated
+turn in an already-open browser.
+
+Deploy the node backend **and shared Workspace UI**, then refresh the browser.
+Refreshing an already-completed session can clear old transient display rows;
+the native conversation itself does not require rewriting. Development used
+mock transports and isolated real Codex instances with a localhost model fixture.
+No prompts or interruption requests were sent to the reported conversation, and
+no running service was restarted or deployment performed.
+
+Validation:
+
+- All 661 frontend tests passed. The full backend suite passed 546 tests,
+  with seven opt-in/legacy-fixture skips and no failures.
+- Eight isolated real two-client cases passed against Codex CLI `0.146.0`
+  and `0.154.0`, covering both paginated and legacy history, corrections,
+  prompt-free observation, and explicit Stop. They also verified that native
+  interruption rejects a stale turn ID without stopping its successor.
+- Production build, frontend/backend type checks, lint, and whitespace checks
+  passed. Build retained bundle-size warnings; lint reported 129 warnings and
+  no errors.
 
 ### General limitations
 
