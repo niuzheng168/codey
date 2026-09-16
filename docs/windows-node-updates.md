@@ -1,3 +1,5 @@
+> **历史说明**：当前源码已移除 Portal/本地更新器，Mac 安装与守护已改为 Node。本文中的旧更新命令、Python 要求或代理操作不适用于新源码；旧机器不会自动迁移。以 `skills/config-new-codey-machine/SKILL.md` 为准。
+
 # Windows 从 Portal 更新 Codey
 
 ## 能力与发布状态

@@ -18,7 +18,6 @@ const publicKey = generateKeyPairSync("ed25519").publicKey.export({ type: "spki"
 const config = {
   schema: 1, portalOrigin: "https://codey.example.test", platform: "linux-x64",
   network: { mode: "devtunnel" }, tunnelAuthProvider: "github",
-  updater: { protocol: 1, releasePublicKey: publicKey },
 };
 
 async function fixture(t) {
@@ -35,10 +34,11 @@ async function fixture(t) {
   await writeFile(path.join(pkg, "npm-shrinkwrap.json"), lock);
   const entry = "// Only a setup-check fixture; never start a real service.\n";
   for (const name of [
-    "dist-server/server/index.js", "gateway/main.js", "updater/install.py",
-    "updater/updater.py", "updater/engine.py", "updater/probe.mjs",
-    "onboarding/scripts/install.sh", "onboarding/scripts/registration.mjs", "onboarding/templates/a100-models.json",
+    "dist-server/server/index.js", "gateway/main.js",
+    "onboarding/scripts/install.sh", "onboarding/scripts/registration.mjs",
+    "onboarding/templates/a100-models.json", "onboarding/templates/codex-config.toml",
     "onboarding/scripts/install-devtunnel-health.sh", "onboarding/scripts/linux-devtunnel-health.mjs",
+    "onboarding/scripts/linux-preflight.sh", "onboarding/scripts/windows-runtime.mjs",
   ]) {
     await mkdir(path.dirname(path.join(pkg, name)), { recursive: true });
     await writeFile(path.join(pkg, name), entry);
@@ -56,19 +56,21 @@ async function fixture(t) {
 
 test("setup options and configuration allow public deployment metadata only", () => {
   assert.deepEqual(setupOptions(["--check"]), { check: true });
+  assert.deepEqual(setupOptions(["--expected-computer", "my-linux", "--replace-existing"]),
+    { expectedComputer: "my-linux", replaceExisting: true });
   for (const args of [["--port", "4141"], ["--config"], ["--check", "--check"], ["--config", "a", "--config", "b"]]) {
     assert.throws(() => setupOptions(args));
   }
-  assert.equal(validateSetupConfig(config), config);
+  assert.deepEqual(validateSetupConfig(config), config);
+  assert.deepEqual(validateSetupConfig({ ...config, updater: { protocol: 1, releasePublicKey: publicKey } }), config,
+    "Legacy public updater metadata is ignored; it cannot enable an agent");
   for (const changed of [
     { portalOrigin: "http://codey.example.test" }, { portalOrigin: "https://user:password@codey.example.test" },
     { portalOrigin: "https://codey.example.test/path" }, { platform: "windows-x64" },
     { credentials: { token: "do-not-bundle" } }, { ownerId: "someone" },
     { updater: { protocol: 1, releasePublicKey: "-----BEGIN PRIVATE KEY-----\nprivate" } },
-    { updater: { ...config.updater, credential: "do-not-bundle" } },
+    { updater: { protocol: 1, releasePublicKey: publicKey, credential: "do-not-bundle" } },
   ]) assert.throws(() => validateSetupConfig({ ...config, ...changed }));
-  const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 }).publicKey.export({ type: "spki", format: "pem" });
-  assert.throws(() => validateSetupConfig({ ...config, updater: { protocol: 1, releasePublicKey: rsa } }), /Ed25519/);
 });
 
 test("npm setup uses the installed root and derives stable metadata without a tarball or ZIP", async t => {
@@ -86,7 +88,7 @@ test("npm setup uses the installed root and derives stable metadata without a ta
 test("the shared package's auto configuration resolves only at Linux managed setup time", async t => {
   const f = await fixture(t);
   const shared = { ...config, platform: "auto" };
-  assert.equal(validateSetupConfig(shared), shared);
+  assert.deepEqual(validateSetupConfig(shared), shared);
   const file = path.join(f.pkg, "onboarding/setup.json");
   const bytes = JSON.stringify(shared);
   await writeFile(file, bytes);
@@ -114,7 +116,7 @@ test("setup passes temporary metadata and the exact npm root to Bash, then remov
   let captured;
   const previousExitCode = process.exitCode;
   t.after(() => { process.exitCode = previousExitCode; });
-  await runSetup(f.pkg, [], { home: f.home, spawnProcess(command, args, options) {
+  await runSetup(f.pkg, ["--expected-computer", os.hostname(), "--replace-existing"], { home: f.home, spawnProcess(command, args, options) {
     captured = { command, args, options };
     const child = new EventEmitter();
     child.kill = () => true;
@@ -122,11 +124,23 @@ test("setup passes temporary metadata and the exact npm root to Bash, then remov
     return child;
   } });
   assert.equal(captured.command, "bash");
-  assert.deepEqual(captured.args, [path.join(f.pkg, "onboarding/scripts/install.sh")]);
+  assert.deepEqual(captured.args, [path.join(f.pkg, "onboarding/scripts/install.sh"),
+    "--expected-computer", os.hostname(), "--replace-existing"]);
   assert.equal(captured.options.env.CODEY_INSTALLED_PACKAGE, f.pkg);
   assert.equal(captured.options.env.CODEY_SETUP_NODE, process.execPath);
   await assert.rejects(stat(captured.options.env.CODEY_SETUP_ASSETS), { code: "ENOENT" });
   assert.equal(process.exitCode, 0);
+});
+
+test("Linux setup requires the exact approved computer before creating metadata or launching deployment", {
+  skip: process.platform !== "linux",
+}, async t => {
+  const f = await fixture(t);
+  for (const args of [[], ["--expected-computer", "not-this-machine"]]) {
+    await assert.rejects(runSetup(f.pkg, args, { home: f.home,
+      spawnProcess() { assert.fail("No deployment before host confirmation"); },
+    }), /expected-computer/);
+  }
 });
 
 test("setup refuses an unmanaged prefix before launching the deployment script", {
@@ -151,6 +165,11 @@ test("the npm one-click installer supports a local tarball and HTTPS URL without
   skip: process.platform !== "linux", timeout: 120000,
 }, async t => {
   const f = await fixture(t);
+  const stubs = path.join(f.directory, "preflight-stubs");
+  await mkdir(stubs);
+  await writeFile(path.join(stubs, "ss"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await writeFile(path.join(stubs, "getent"),
+    '#!/bin/sh\nprintf "fixture:x:%s:1000::%s:/bin/bash\\n" "$(id -u)" "$HOME"\n', { mode: 0o700 });
   const npm = path.join(path.dirname(process.execPath), "npm");
   await exec(npm, ["pack", "--ignore-scripts", "--pack-destination", f.directory], { cwd: f.pkg });
   const archive = path.join(f.directory, "codey-0.1.0.tgz");
@@ -173,7 +192,7 @@ test("the npm one-click installer supports a local tarball and HTTPS URL without
     ["file", archive], ["https", `https://127.0.0.1:${server.address().port}/codey-0.1.0.tgz`],
   ]) {
     const prefix = path.join(f.home, ".local/share", `installed-${kind}`);
-    const env = { ...process.env, HOME: f.home, NODE_EXTRA_CA_CERTS: cert,
+    const env = { ...process.env, HOME: f.home, SUDO_USER: "", PATH: `${stubs}:${process.env.PATH}`, NODE_EXTRA_CA_CERTS: cert,
       npm_config_cache: path.join(f.home, ".npm"), NO_PROXY: "*", no_proxy: "*",
       npm_config_offline: "false", npm_config_strict_ssl: "true" };
     const result = await exec("bash", [path.join(root, "scripts/linux/install-codey.sh"),

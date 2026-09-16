@@ -23,7 +23,6 @@ import { NodePolicy } from "./node-policy.mjs";
 import { browserDataNode } from "./node-display.mjs";
 import { SettingsApi } from "./settings-api.mjs";
 import { MachineSetup } from "./machine-setup.mjs";
-import { MachineUpdates } from "./machine-updates.mjs";
 import { VoiceService, resolveVoiceServiceConfig } from "./voice-service.mjs";
 import { VoiceGateway } from "./voice-gateway.mjs";
 import { VoiceRewriteService, resolveVoiceRewriteConfig } from "./voice-rewrite-service.mjs";
@@ -47,7 +46,6 @@ const STATIC_FILES = new Map([
   ["/settings", ["settings.html", "text/html; charset=utf-8"]],
   ["/settings.js", ["settings.js", "text/javascript; charset=utf-8"]],
   ["/admin-nodes.js", ["admin-nodes.js", "text/javascript; charset=utf-8"]],
-  ["/machine-updates.js", ["machine-updates.js", "text/javascript; charset=utf-8"]],
   ["/settings.css", ["settings.css", "text/css; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/portal-session.js", ["portal-session.js", "text/javascript; charset=utf-8"]],
@@ -896,9 +894,7 @@ export function createMultiUserPortalServer(options) {
   const server = http.createServer(async (req, res) => {
     try {
     const url = new URL(req.url ?? "/", "http://portal.local");
-    // Updater credentials are independent of Portal cookies, model keys and SSO.
     // This handler authenticates and scopes every request itself.
-    if (options.machineUpdates && await options.machineUpdates.handleAgent(req, res)) return;
     // The Mac renewal endpoint has its own purpose-separated, node-only auth.
     if (options.machineSetup?.tunnels && await options.machineSetup.tunnels.handle(req, res)) return;
     if (passwordAuthenticator && await passwordAuthenticator.handle(req, res)) return;
@@ -1097,22 +1093,12 @@ async function main() {
   const settingsApi = accountStore ? new SettingsApi({
     accounts: accountStore, nodePolicy, authenticator: passwordAuthenticator, cloudCliGateway, nodeDataGateway,
   }) : null;
-  const machineUpdates = accountStore ? new MachineUpdates({
-    root: process.env.PORTAL_AUTH_STATE_DIR, master: process.env.PORTAL_WORKSPACE_SSO_MASTER,
-    catalogRoot: process.env.PORTAL_NODE_UPDATE_ROOT,
-    publicKey: process.env.PORTAL_NODE_UPDATE_PUBLIC_KEY_FILE
-      ? await readFile(process.env.PORTAL_NODE_UPDATE_PUBLIC_KEY_FILE, "utf8") : null,
-    nodePolicy, accounts: accountStore, authenticator: passwordAuthenticator,
-    sourceRoot: path.join(PROJECT_ROOT, "node-updater"),
-  }) : null;
-  if (machineUpdates) await machineUpdates.initialize();
-  if (settingsApi) settingsApi.machineUpdates = machineUpdates;
   const machineSetup = accountStore ? new MachineSetup({
     nodePolicy, accounts: accountStore, authenticator: passwordAuthenticator, origin: publicBaseUrl,
     bundleRoot: process.env.PORTAL_MACHINE_BUNDLE_ROOT,
     network: process.env.PORTAL_MACHINE_NETWORK_CONFIG
       ? JSON.parse(await readFile(process.env.PORTAL_MACHINE_NETWORK_CONFIG, "utf8")) : null,
-    cloudCliGateway, nodeDataGateway, cloudCliUi, machineUpdates,
+    cloudCliGateway, nodeDataGateway, cloudCliUi,
   }) : null;
   if (settingsApi) settingsApi.machineSetup = machineSetup;
   const commonOptions = {
@@ -1140,7 +1126,6 @@ async function main() {
     nodePolicy,
     settingsApi,
     machineSetup,
-    machineUpdates,
   };
   const server = userDataDir
     ? createMultiUserPortalServer({

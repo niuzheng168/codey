@@ -104,7 +104,7 @@ export function preparedGateways(node, { getTunnelToken, getWorkspaceBinding } =
       id: node.id, name: node.name, region: node.region, basePath: `/cloudcli/${node.id}`,
       upstream: new URL(`https://${host}:3001`),
       tlsServerName: machine.tlsServerName, ca: machine.ca, fingerprint: machine.fingerprint,
-      healthMonitoring: !machineRegistrationPlatform(machine.platform ?? "linux-x64").updater,
+      healthMonitoring: true,
       ...(getWorkspaceBinding ? { getWorkspaceBinding } : {}),
       ...tunnel(3001),
     },

@@ -63,7 +63,6 @@ def make_codey_tgz(root, shared=True):
         "bin/codey.mjs", "lib/cli.mjs", "lib/codex-sdk/index.js",
         "dist-server/server/index.js", "dist/index.html",
         "gateway/main.js", "pages/index.html",
-        "updater/install.py", "updater/engine.py", "updater/updater.py",
     ):
         file = runtime / name
         file.parent.mkdir(parents=True, exist_ok=True)
@@ -120,7 +119,7 @@ def fixture(root, shared=True):
         "dependencyRegistry": built["dependencyRegistry"],
         "codey": built["codey"], "cloudcli": built["cloudcli"],
         "copilotApi": built["copilotApi"],
-        "bundledRuntimes": ["cloudcli", "copilot-api", "updater"],
+        "bundledRuntimes": ["cloudcli", "copilot-api"],
         "artifacts": [built["artifact"]],
     }
     write_json(assets / "manifest.json", manifest)
@@ -128,8 +127,6 @@ def fixture(root, shared=True):
         "schema": 1, "platform": manifest["platform"], "releaseId": manifest["releaseId"],
         "portalOrigin": "https://codey.example.test",
         "network": {"mode": "devtunnel"}, "tunnelAuthProvider": "github",
-        "updater": ({"protocol": 1, "releasePublicKey": "-----BEGIN PUBLIC KEY-----\nfixture-public-key"}
-                    if shared else {"supported": False, "reason": "unsupported_platform"}),
     })
     names = [artifact.name, "manifest.json", "setup.json"]
     (assets / "SHA256SUMS").write_text(

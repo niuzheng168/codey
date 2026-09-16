@@ -138,6 +138,19 @@ class DeploymentSafety(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "guard"):
             require(False, "guard")
 
+    def test_removed_updater_transport_fails_before_any_local_or_remote_mutation(self):
+        import sys
+        from deploy import arguments, Deploy
+        for scope in ("fleet", "workspace"):
+            with patch.object(sys, "argv", ["deploy.py", "--scope", scope, "--node-transport", "updater",
+                                           "--workspace", str(self.root)]):
+                args = arguments()
+            before = list(self.root.rglob("*"))
+            with patch("deploy.command", side_effect=AssertionError("No command may run")):
+                with self.assertRaisesRegex(RuntimeError, "removed"):
+                    Deploy(args)
+            self.assertEqual(list(self.root.rglob("*")), before)
+
     def test_controller_requires_explicit_apply(self):
         from common import command
         import sys
@@ -152,27 +165,6 @@ class DeploymentSafety(unittest.TestCase):
         with patch.object(sys, "argv", ["deploy.py"]):
             self.assertEqual(len(arguments().nodes), 4)
 
-    def test_workspace_scope_keeps_the_explicit_canary_and_commit_pins(self):
-        import sys
-        from deploy import arguments, Deploy
-        with patch.object(sys, "argv", [
-            "deploy.py", "--scope", "workspace", "--nodes", "zhn-a100", "--verify-steering",
-            "--expected-cloudcli-commit", "a" * 40, "--expected-copilot-api-commit", "c" * 40,
-            "--expected-portal-commit", "b" * 40,
-        ]):
-            args = arguments()
-        self.assertEqual(args.nodes, ["zhn-a100"])
-        self.assertEqual(args.node_transport, "updater")
-        self.assertTrue(args.verify_steering)
-        self.assertEqual(args.expected_cloudcli_commit, "a" * 40)
-        self.assertEqual(args.expected_copilot_api_commit, "c" * 40)
-        worker = object.__new__(Deploy)
-        worker.args = args
-        with patch.object(worker, "run_workspace", return_value=0) as workspace, \
-                patch.object(worker, "run_updater_fleet", side_effect=AssertionError("fleet must not run")), \
-                patch.object(worker, "run_portal", side_effect=AssertionError("ACA must not deploy")):
-            self.assertEqual(worker.run(), 0)
-            workspace.assert_called_once()
 
     def test_remote_service_baseline_accepts_exactly_one_old_or_new_gateway_unit(self):
         from deploy import Deploy
@@ -474,40 +466,6 @@ class DeploymentSafety(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "requires the existing"):
                 worker.native_idle()
 
-    def test_fleet_checks_native_tasks_before_build_and_again_before_update_confirmation(self):
-        from deploy import Deploy
-        for busy_at in (0, 1):
-            with self.subTest(busy_at=busy_at):
-                worker = object.__new__(Deploy)
-                worker.args = SimpleNamespace(builder="westus2", reviewed_working_tree=False)
-                worker.report = {"withinTarget": True}
-                worker.job = self.root
-                worker.record = self.root / "report.json"
-                worker.scripts = Path(__file__).parent
-                worker.remote = "/isolated/release"
-                worker.nodes = ("zhn-a100",)
-                worker.pool = SimpleNamespace(
-                    map=map,
-                    submit=lambda fn, *args, **kwargs: SimpleNamespace(result=lambda: fn(*args, **kwargs)),
-                )
-                states = [{}] * busy_at + [RuntimeError("A native Codex task is still active")]
-                with patch("deploy.phase", side_effect=lambda *_: nullcontext()), \
-                        patch.object(worker, "pin_source", return_value=MAIN_SOURCE), \
-                        patch.object(worker, "protected_local", return_value={}), \
-                        patch.object(worker, "node_services", return_value={}), \
-                        patch.object(worker, "upload"), patch.object(worker, "idle") as idle, \
-                        patch.object(worker, "native_idle", side_effect=states), \
-                        patch.object(worker, "finish"), \
-                        patch.object(worker, "worker", side_effect=lambda mode, **_: {"nodes": []} if mode == "bootstrap" else {}) as remote:
-                    self.assertEqual(worker.run_updater_fleet(), 1)
-                modes = [call.args[0] for call in remote.call_args_list]
-                self.assertNotIn("rollout", modes)
-                self.assertEqual(worker.report["status"], "needs-attention")
-                self.assertEqual(idle.call_count, busy_at + 1)
-                if busy_at == 0:
-                    self.assertNotIn("build", modes)
-                else:
-                    self.assertIn("bootstrap", modes)
 
     def test_workspace_acceptance_reads_aca_without_activating_it(self):
         from builder import Builder
@@ -548,37 +506,6 @@ class DeploymentSafety(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "artifact changed"):
             worker.resume_workspace()
 
-    def test_updater_repair_packages_code_only_and_targets_only_selected_nodes(self):
-        from deploy import Deploy
-        import zipfile
-        worker = object.__new__(Deploy)
-        worker.root = self.root
-        worker.job = self.root / "job"
-        worker.job.mkdir()
-        worker.remote = "/isolated/job"
-        worker.args = SimpleNamespace(builder="westus2")
-        worker.nodes = ("zhn-a100",)
-        worker.report = {"previousAttempts": [{}]}
-        worker.main_source = MAIN_SOURCE
-        source = self.root / "node-updater"
-        source.mkdir()
-        for name in ["updater.py", "engine.py", "probe.mjs", "install.py", "UPGRADE.md"]:
-            (source / name).write_text("reviewed code, no credentials")
-        with patch("deploy.git", return_value=b"committed code, no credentials") as git_read, \
-                patch.object(worker, "upload"), patch.object(worker, "install_updater", return_value={"node": "zhn-a100"}) as install:
-            result = worker.refresh_reviewed_updater()
-        self.assertTrue(all(call.args[2].startswith(MAIN_SOURCE["commit"] + ":node-updater/")
-                            for call in git_read.call_args_list))
-        self.assertEqual(install.call_count, 1)
-        row = install.call_args.args[0]
-        self.assertEqual(row["node"], "zhn-a100")
-        self.assertTrue(row["useExistingConfig"])
-        self.assertFalse(result["applicationServicesRestarted"])
-        with zipfile.ZipFile(worker.job / "reviewed-updater-source-1.zip") as archive:
-            self.assertEqual(len(archive.namelist()), 5)
-            self.assertNotIn("codey-updater/config.json", archive.namelist())
-            self.assertTrue(all(archive.read(name) == b"committed code, no credentials"
-                                for name in archive.namelist()))
 
     def test_aca_reconciliation_accepts_only_a_ready_metadata_only_restart(self):
         from builder import Builder

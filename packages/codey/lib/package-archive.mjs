@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { createGunzip } from "node:zlib";
-import { knownRuntimePlatforms, validateRuntimeLock } from "./package-info.mjs";
-import { fileHash, hash } from "./update-files.mjs";
+import { knownRuntimePlatforms, readPackageInfo, validateRuntimeLock } from "./package-info.mjs";
+import { fileHash, hash } from "./package-files.mjs";
+import { verifyDependencyBinding } from "./package-dependencies.mjs";
 
 const MAX_ARCHIVE = 512 * 1024 * 1024;
 const MAX_EXPANDED = 4 * 1024 ** 3;
@@ -13,6 +16,27 @@ const required = [
   "dist-server/server/index.js", "gateway/main.js", "dist/index.html", "pages/index.html",
 ];
 const captured = new Set(["package.json", "npm-shrinkwrap.json", "codey-build.json"]);
+
+/** Validate the newly extracted package before enabling its native install hooks. */
+export async function verifyStagedPackage(root, artifact, { home = os.homedir() } = {}) {
+  const info = await readPackageInfo(root);
+  if (info.entrySha256 !== artifact.entrySha256 || info.pkg.version !== artifact.pkg.version) {
+    throw new Error("Installed package differs from the reviewed archive.");
+  }
+  for (const [name, expected] of artifact.files) {
+    const file = path.join(root, name);
+    const entry = await lstat(file);
+    const resolved = await realpath(file), wanted = path.join(info.root, name);
+    const samePath = process.platform === "win32" ? resolved.toLowerCase() === wanted.toLowerCase() : resolved === wanted;
+    if (!samePath || !entry.isFile() || entry.isSymbolicLink() ||
+        entry.size !== expected.size || await fileHash(file) !== expected.sha256) {
+      throw new Error(`Installed Codey file differs from the archive: ${name}`);
+    }
+  }
+  await verifyDependencyBinding(root, artifact.lock, { home });
+  return info;
+}
+
 const fail = message => { throw new Error("Invalid Codey package: " + message); };
 const field = bytes => bytes.toString("utf8").replace(/\0.*$/s, "");
 const octal = bytes => {
@@ -44,7 +68,7 @@ function pax(bytes) {
 }
 
 /** Inspect only: no tar extraction, npm invocation, package import or install hook. */
-export async function inspectUpdateArchive(filename, expectedSha256) {
+export async function inspectPackageArchive(filename, expectedSha256) {
   const file = await realpath(filename);
   const info = await lstat(file);
   if (!info.isFile() || info.size === 0 || info.size > MAX_ARCHIVE) fail("expected a local .tgz file under 512 MiB");
@@ -113,6 +137,10 @@ export async function inspectUpdateArchive(filename, expectedSha256) {
       if (!["0", "5"].includes(type)) fail("links, devices and special files are forbidden");
       if (name.endsWith("/") && type === "5") name = name.slice(0, -1);
       const parts = name.split("/");
+      if (/\.(?:py|pyc|pyo)$/i.test(name) || parts[1]?.toLowerCase() === "updater" ||
+          /^package\/lib\/(?:tool-)?update(?:[-.]|$)/i.test(name)) {
+        fail("Python scripts and retired updaters are not part of a Codey runtime package");
+      }
       if (name.length > 500 || /[\x00-\x1f\\:]/.test(name) || parts[0] !== "package" ||
           parts.some(part => !part || part === "." || part === ".." || /[ .]$/.test(part) ||
             /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)) ||
@@ -175,7 +203,7 @@ export async function inspectUpdateArchive(filename, expectedSha256) {
   for (const name of ["preinstall", "install", "postinstall", "preprepare", "prepare", "postprepare", "prepublish"]) {
     if (Object.hasOwn(pkg.scripts ?? {}, name) &&
         !(name === "postinstall" && pkg.scripts[name] === "node scripts/fix-node-pty.js")) {
-      fail("unsupported application install hook; update must not run setup or tool installers");
+      fail("unsupported application install hook; package installation must not run setup or tool installers");
     }
   }
   for (const group of ["dependencies", "optionalDependencies", "peerDependencies", "devDependencies"]) {

@@ -20,7 +20,6 @@ import { NodeDataGateway } from "../src/node-data-gateway.mjs";
 import { CloudCliGateway } from "../src/cloudcli-gateway.mjs";
 import { crc32, zipStream } from "../src/zip-stream.mjs";
 import { fetchNodeJson } from "../public/node-transport.js";
-import { MachineUpdates } from "../src/machine-updates.mjs";
 import { machinePlatform, machineRegistrationPlatform } from "../src/machine-platforms.mjs";
 
 const run = promisify(execFile);
@@ -77,7 +76,7 @@ async function bundle(root, platform = "linux-x64", { shared = false, managed = 
       runtimePlatforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"],
       managedInstallPlatforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"],
     } : {}),
-    bundledRuntimes: ["cloudcli", "copilot-api", "updater"],
+    bundledRuntimes: ["cloudcli", "copilot-api"],
     downloadedOfficialRuntimes: ["node", "codex", "devtunnel"],
     package: {
       file: "config-new-codey-machine.zip", size: packageBytes.length, sha256: packageSha256,
@@ -126,7 +125,6 @@ function clientCredentials() {
     clientSigningKey: randomBytes(32).toString("base64url"),
     workspaceSsoKey: randomBytes(32).toString("base64url"),
     tunnelUpdateKey: randomBytes(32).toString("base64url"),
-    updaterCredential: randomBytes(32).toString("base64url"),
     workspaceSubject: `m-${randomBytes(12).toString("hex")}`,
     workspaceUsername: "member",
   };
@@ -190,13 +188,9 @@ async function fixture(t, { shared = false, managed = false } = {}) {
   const workspace = new CloudCliGateway({ nodes: [], ssoMaster: master, ca: "legacy-test-ca" }, { sessionAuthenticator: auth, nodePolicy: policy });
   const probes = [];
   const tunnelProbes = [];
-  const updates = new MachineUpdates({ root, master, nodePolicy: policy, accounts, authenticator: auth,
-    sourceRoot: path.resolve("node-updater"), catalogRoot: path.join(root, "node-updates"),
-    publicKey: generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }) });
-  await updates.initialize();
   const machineSetup = new MachineSetup({
     nodePolicy: policy, accounts, authenticator: auth, origin, bundleRoot, network, cloudCliGateway: workspace,
-    nodeDataGateway: data, cloudCliUi: {}, machineUpdates: updates, verify: async (machine, options) => {
+    nodeDataGateway: data, cloudCliUi: {}, verify: async (machine, options) => {
       probes.push({ machine, options });
       return { https: true, usage: true, history: true, workspaceSso: true, websocket: true, anonymousDenied: true };
     },
@@ -267,12 +261,7 @@ test("the independently published Linux Skill streams unchanged and activates on
     username: credentials.workspaceUsername,
   });
   assert.equal(await f.policy.tunnelKeyFor(node.id), credentials.tunnelUpdateKey);
-  const device = (await f.machineSetup.machineUpdates.store.read()).data.devices[node.id];
-  assert.ok(device);
-  assert.equal((await f.machineSetup.machineUpdates.authenticateAgent({ headers: {
-    "x-codey-node-id": node.id,
-    authorization: `Bearer ${credentials.updaterCredential}`,
-  } })).ownerId, f.member.id);
+  assert.equal((await f.request("/api/settings/updates")).status, 404, "No updater API is exposed");
   assert.equal(f.probes.length, 1);
   assert.equal(f.tunnelProbes.length, 1);
 });
@@ -489,11 +478,11 @@ test("only Linux is currently published and other native launchers never fall ba
 
 test("native registration support is independent from the installer download gate", () => {
   assert.equal(machinePlatform().id, "linux-x64");
-  assert.equal(machineRegistrationPlatform("linux-x64").updater, true);
+  assert.equal(machineRegistrationPlatform("linux-x64").registrationSupported, true);
   for (const id of ["windows-x64", "macos-arm64", "macos-x64"]) {
     const definition = machineRegistrationPlatform(id);
     assert.equal(definition.id, id);
-    assert.equal(definition.updater, false);
+    assert.equal(definition.registrationSupported, true);
     assert.equal(definition.implemented, false);
     assert.throws(() => machinePlatform(id), { status: 400 });
   }
@@ -502,11 +491,32 @@ test("native registration support is independent from the installer download gat
   }
 });
 
+test("retired updater-bearing bundles are not offered, but an old node can still register without an agent", async t => {
+  const f = await fixture(t);
+  const store = path.join(f.bundleRoot, "packages-v2");
+  const pointerFile = path.join(store, "active.json");
+  const pointer = JSON.parse(await readFile(pointerFile, "utf8"));
+  const manifestFile = path.join(store, "releases", pointer.releaseId, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestFile, "utf8"));
+  manifest.bundledRuntimes.push("updater");
+  const bytes = JSON.stringify(manifest);
+  await writeFile(manifestFile, bytes);
+  await writeFile(pointerFile, JSON.stringify({ ...pointer, manifestSha256: createHash("sha256").update(bytes).digest("hex") }));
+  assert.equal((await f.machineSetup.availability("linux-x64")).enabled, false);
+  assert.equal((await f.request("/api/settings/machines/skill", { method: "POST" })).status, 503);
+  const id = `n-${randomBytes(12).toString("hex")}`;
+  const { privateIp, vmResourceId, ...fields } = await machineFile(f.root, id);
+  const value = registration(f.manifest, { ...fields, platform: "linux-x64", networkMode: "devtunnel",
+    devTunnel: { tunnelId: `codey-${id}`, clusterId: "jpe1" } },
+  { ...clientCredentials(), updaterCredential: randomBytes(32).toString("base64url") });
+  assert.equal((await f.request("/api/settings/machines/activate", { method: "POST", value })).status, 201);
+  assert.equal((await f.request("/api/settings/updates")).status, 404);
+});
+
 for (const platform of ["windows-x64", "macos-arm64", "macos-x64"]) {
-  test(`${platform} registration imports without a published bundle, automatically enrolls its updater and restores gateways`, async t => {
+  test(`${platform} registration imports without a published bundle or updater and restores gateways`, async t => {
     const f = await fixture(t);
     f.machineSetup.bundleRoot = null;
-    const updates = f.machineSetup.machineUpdates;
     f.machineSetup.selectedBundle = async () => { assert.fail("Registration must not load a download"); };
     const id = `n-${randomBytes(12).toString("hex")}`;
     const { privateIp, vmResourceId, ...fields } = await machineFile(f.root, id);
@@ -529,11 +539,7 @@ for (const platform of ["windows-x64", "macos-arm64", "macos-x64"]) {
     assert.equal(await f.probes[0].options.getTunnelToken(), value.devTunnelConnectToken);
     assert.equal(f.probes[0].options.workspaceBinding.key, value.credentials.workspaceSsoKey);
     assert.equal(await f.policy.keyFor(f.member.id, id), value.credentials.clientSigningKey);
-    const device = (await updates.store.read()).data.devices[id];
-    assert.equal(device.platform, platform);
-    assert.equal(device.ownerId, f.member.id);
-    assert.equal(device.credentialHash, createHash("sha256").update(value.credentials.updaterCredential).digest("hex"),
-      "Import binds the already-installed agent without a second bootstrap/credential rotation");
+    assert.equal(f.machineSetup.machineUpdates, undefined, "Registration does not create an updater service");
     assert.equal((await f.policy.list(f.credential.principalId)).length, 0);
     assert.equal((await post({ user: f.admin })).status, 409, "Another owner cannot reclaim the node");
     assert.equal((await post()).status, 201, "Same-owner retries are idempotent");
@@ -607,24 +613,16 @@ for (const platform of ["windows-x64", "macos-arm64", "macos-x64"]) {
   });
 }
 
-test("all native registrations require gateways and a configured signed updater", async t => {
+test("all native registrations require gateways, never an updater or signing key", async t => {
   const f = await fixture(t);
   f.machineSetup.bundleRoot = null;
-  assert.equal(f.machineSetup.registrationAvailability("linux-x64").enabled, true);
-  f.machineSetup.machineUpdates = null;
-  assert.equal(f.machineSetup.registrationAvailability("linux-x64").enabled, false);
-  f.machineSetup.machineUpdates = { catalog: { configured: false } };
-  assert.equal(f.machineSetup.registrationAvailability("linux-x64").enabled, false);
-  for (const updater of [null, { catalog: { configured: false } }, { catalog: { configured: true } }]) {
-    f.machineSetup.machineUpdates = updater;
-    for (const platform of ["windows-x64", "macos-arm64", "macos-x64"]) {
-      assert.equal(f.machineSetup.registrationAvailability(platform).enabled, Boolean(updater?.catalog.configured));
-      for (const name of ["cloudCliGateway", "nodeDataGateway"]) {
-        const gateway = f.machineSetup[name];
-        f.machineSetup[name] = null;
-        assert.equal(f.machineSetup.registrationAvailability(platform).enabled, false);
-        f.machineSetup[name] = gateway;
-      }
+  for (const platform of ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]) {
+    assert.equal(f.machineSetup.registrationAvailability(platform).enabled, true);
+    for (const name of ["cloudCliGateway", "nodeDataGateway"]) {
+      const gateway = f.machineSetup[name];
+      f.machineSetup[name] = null;
+      assert.equal(f.machineSetup.registrationAvailability(platform).enabled, false);
+      f.machineSetup[name] = gateway;
     }
   }
 });
@@ -690,12 +688,10 @@ test("client registration rejects malformed, reused or mismatched secrets before
   assert.equal(f.probes.length, 0);
   assert.equal(f.tunnelProbes.length, 0);
   assert.deepEqual(await f.policy.list(f.member.id), []);
-  assert.equal((await f.machineSetup.machineUpdates.store.read()).data.devices[id], undefined);
 
   f.machineSetup.verify = async () => { throw Object.assign(new Error("fixture verification failure"), { status: 502 }); };
   assert.equal((await f.request("/api/settings/machines/activate", { method: "POST", value: valid })).status, 502);
   assert.deepEqual(await f.policy.list(f.member.id), []);
-  assert.equal((await f.machineSetup.machineUpdates.store.read()).data.devices[id], undefined);
 });
 
 test("client activation is recoverable and idempotent across partial or concurrent retries", async (t) => {
@@ -707,14 +703,14 @@ test("client activation is recoverable and idempotent across partial or concurre
   const value = registration(f.manifest, {
     ...publicFields, platform: "linux-x64", networkMode: "devtunnel", devTunnel: coordinates,
   });
-  const register = f.machineSetup.machineUpdates.registerClientMachine.bind(f.machineSetup.machineUpdates);
+  const activate = f.policy.activateImportedMachine.bind(f.policy);
   let failed = false;
-  f.machineSetup.machineUpdates.registerClientMachine = async (...args) => {
+  f.policy.activateImportedMachine = async (...args) => {
     if (!failed) {
       failed = true;
-      throw new Error("fixture updater persistence interruption");
+      throw new Error("fixture node activation persistence interruption");
     }
-    return register(...args);
+    return activate(...args);
   };
   assert.equal((await f.request("/api/settings/machines/activate", {
     method: "POST", value,
@@ -730,9 +726,7 @@ test("client activation is recoverable and idempotent across partial or concurre
   ]);
   assert.deepEqual(retries.map((response) => response.status), [201, 201]);
   assert.equal((await f.policy.list(f.member.id)).filter((node) => node.id === id).length, 1);
-  const device = (await f.machineSetup.machineUpdates.store.read()).data.devices[id];
-  assert.equal(device.ownerId, f.member.id);
-  const replayAfterUpdaterRotation = {
+  const legacyReplay = {
     ...value,
     credentials: {
       ...value.credentials,
@@ -740,10 +734,10 @@ test("client activation is recoverable and idempotent across partial or concurre
     },
   };
   assert.equal((await f.request("/api/settings/machines/activate", {
-    method: "POST", value: replayAfterUpdaterRotation,
+    method: "POST", value: legacyReplay,
   })).status, 201);
-  assert.equal((await f.machineSetup.machineUpdates.store.read()).data.devices[id].credentialHash,
-    device.credentialHash, "An active updater credential is not replaced by a registration replay");
+  assert.equal(await f.policy.keyFor(f.member.id, id), value.credentials.clientSigningKey,
+    "An optional legacy updater credential is ignored; node keys are preserved");
 });
 
 for (const platform of ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]) {
@@ -759,7 +753,6 @@ for (const platform of ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"])
     assert.equal((await post(original)).status, 201);
     await f.policy.update(f.member.id, id, { name: "My saved name", region: "My saved region", accent: "#aabbcc" });
     const before = await f.policy.owned(f.member.id, id);
-    const device = (await f.machineSetup.machineUpdates.store.read()).data.devices[id];
     assert.equal((await post({
       ...original, machine: { ...original.machine, name: "Another label", region: "Another region" },
     })).status, 201, "Display labels do not change the machine identity or overwrite saved settings");
@@ -803,8 +796,6 @@ for (const platform of ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"])
       assert.equal(f.workspace.match(`/cloudcli/${id}/`).fingerprint, restored.machine.fingerprint);
       assert.equal(await f.policy.machineTunnelToken(id), renewed.devTunnelConnectToken);
       assert.equal(await f.policy.keyFor(f.member.id, id), original.credentials.clientSigningKey);
-      assert.deepEqual((await f.machineSetup.machineUpdates.store.read()).data.devices[id], device,
-        "Restoration preserves the automatically enrolled updater credentials and history");
       assert.equal((await post(value)).status, 201, "Restoration remains idempotent");
       assert.equal((await f.policy.records()).data.nodes.length, 1);
       assert.deepEqual(await f.policy.list(f.credential.principalId), []);
@@ -826,7 +817,6 @@ test("removed registrations retain owner, key, platform, tunnel and capacity bou
   await assert.rejects(f.policy.activateImportedMachine(f.member.id, id), { status: 409 },
     "Removal cannot be undone without a fresh verified staging step");
   const removed = await f.policy.records();
-  const updates = await f.machineSetup.machineUpdates.store.read();
   const renewed = {
     ...original,
     machine: { ...original.machine, tlsCertificate: (await machineFile(f.root, id)).tlsCertificate },
@@ -849,7 +839,6 @@ test("removed registrations retain owner, key, platform, tunnel and capacity bou
   assert.equal((await post(renewed, f.admin)).status, 409, "Even an administrator cannot reclaim another owner's removed ID");
   for (const value of invalid) assert.equal((await post(value)).status, 409);
   assert.deepEqual(await f.policy.records(), removed, "Rejected imports do not change the tombstone or TLS pin");
-  assert.deepEqual(await f.machineSetup.machineUpdates.store.read(), updates);
 
   const verify = f.machineSetup.verify;
   f.machineSetup.verify = async () => { throw Object.assign(new Error("Restored TLS/SSO verification failed"), { status: 502 }); };
@@ -879,8 +868,8 @@ test("removed registrations retain owner, key, platform, tunnel and capacity bou
   assert.deepEqual(await f.policy.records(), conflicting, "A removed node cannot reclaim another live reservation's tunnel");
   await f.policy.cancelMachine(f.credential.principalId, reserved.id);
 
-  const register = f.machineSetup.machineUpdates.registerClientMachine.bind(f.machineSetup.machineUpdates);
-  f.machineSetup.machineUpdates.registerClientMachine = async () => { throw new Error("Updater persistence interrupted"); };
+  const activate = f.policy.activateImportedMachine.bind(f.policy);
+  f.policy.activateImportedMachine = async () => { throw new Error("Node activation persistence interrupted"); };
   assert.equal((await post(renewed)).status, 503);
   const staged = (await f.policy.records()).data.nodes.find(node => node.id === id);
   assert.equal(staged.enabled, false);
@@ -888,12 +877,12 @@ test("removed registrations retain owner, key, platform, tunnel and capacity bou
   assert.equal(staged.removedAt, removed.data.nodes[0].removedAt);
   assert.deepEqual(await f.policy.list(f.member.id), []);
   await assert.rejects(f.policy.keyFor(f.member.id, id), { status: 404 });
-  await assert.rejects(f.policy.activateImportedMachine(f.member.id, id, staged.setup.expiresAt), { status: 410 });
+  await assert.rejects(activate(f.member.id, id, staged.setup.expiresAt), { status: 410 });
   await f.machineSetup.refreshGateways();
   assert.equal(f.data.endpoint(id, [id]), null);
   assert.equal(f.workspace.match(`/cloudcli/${id}/`), null);
 
-  f.machineSetup.machineUpdates.registerClientMachine = register;
+  f.policy.activateImportedMachine = activate;
   // A further setup run after the interruption may regenerate TLS again.
   const retry = {
     ...renewed, machine: { ...renewed.machine, tlsCertificate: (await machineFile(f.root, id)).tlsCertificate },
@@ -903,7 +892,6 @@ test("removed registrations retain owner, key, platform, tunnel and capacity bou
   assert.equal((await f.policy.list(f.member.id)).length, 1);
   assert.equal((await f.policy.owned(f.member.id, id)).removedAt, undefined);
   assert.deepEqual((await f.policy.owned(f.member.id, id)).machine, machineIdentity(retry.machine, id));
-  assert.deepEqual((await f.machineSetup.machineUpdates.store.read()).data, updates.data);
 });
 
 test("only the invitation owner can activate, and activation verifies before exposing a private gateway", async (t) => {

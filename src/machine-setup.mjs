@@ -86,7 +86,7 @@ export async function loadMachineBundle(root, platformId = "linux-x64") {
       manifest.registrationSchema !== 2 || manifest.platform !== platformId ||
       !/^machine-[a-f0-9]{16}$/.test(manifest.releaseId ?? "") ||
       !/^machine-[a-f0-9]{16}$/.test(manifest.installerReleaseId ?? "") ||
-      JSON.stringify(manifest.bundledRuntimes) !== JSON.stringify(["cloudcli", "copilot-api", "updater"]) ||
+      JSON.stringify(manifest.bundledRuntimes) !== JSON.stringify(["cloudcli", "copilot-api"]) ||
       JSON.stringify(manifest.downloadedOfficialRuntimes) !== JSON.stringify(["node", "codex", "devtunnel"]) ||
       !/^\d+\.\d+\.\d+$/.test(manifest.node ?? "") ||
       typeof manifest.cloudcli?.version !== "string" || typeof manifest.copilotApi?.version !== "string" ||
@@ -162,9 +162,8 @@ export function machineNetworkConfig(raw) {
 
 export class MachineSetup {
   constructor({ nodePolicy, accounts, authenticator, origin, bundleRoot, network, cloudCliGateway, nodeDataGateway, cloudCliUi,
-    machineUpdates, verify = verifyMachine, verifyTunnel = verifyDevTunnelAccess }) {
+    verify = verifyMachine, verifyTunnel = verifyDevTunnelAccess }) {
     Object.assign(this, { nodePolicy, accounts, authenticator, origin, bundleRoot, cloudCliGateway, nodeDataGateway, cloudCliUi, verify });
-    this.machineUpdates = machineUpdates;
     this.verifyTunnel = verifyTunnel;
     this.tunnels = new MachineTunnelService({ nodePolicy, accounts });
     this.network = network ? machineNetworkConfig(network) : null;
@@ -189,12 +188,9 @@ export class MachineSetup {
     }
     const definition = machinePlatform(platformId);
     const identity = { platform: platformId, name: definition.name, entrypoint: definition.entrypoint,
-      updaterSupported: definition.updater, description: definition.description };
+      description: definition.description };
     if (!this.bundleRoot || (!definition.tunnel && !this.network) || !this.cloudCliGateway || !this.nodeDataGateway) {
       return { ...identity, enabled: false, reason: "运维尚未发布完整机器配置包或启用节点网关" };
-    }
-    if (definition.updater && (!this.machineUpdates || !this.machineUpdates.catalog.configured)) {
-      return { ...identity, enabled: false, reason: "请先配置节点升级器签名公钥，确保新机器可持续更新" };
     }
     try {
       const { manifest, package: packageInfo, npmPackage, installer, runtimeInstaller } = await this.selectedBundle(platformId);
@@ -230,12 +226,9 @@ export class MachineSetup {
   }
 
   registrationAvailability(platformId) {
-    const definition = machineRegistrationPlatform(platformId);
+    machineRegistrationPlatform(platformId);
     if (!this.cloudCliGateway || !this.nodeDataGateway) {
       return { enabled: false, reason: "运维尚未启用机器注册所需的 Workspace 和数据网关" };
-    }
-    if ((definition.updater || definition.portalUpdater) && !this.machineUpdates?.catalog?.configured) {
-      return { enabled: false, reason: "请先配置节点升级器签名公钥，确保新机器可持续更新" };
     }
     return { enabled: true };
   }
@@ -274,7 +267,7 @@ export class MachineSetup {
   async activateRegistration(req, res) {
     const raw = await input(req);
     const platformId = raw?.package?.platform;
-    const definition = machineRegistrationPlatform(platformId);
+    machineRegistrationPlatform(platformId);
     const available = this.registrationAvailability(platformId);
     if (!available.enabled) throw requestError(available.reason, 503);
     const registration = machineRegistration(raw, {
@@ -310,14 +303,6 @@ export class MachineSetup {
         registration.credentials,
         registration.connectToken,
       );
-      if ((definition.updater || definition.portalUpdater) && !staged.activated) {
-        await this.machineUpdates.registerClientMachine(
-          req.codeyPrincipal.id,
-          registration.machine.id,
-          registration.credentials.updaterCredential,
-          platformId,
-        );
-      }
       const node = staged.activated
         ? staged.node
         : await this.nodePolicy.activateImportedMachine(

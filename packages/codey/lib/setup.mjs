@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash, createPublicKey } from "node:crypto";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,14 +8,17 @@ const digest = bytes => createHash("sha256").update(bytes).digest("hex");
 const version = /^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/;
 const sha256 = /^[a-f0-9]{64}$/;
 
-export const SETUP_HELP = `Usage: codey setup [--config FILE] [--check]
+export const SETUP_HELP = `Usage: codey setup [--config FILE] --check
+       codey setup [--config FILE] --expected-computer NAME [--replace-existing]
 
 Configure this installed Codey npm package as a Linux x64 managed node.
 Uses onboarding/setup.json from a machine build, or an explicit public config.
 --check validates the package/configuration without installing tools, stopping
 processes, writing credentials, contacting models, or changing system services.
-Without --check, setup replaces Codey service/model configuration and stops
-the current user's old Codex processes. Auth and session files are retained.
+Apply checks native owner/host and port ownership. Foreign or unverified listeners
+abort; same-release managed nodes are verified and reused without reinstalling.
+--replace-existing backs up Codex/gateway settings on a new node; auth/sessions remain.
+Close unmanaged Codex processes yourself. No process is killed to free a port.
 `;
 
 export function setupOptions(args) {
@@ -24,6 +27,10 @@ export function setupOptions(args) {
     const name = args[index];
     if (name === "--help" || name === "-h") return { help: true };
     if (name === "--check" && !options.check) options.check = true;
+    else if (name === "--replace-existing" && !options.replaceExisting) options.replaceExisting = true;
+    else if (name === "--expected-computer" && !options.expectedComputer && args[index + 1] && !args[index + 1].startsWith("--")) {
+      options.expectedComputer = args[++index];
+    }
     else if (name === "--config" && !options.config && args[index + 1] && !args[index + 1].startsWith("--")) {
       options.config = path.resolve(args[++index]);
     } else throw new Error(`Invalid setup option: ${name}`);
@@ -38,23 +45,23 @@ export function validateSetupConfig(config) {
       Object.keys(config).some(key => !fields.includes(key)) ||
       config.schema !== 1 || !["auto", "linux-x64"].includes(config.platform) ||
       JSON.stringify(config.network) !== '{"mode":"devtunnel"}' ||
-      config.tunnelAuthProvider !== "github" || config.updater?.protocol !== 1 ||
-      Object.keys(config.updater).some(key => !["protocol", "releasePublicKey"].includes(key))) {
+      config.tunnelAuthProvider !== "github") {
     throw new Error("Invalid public Codey setup configuration");
   }
   const origin = new URL(config.portalOrigin);
   if (origin.protocol !== "https:" || origin.origin !== config.portalOrigin || origin.username || origin.password) {
     throw new Error("Setup requires an exact HTTPS Portal origin");
   }
-  const key = config.updater.releasePublicKey;
-  if (typeof key !== "string" || key.length > 8192 ||
-      !key.startsWith("-----BEGIN PUBLIC KEY-----\n") || key.includes("PRIVATE KEY")) {
-    throw new Error("Setup requires the updater public key, not a private key");
+  if (config.updater !== undefined && (
+    !config.updater || config.updater.protocol !== 1 ||
+    Object.keys(config.updater).some(key => !["protocol", "releasePublicKey"].includes(key)) ||
+    typeof config.updater.releasePublicKey !== "string" || config.updater.releasePublicKey.length > 8192 ||
+    !config.updater.releasePublicKey.startsWith("-----BEGIN PUBLIC KEY-----\n") ||
+    config.updater.releasePublicKey.includes("PRIVATE KEY"))) {
+    throw new Error("Legacy setup may contain only public updater metadata");
   }
-  if (createPublicKey(key).asymmetricKeyType !== "ed25519") {
-    throw new Error("The Codey updater requires an Ed25519 public key");
-  }
-  return config;
+  const { updater: _retired, ...setup } = config;
+  return setup;
 }
 
 export async function installedSetup(root, configFile, nodeVersion = process.versions.node) {
@@ -80,9 +87,10 @@ export async function installedSetup(root, configFile, nodeVersion = process.ver
     }
   }
   for (const name of [
-    "onboarding/scripts/install.sh", "onboarding/scripts/registration.mjs", "onboarding/templates/a100-models.json",
+    "onboarding/scripts/install.sh", "onboarding/scripts/registration.mjs",
+    "onboarding/templates/a100-models.json", "onboarding/templates/codex-config.toml",
     "onboarding/scripts/install-devtunnel-health.sh", "onboarding/scripts/linux-devtunnel-health.mjs",
-    "updater/install.py", "updater/updater.py", "updater/engine.py", "updater/probe.mjs",
+    "onboarding/scripts/linux-preflight.sh", "onboarding/scripts/windows-runtime.mjs",
   ]) {
     if (!(await stat(path.join(root, name))).isFile()) throw new Error(`Missing Codey setup file: ${name}`);
   }
@@ -94,7 +102,7 @@ export async function installedSetup(root, configFile, nodeVersion = process.ver
     if (error instanceof SyntaxError) throw new Error("Setup configuration must be valid JSON");
     throw error;
   }
-  validateSetupConfig(config);
+  config = validateSetupConfig(config);
   const entrySha256 = digest(buildRaw);
   const releaseId = `machine-${entrySha256.slice(0, 16)}`;
   const manifest = {
@@ -102,7 +110,7 @@ export async function installedSetup(root, configFile, nodeVersion = process.ver
     dependencyMode: "npm-installed", artifacts: [],
     codey: { version: pkg.version, commit: build.sourceCommit, entrySha256, lockSha256: build.lockSha256 },
     cloudcli: build.cloudcli, copilotApi: build.copilotApi,
-    bundledRuntimes: ["cloudcli", "copilot-api", "updater"],
+    bundledRuntimes: ["cloudcli", "copilot-api"],
     downloadedOfficialRuntimes: ["node", "codex", "devtunnel"],
   };
   return { root, manifest, setup: { ...config, platform: manifest.platform, releaseId } };
@@ -130,6 +138,9 @@ export async function runSetup(root, args, { spawnProcess = spawn, home = os.hom
     }));
     return;
   }
+  if (options.expectedComputer !== os.hostname()) {
+    throw new Error("Setup requires --expected-computer matching this machine's exact hostname.");
+  }
   const directory = await mkdtemp(path.join(os.tmpdir(), "codey-npm-setup-"));
   try {
     const checksums = [];
@@ -139,7 +150,8 @@ export async function runSetup(root, args, { spawnProcess = spawn, home = os.hom
       checksums.push(`${digest(bytes)}  ${name}`);
     }
     await writeFile(path.join(directory, "SHA256SUMS"), checksums.join("\n") + "\n", { mode: 0o600 });
-    const child = spawnProcess("bash", [path.join(prepared.root, "onboarding/scripts/install.sh")], {
+    const child = spawnProcess("bash", [path.join(prepared.root, "onboarding/scripts/install.sh"),
+      "--expected-computer", options.expectedComputer, ...(options.replaceExisting ? ["--replace-existing"] : [])], {
       stdio: "inherit", shell: false,
       env: { ...process.env, CODEY_INSTALLED_PACKAGE: prepared.root,
         CODEY_SETUP_ASSETS: directory, CODEY_SETUP_NODE: process.execPath },

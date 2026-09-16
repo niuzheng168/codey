@@ -31,45 +31,42 @@ function send(res, status, value, headers = {}) {
 }
 
 export class SettingsApi {
-  constructor({ accounts, nodePolicy, authenticator, cloudCliGateway, nodeDataGateway, machineSetup, machineUpdates }) {
-    Object.assign(this, { accounts, nodePolicy, authenticator, cloudCliGateway, nodeDataGateway, machineSetup, machineUpdates });
+  constructor({ accounts, nodePolicy, authenticator, cloudCliGateway, nodeDataGateway, machineSetup }) {
+    Object.assign(this, { accounts, nodePolicy, authenticator, cloudCliGateway, nodeDataGateway, machineSetup });
   }
 
   async adminNodes() {
     const [registered, users] = await Promise.all([this.nodePolicy.inventory(), this.accounts.list()]);
     const owners = new Map(users.map((user) => [user.id, user]));
-    const snapshot = await this.machineUpdates?.inventory(registered);
     const nodes = await Promise.all(registered.map(async ({ id, name, region, ownerId }) => {
       const owner = owners.get(ownerId);
-      const metadata = snapshot?.nodes.get(id);
-      const updaterStatus = metadata?.status ?? "unavailable";
-      const health = owner?.enabled && ["not_enrolled", "unreported", "unavailable"].includes(updaterStatus)
+      const health = owner?.enabled
         ? await this.cloudCliGateway?.healthMetadata?.(id) : null;
       const status = !owner ? "unknown" : !owner.enabled ? "owner_disabled"
-        : health?.reachable ? "workspace_online" : health ? "workspace_unreachable" : updaterStatus;
+        : health?.reachable ? "workspace_online" : health ? "workspace_unreachable" : "unknown";
       return {
         id, name, region,
         owner: { id: ownerId, username: owner?.username ?? null, enabled: owner?.enabled ?? false },
         status,
-        lastSeen: metadata?.lastSeen ?? null,
-        releaseId: metadata?.releaseId ?? null,
-        ...(health ? { workspaceHealth: health, updaterStatus } : {}),
+        lastSeen: null,
+        releaseId: null,
+        ...(health ? { workspaceHealth: health } : {}),
         components: {
           // A standalone Workspace health version is not a Codey package version.
-          codey: metadata?.components.codey ?? null,
+          codey: null,
           cloudcli: health?.reachable && health.version
             ? { version: health.version, commit: null, nodeMajor: null, source: "workspace_health" }
-            : metadata?.components.cloudcli ?? null,
-          copilotApi: metadata?.components.copilotApi ?? null,
+            : null,
+          copilotApi: null,
         },
       };
     }));
-    const online = nodes.filter((node) => ["online", "workspace_online"].includes(node.status)).length;
-    const stale = nodes.filter((node) => node.status === "stale").length;
+    const online = nodes.filter((node) => node.status === "workspace_online").length;
+    const stale = nodes.filter((node) => node.status === "workspace_unreachable").length;
     return {
-      generatedAt: snapshot?.generatedAt ?? Date.now(),
-      heartbeatTimeoutMs: snapshot?.heartbeatTimeoutMs ?? null,
-      telemetryAvailable: Boolean(snapshot),
+      generatedAt: Date.now(),
+      heartbeatTimeoutMs: null,
+      telemetryAvailable: false,
       workspaceHealthAvailable: nodes.some((node) => node.workspaceHealth),
       summary: {
         total: nodes.length, owners: new Set(nodes.map((node) => node.owner.id)).size,
@@ -85,7 +82,6 @@ export class SettingsApi {
     try {
       const principal = req.codeyPrincipal;
       if (!principal) throw requestError("需要登录", 401);
-      if (this.machineUpdates && await this.machineUpdates.handleOwner(req, res)) return true;
       if (this.machineSetup && await this.machineSetup.handle(req, res)) return true;
       if (pathname.startsWith("/api/admin/") && principal.role !== "admin") {
         throw requestError("只有管理员可以访问全局管理", 403);

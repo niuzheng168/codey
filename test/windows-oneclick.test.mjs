@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHmac } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import {
   validateTunnel, validateConnectToken, clientTicket, workspaceAssertion, registrationDocument,
 } from "../skills/config-new-codey-machine/scripts/windows-runtime.mjs";
@@ -32,8 +35,29 @@ test("Windows one-click installer, command and watchdog native lifecycle regress
   assert.match(result.stderr, /OK/);
 });
 
+test("PowerShell port preflight permits owned Codey and rejects foreign/spoofed listeners", { timeout: 30000 }, async t => {
+  const shell = process.env.CODEY_TEST_PWSH || (process.platform === "win32" ? "powershell.exe" : "pwsh");
+  const home = await mkdtemp(path.join(os.tmpdir(), "codey-ps-preflight-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  let result;
+  try {
+    result = await run(shell, ["-NoProfile", "-NonInteractive", "-File",
+      fileURLToPath(new URL("./windows-port-preflight.ps1", import.meta.url)), "-Installer",
+      fileURLToPath(new URL("../skills/config-new-codey-machine/scripts/install.ps1", import.meta.url))],
+    { timeout: 25000, windowsHide: true, maxBuffer: 1024 * 1024,
+      env: { ...process.env, HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: path.join(home, "config"),
+        XDG_CACHE_HOME: path.join(home, "cache"), POWERSHELL_TELEMETRY_OPTOUT: "1", POWERSHELL_UPDATECHECK: "Off" } });
+  } catch (error) {
+    if (error.code === "ENOENT" && !process.env.CODEY_TEST_PWSH) { t.skip("PowerShell is not installed on this test host"); return; }
+    throw error;
+  }
+  assert.match(result.stdout, /WINDOWS_PORT_PREFLIGHT_OK checks=16/);
+});
+
 test("Windows installer accepts only its exact private HTTPS tunnel", () => {
   assert.deepEqual(validateTunnel(tunnel(), coordinates.tunnelId), coordinates);
+  assert.deepEqual(validateTunnel(tunnel(), coordinates.tunnelId, coordinates.clusterId), coordinates);
+  assert.throws(() => validateTunnel(tunnel(), coordinates.tunnelId, "other"), /cluster changed/);
   assert.deepEqual(validateTunnel({ tunnel: { ...tunnel(), tunnelId: `${coordinates.tunnelId}.jpe1` } },
     coordinates.tunnelId), coordinates);
   const invalid = [

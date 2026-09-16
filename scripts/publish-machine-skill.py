@@ -85,23 +85,18 @@ def inspect_package(file):
             raise PublishError("OVERSIZED_PACKAGE_METADATA")
         manifest = json.loads(manifest_raw)
         setup = json.loads(setup_raw)
-        public_fields = {"schema", "portalOrigin", "platform", "network", "tunnelAuthProvider", "updater", "releaseId"}
+        public_fields = {"schema", "portalOrigin", "platform", "network", "tunnelAuthProvider", "releaseId"}
         if not isinstance(setup, dict) or set(setup) != public_fields:
             raise PublishError("SETUP_MUST_CONTAIN_PUBLIC_METADATA_ONLY")
         origin = urlsplit(setup.get("portalOrigin", ""))
-        updater = setup.get("updater")
         if (origin.scheme != "https" or not origin.hostname or origin.username or origin.password
-                or origin.path or origin.query or origin.fragment
-                or not isinstance(updater, dict) or set(updater) != {"protocol", "releasePublicKey"}
-                or updater.get("protocol") != 1
-                or not isinstance(updater.get("releasePublicKey"), str)
-                or not updater["releasePublicKey"].startswith("-----BEGIN PUBLIC KEY-----\n")
-                or "PRIVATE KEY" in updater["releasePublicKey"] or len(updater["releasePublicKey"]) > 8192):
+                or origin.path or origin.query or origin.fragment):
             raise PublishError("INVALID_PUBLIC_SETUP_METADATA")
         if (manifest.get("schema") != 2 or manifest.get("name") != "codey"
                 or manifest.get("platform") != "linux-x64"
                 or manifest.get("runtimePlatforms") != RUNTIME_PLATFORMS
                 or manifest.get("dependencyMode") != "npm-codey-package"
+                or manifest.get("bundledRuntimes") != ["cloudcli", "copilot-api"]
                 or not RELEASE.fullmatch(manifest.get("releaseId", ""))
                 or setup.get("schema") != 1 or setup.get("platform") != "linux-x64"
                 or setup.get("releaseId") != manifest["releaseId"]
@@ -142,7 +137,10 @@ def inspect_package(file):
                                      "package/onboarding/scripts/registration.mjs",
                                      "package/onboarding/scripts/install-devtunnel-health.sh",
                                      "package/onboarding/scripts/linux-devtunnel-health.mjs",
-                                     "package/onboarding/templates/a100-models.json"]:
+                                     "package/onboarding/scripts/linux-preflight.sh",
+                                     "package/onboarding/scripts/windows-runtime.mjs",
+                                     "package/onboarding/templates/a100-models.json",
+                                     "package/onboarding/templates/codex-config.toml"]:
                         if not npm.getmember(required).isfile():
                             raise KeyError(required)
                 except (KeyError, TypeError, ValueError, AttributeError) as error:
@@ -197,7 +195,7 @@ def inspect_package(file):
                              "sha256": hashlib.sha256(runtime_installer).hexdigest()},
         "codey": manifest["codey"],
         "releaseSource": manifest.get("releaseSource"),
-        "bundledRuntimes": ["cloudcli", "copilot-api", "updater"],
+        "bundledRuntimes": ["cloudcli", "copilot-api"],
         "downloadedOfficialRuntimes": ["node", "codex", "devtunnel"],
         "package": {"file": PACKAGE_NAME, "size": size, "sha256": package_sha},
     }

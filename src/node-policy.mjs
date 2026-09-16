@@ -316,7 +316,7 @@ export class NodePolicy {
             throw requestError("此 DevTunnel 已绑定到另一台机器", 409);
           }
           // Reuse the owner-bound record and its saved display settings, but
-          // keep access disabled until updater enrollment/activation completes.
+          // Keep access disabled until the verified registration is activated.
           current.machine = machine;
           current.setup.status = "importing";
           current.setup.expiresAt = now + 15 * 60000;

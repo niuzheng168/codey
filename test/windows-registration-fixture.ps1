@@ -21,11 +21,8 @@ Check ($package.Setup.platform -eq 'windows-x64') 'Setup must resolve to the nat
 Check ($package.Manifest.platform -eq 'windows-x64') 'Windows runtime must not consume Linux service metadata'
 Check ($package.Manifest.nodeDistribution.url -like '*-win-x64.zip') 'Windows must use its own official Node distribution'
 Check ([IO.File]::ReadAllText($manifestFile) -ceq $before) 'Resolving the platform must not rewrite the shared artifact'
-if ($package.Manifest.PSObject.Properties['runtimePlatforms']) {
-    Check ($package.Setup.updater.protocol -eq 1) 'Keep the public key for automatic native updater bootstrap'
-} else {
-    Check ($package.Setup.updater.supported -eq $false) 'Legacy metadata remains readable'
-}
+Check (-not $package.Setup.PSObject.Properties['updater']) 'Public setup must not require updater metadata'
+Check ((@($package.Manifest.bundledRuntimes) -join ',') -eq 'cloudcli,copilot-api') 'Only the two application runtimes are bundled'
 
 # Exercise the real installed-package identity/platform check too, with only the
 # native addon and CLI subprocesses stubbed. A shared build has no .platform field.
@@ -74,24 +71,6 @@ catch {
 }
 Check $rejected 'Reject malformed DevTunnel JSON'
 
-# Auto-install wiring must pass the native -Apply switch, then erase bootstrap
-# credential copies. No real Node, service or Task Scheduler operation is run.
-$config | Add-Member -NotePropertyName configRoot -NotePropertyValue $owner
-$config | Add-Member -NotePropertyName powershellExe -NotePropertyValue 'fixture-powershell'
-function New-CodeyDirectory { param($Path); [IO.Directory]::CreateDirectory($Path) | Out-Null }
-$script:AutomaticCalls = 0
-function Invoke-CodeyProcess {
-    param($Executable, $Arguments, $WorkingDirectory, $TimeoutSeconds)
-    $script:AutomaticCalls++
-    if ($Executable -eq 'fixture-node') {
-        Check ($Arguments[0].EndsWith('updater-bootstrap.mjs') -and $Arguments[1] -eq $configPath) 'Use the real native bootstrap entrypoint'
-        [IO.File]::WriteAllText((Join-Path $Arguments[2] 'install.ps1'), '# fixture only')
-    } else {
-        Check ($Executable -eq 'fixture-powershell' -and $Arguments -contains '-Apply') 'Automatically apply the native updater installer'
-        Check (Test-Path -LiteralPath $Arguments[4]) 'Execute the privately prepared installer'
-    }
-}
-Install-CodeyAutomaticUpdater $config $configPath
-Check ($script:AutomaticCalls -eq 2) 'Automatically prepare and install the updater'
-Check (@(Get-ChildItem -LiteralPath $owner -Filter 'updater-bootstrap-*').Count -eq 0) 'No leftover bootstrap credentials'
+Check (-not (Get-Command Install-CodeyAutomaticUpdater -ErrorAction SilentlyContinue)) 'No automatic updater entrypoint is installed'
+Check (-not (Test-Path -LiteralPath (Join-Path $packageRoot 'scripts/updater-bootstrap.mjs'))) 'No updater bootstrap is shipped'
 Write-Output 'WINDOWS_REGISTRATION_FIXTURE_OK'

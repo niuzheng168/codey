@@ -10,11 +10,10 @@ const FIELDS = Object.freeze([
   "clientSigningKey",
   "workspaceSsoKey",
   "tunnelUpdateKey",
-  "updaterCredential",
   "workspaceSubject",
   "workspaceUsername",
 ]);
-const NODE_FIELDS = Object.freeze(FIELDS.filter((name) => name !== "updaterCredential"));
+const NODE_FIELDS = FIELDS;
 
 function key(master, nodeId) {
   return createHmac("sha256", master)
@@ -52,11 +51,15 @@ function storedCredentials(input) {
 }
 
 export function machineCredentials(input) {
+  // Older registration files may carry an updater secret. Validate it if present,
+  // but never persist it or enroll an agent; only node access credentials remain.
+  const legacy = input && Object.hasOwn(input, "updaterCredential");
+  const fields = legacy ? [...FIELDS, "updaterCredential"] : FIELDS;
   if (!input || typeof input !== "object" || Array.isArray(input) ||
-      Object.keys(input).length !== FIELDS.length ||
-      Object.keys(input).some((name) => !FIELDS.includes(name)) ||
+      Object.keys(input).length !== fields.length ||
+      Object.keys(input).some((name) => !fields.includes(name)) ||
       !distinctKeys(input, [
-        "clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey", "updaterCredential",
+        "clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey", ...(legacy ? ["updaterCredential"] : []),
       ]) ||
       !SUBJECT.test(input.workspaceSubject ?? "") ||
       !USERNAME.test(input.workspaceUsername ?? "")) {

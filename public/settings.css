@@ -232,41 +232,12 @@ dialog > h2 { margin-bottom: 12px; }
 #settings-message { padding: 10px 14px; margin: 16px 0 0; border: 1px solid #28474b; border-radius: 8px; background: #0e242b; }
 #settings-message.error { border-color: #633347; background: #281724; }
 #settings-message.error, #machine-download-message.error, #machine-activation-message.error { color: #fda4af; }
-#settings-message:empty, #machine-download-message:empty, #machine-activation-message:empty, #node-update-plan-error:empty { margin: 0; padding: 0; border: 0; background: transparent; }
 #machine-download-message, #machine-activation-message { margin: 8px 0 0; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; background: #090f1b; border-radius: 8px; font: 12px/1.7 ui-monospace, monospace; }
-
-.update-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
-.update-toolbar { padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: #0c1422; }
-.release-picker { flex: 1 1 280px; }
-.release-picker select { text-overflow: ellipsis; }
-#node-update-message { margin: 12px 0 4px; font-size: 12px; }
-.node-update-row { display: grid; grid-template-columns: minmax(120px, .7fr) minmax(180px, 1fr) auto; align-items: center; gap: 16px; padding: 12px 4px; border-bottom: 1px solid var(--border); }
-.node-update-row:last-child { border-bottom: 0; }
-.node-update-select { display: flex; align-items: center; gap: 10px; overflow-wrap: anywhere; }
-.node-update-select strong { font-size: 13px; font-weight: 600; }
-.node-update-info { display: grid; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
-.node-update-info .muted { font-size: 12px; }
-.update-status { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
-.update-badge { color: var(--accent); font-size: 12px; }
-.update-warning, #node-update-message.error, #node-update-plan-error { color: #fda4af; }
-.update-actions { display: flex; align-items: center; gap: 8px; }
-.update-actions > button { white-space: nowrap; }
-.updater-menu { position: relative; }
-.updater-menu > summary { list-style: none; cursor: pointer; color: var(--muted); font-size: 12px; padding: 8px; border: 1px solid transparent; border-radius: 6px; white-space: nowrap; }
-.updater-menu > summary:hover, .updater-menu[open] > summary { color: #e2e8f0; background: #203149; }
-.updater-menu > summary::after { content: "⌄"; margin-left: 4px; }
-.updater-menu-items { display: grid; gap: 4px; position: absolute; z-index: 2; right: 0; top: calc(100% + 4px); min-width: 170px; padding: 6px; background: #182437; border: 1px solid #334155; border-radius: 8px; box-shadow: 0 8px 24px #0006; }
-.updater-menu-items button { text-align: left; border-color: transparent; background: transparent; white-space: nowrap; }
-#node-update-jobs { max-height: 300px; overflow: auto; padding-top: 8px; }
-#node-update-jobs p { margin: 8px 0; font-size: 12px; }
-#node-update-jobs, #node-update-plan-targets, #node-update-plan-note { overflow-wrap: anywhere; }
 
 @media (max-width: 880px) {
   .node-summary { grid-template-columns: minmax(130px, 1fr) auto 48px; gap: 12px; }
   .node-endpoint { display: none; }
-  .node-update-row { grid-template-columns: minmax(100px, .6fr) minmax(160px, 1fr) auto; gap: 12px; }
-  .update-toolbar .release-picker { flex-basis: 100%; }
   .inventory-scroll-hint { display: block; }
 }
 
@@ -278,7 +249,6 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; background:
   .settings-tabs { gap: 0; }
   .settings-tabs [role="tab"] { flex: 1; padding: 10px 6px; gap: 4px; font-size: 12px; }
   #nodes-count { display: none; }
-  #node-update-count { padding: 0 4px; font-size: 10px; }
   .count-compact { display: inline; }
   .count-label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .settings-panel { margin-top: 16px; padding: 16px; }
@@ -298,10 +268,6 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; background:
   .dialog-heading { gap: 8px; }
   .machine-setup-flow > li { gap: 10px; }
   .step-content code { font-size: 12px; }
-  .node-update-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
-  .node-update-info { grid-column: 1 / -1; grid-row: 2; padding-left: 26px; }
-  .update-actions { grid-column: 2; grid-row: 1; gap: 2px; }
-  .update-actions > button { padding: 6px 8px; font-size: 12px; }
   .admin-tabs { margin-bottom: 18px; }
   .inventory-summary { gap: 4px 18px; }
   .inventory-summary strong { font-size: 20px; }

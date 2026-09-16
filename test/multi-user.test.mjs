@@ -239,7 +239,7 @@ test("multi-user security: independent accounts, immutable node ownership and ob
     for (const node of result.nodes) {
       assert.deepEqual(Object.keys(node).sort(), ["components", "id", "lastSeen", "name", "owner", "region", "releaseId", "status"]);
       assert.deepEqual(node.components, { codey: null, cloudcli: null, copilotApi: null });
-      assert.equal(node.status, "unavailable");
+      assert.equal(node.status, "unknown");
     }
     for (const privateValue of [f.master, f.ticketMaster, credential.passwordHash,
       "alice.example.test", "bob.example.test", "10.0.0.7", "serverNode", "endpoint", "credentialHash"]) {

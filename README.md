@@ -25,12 +25,13 @@ cd codey
 目标机安装自己的原生依赖。已有 Node/npm 时可运行随包提供的
 `node install-codey.mjs`，并用 `codey doctor` 自检。Linux 的完整
 systemd/DevTunnel 部署仍是独立的 `codey setup` 流程，不会套用到 Windows。
-源码仍保留为 submodule，构建、安装和升级产物统一为 Codey。
+源码仍保留为 submodule，构建与安装产物统一为 Codey。
 
 现行共享包也支持 macOS arm64/x64。Codey 整包发行不再按操作系统分开：
-一次发布一份 `.tgz`、SHA-256 和共享签名清单；各节点使用同一版本，
-仍在本机校验 Node、原生依赖和身份。旧升级器需先刷新到支持共享清单的实现，
-无需重新安装 Codey 或重新注册节点。详见 [整包更新](./docs/node-updates.md)。
+一次发布一份 `.tgz` 和 SHA-256，在目标机校验 Node、原生依赖和身份。
+当前源码已移除 Portal 更新代理与本地更新器；不再提供 `codey update/--update`。
+Mac 安装和 LaunchAgent worker 改为 Node，正常安装无 Python 前置依赖。
+旧节点需单独评审迁移，不以重跑安装替代升级或恢复；构建端 Python 不属于用户依赖。
 
 ```sh
 npm run codey:build -- --output artifacts/codey-npm
@@ -41,24 +42,26 @@ codey start
 
 **公共 npm 的 `codey` 名称已被其他项目占用**；当前使用本地 `.tgz` 或私有
 registry，不要从公共源安装同名包。构建不会自动发布或部署。
-完整的一键安装与整包升级见 [节点接入说明](./docs/codey-machine-setup.md)。
+完整安装流程与命令行用法见 [安装 Skill](./skills/config-new-codey-machine/SKILL.md)。
 
 “账号与节点 → 添加节点”只保留一个 Codey 安装 Skill 下载入口，不再让用户选择系统。
 Skill 内是同一份 Linux/Windows npm 包；安装步骤及注册文件仍按真实平台识别。
 旧的 Linux 专用发行版不会被当作共用安装包开放此入口。
 
 Linux 的独立 npm 包和 `install-codey-linux.sh` 入口仍保留，不必解压 Skill ZIP。
-将两者放在同一目录后运行 `bash install-codey-linux.sh`；也可以从仓库执行：
+将两者放在同一目录，确认目标机名后运行 `bash install-codey-linux.sh --expected-computer "实际机名"`；也可以从仓库执行：
 
 ```sh
-bash scripts/linux/install-codey.sh --package ./codey-0.1.1.tgz
+bash scripts/linux/install-codey.sh --package ./codey-0.1.1.tgz --expected-computer "$(hostname)"
 ```
 
 一键脚本先用 npm 在新的私有 prefix 安装，再调用包内的 `codey setup`。
-已通过 npm 安装的机器可直接执行 `codey setup --check` / `codey setup`，
+已通过 npm 安装的机器可执行 `codey setup --check` / `codey setup --expected-computer "实际机名"`，
 不会再次安装或搬动应用目录。`machine:build` 会内置公开的 Portal 配置；
-普通 `codey:build` 需要用 `codey setup --config <公开配置.json>` 指定配置。
+普通 `codey:build` 还需要加 `--config <公开配置.json>` 指定配置。
 安装 npm 包本身不会启动服务或覆盖模型配置。
+端口空闲或确认来自本用户 Codey 时继续，其他/未知监听导致安装终止，不强杀进程。
+同版本已完成节点只重复验收和导出；新节点覆盖 Codex 配置需批准 `--replace-existing`，保留 auth/sessions。
 
 ## Portal 本地检查
 

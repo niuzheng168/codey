@@ -14,19 +14,16 @@ Usage:
   codey auth [arguments...]
   codey mcp [arguments...]
   codey doctor [--package-only] [--json]
-  codey update PACKAGE.tgz [--check] [--sha256 HASH]
-  codey update codex TOOL-UPDATE.json --sha256 HASH [--check]
-  codey update devtunnel TOOL-UPDATE.json --sha256 HASH [--check | --allow-disconnect]
-  codey update --recover
-  codey setup [--config FILE] [--check]
+  codey setup [--config FILE] --check
+  codey setup [--config FILE] --expected-computer NAME [--replace-existing]
   codey --version
 
 start runs both services in the foreground; Ctrl+C stops both.
 Defaults: loopback only, workspace :3001, gateway :4141.
 Responses WebSocket defaults to off; explicit gateway config takes precedence.
 doctor checks the shared Linux/Windows/macOS runtime; managed setup is Linux-only.
-macOS managed updates use the separately enrolled Portal LaunchAgent, not update/setup.
-update selects one component at a time; it never runs setup. See "codey update --help".
+No Portal update agent or local updater is included.
+Do not rerun setup to upgrade an existing node.
 Use "codey gateway --help" for gateway options.
 Install the official Codex CLI separately and authenticate the gateway with
 "codey auth login --provider copilot". Existing configuration is preserved.
@@ -72,7 +69,9 @@ export function commandPlan(args, env = process.env) {
   }
   if (["auth", "mcp"].includes(command)) return { kind: "gateway", args: [command, ...rest] };
   if (command === "doctor") return { kind: "doctor", args: rest };
-  if (command === "update") return { kind: "update", args: rest };
+  if (["update", "--update"].includes(command)) {
+    throw new Error("The Codey updater has been removed. Do not use setup or overwrite a running installation to upgrade.");
+  }
   if (command === "setup") return { kind: "setup", args: rest };
   if (command === "gateway") return {
     kind: "gateway",
@@ -180,11 +179,6 @@ export async function runCli(args = process.argv.slice(2)) {
   if (plan.kind === "setup") {
     const { runSetup } = await import("./setup.mjs");
     await runSetup(ROOT, plan.args);
-    return;
-  }
-  if (plan.kind === "update") {
-    const { runUpdate } = await import("./update.mjs");
-    await runUpdate(ROOT, plan.args);
     return;
   }
   if (plan.kind === "doctor") {

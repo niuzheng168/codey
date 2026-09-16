@@ -27,7 +27,7 @@ compatible existing Node/native ABI; it never falls back to the registry.
 
 No services, DevTunnel, credentials or Codex settings are modified, and no Portal
 registration JSON is generated. For a complete node use the installation Skill's
-native entrypoint (install-npm.sh, install.ps1 or install-macos.py).
+native entrypoint (install-npm.sh, install.ps1 or install-macos.sh).
 `;
 
 export function installerPlatform(platform = process.platform, arch = process.arch) {
@@ -252,12 +252,11 @@ require('node:module').createRequire(process.argv[1])('pacote').extract(process.
   if (donor) {
     // The independently checked release supplies the offline installer helpers.
     const load = name => import(pathToFileURL(path.join(app, "lib", name)).href);
-    const { inspectUpdateArchive } = await load("update-archive.mjs");
-    const { verifyStagedPackage } = await load("update.mjs");
-    const { copyDependencies } = await load("update-dependencies.mjs");
-    const { ownedPath, buildEnvironment } = await load("update-files.mjs");
+    const { inspectPackageArchive, verifyStagedPackage } = await load("package-archive.mjs");
+    const { copyDependencies } = await load("package-dependencies.mjs");
+    const { ownedPath, buildEnvironment } = await load("package-files.mjs");
     await ownedPath(donor, home);
-    const artifact = await inspectUpdateArchive(file, options.sha256);
+    const artifact = await inspectPackageArchive(file, options.sha256);
     await verifyStagedPackage(app, artifact);
     await copyDependencies(donor, app, artifact.lock);
     await verifyStagedPackage(app, artifact);

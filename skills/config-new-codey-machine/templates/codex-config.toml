@@ -1,0 +1,25 @@
+model = "gpt-6-astra"
+model_provider = "copilot_api"
+model_reasoning_effort = "max"
+model_reasoning_summary = "auto"
+model_context_window = 872000
+model_auto_compact_token_limit = 722000
+model_catalog_json = __CODEY_MODEL_CATALOG__
+personality = "pragmatic"
+approvals_reviewer = "user"
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+
+[model_providers.copilot_api]
+name = "OpenAI"
+base_url = "http://127.0.0.1:4141"
+env_key = "CODEY_MODEL_API_KEY"
+requires_openai_auth = false
+supports_websockets = false
+wire_api = "responses"
+request_max_retries = 3
+stream_max_retries = 1
+stream_idle_timeout_ms = 300000
+
+[features]
+remote_compaction_v2 = true

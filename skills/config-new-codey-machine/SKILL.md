@@ -1,71 +1,88 @@
 ---
 name: config-new-codey-machine
-description: "在 Linux x64、Windows x64、macOS arm64/x64 一键安装 Codey 节点，自动接入升级器并生成 Portal 注册 JSON。"
+description: "按完整发行包安装 Linux、Windows、macOS Codey 节点，并说明命令行与删除边界；不安装 Portal 或本地更新器。"
 ---
 
-# 一键安装 Codey
+# Codey 节点安装与命令行
 
-目标：安装运行中的 Codey 节点和签名升级器，交付本机生成的
-`codey-machine-registration.json`。只执行当前系统的入口，不逐个运行辅助脚本，
-不自行补装 SSH/WSL 或重写安装流程。
+> 当前源码已移除两套更新器并改用 Node 执行 Mac 安装/守护，尚未发布；Windows/macOS 原生验收另行完成。
+> 只在用户确认目标机器和操作范围后安装；代码评审、测试不等于允许部署或发布。
 
-## 执行
+## 用户执行时的依赖
 
-先定位包含本文件及 `assets/codey-<version>.tgz` 的 Skill 根目录。
-应用包只有一份，三个系统共用；缺少脚本或包时报错，不改装公共 npm 的同名项目。
-使用原登录用户的外部终端，不从 Codey/Codex 自己的进程树内安装。
+- **Linux x64**：Bash、curl、tar/xz、OpenSSL、`ss`（iproute2）等基础工具、systemd 用户服务；开启 linger 等操作需 sudo。
+- **Windows x64**：PowerShell 5.1、.NET Framework 4.7.2+、任务计划程序；使用原用户的非管理员终端。
+- **macOS arm64/x64**：原生终端与 GUI 登录会话；使用系统 Bash、curl、tar、OpenSSL、plutil、shasum、launchctl、lsof/ps。
+- 脚本准备 Node/npm、官方 Codex CLI、Microsoft DevTunnel CLI 和 Codey 应用依赖；需联网并能完成 GitHub/Copilot 登录。
+- **正常流程不要求预装 Python 或 Bun。** 若 npm 回退源码编译并索要 Python，停止报告具体模块，不擅自加装工具链。
 
-### Windows x64
+## 完整安装入口
 
-在非管理员 PowerShell 中，确认目标机器和联网授权后运行：
+在解压后的完整 Skill 目录运行，不能只拿一个脚本或 npm 包当作完整节点安装。
 
-```powershell
-powershell -NoProfile -File .\scripts\install.ps1 -Apply -NetworkApproved -ExpectedComputerName $env:COMPUTERNAME
-```
+| 平台 | 检查/计划 | 确认后安装 |
+| --- | --- | --- |
+| Linux | `bash scripts/install-npm.sh --package assets/codey-*.tgz --check` | 去掉 `--check`，加 `--expected-computer "实际机名"` |
+| Windows | `powershell.exe -NoProfile -File .\scripts\install.ps1` | 加 `-Apply -NetworkApproved -ExpectedComputerName "实际机名"` |
+| macOS | `bash scripts/install-macos.sh --check` | 改用 `--apply --network-approved --expected-computer "实际机名"` |
 
-不带参数时只显示计划。证书由系统 .NET 生成，**不需要为此安装 Git/OpenSSL**。
-Node、DevTunnel 和官方 Codex 由安装器准备；耗时步骤显示进度和用时。
-同版本已安装时会校验并补齐注册文件，未变化且运行正常的升级器不重新安装。
+Linux 只走“npm 安装 → `codey setup`”，不再维护独立的暂存/切换安装流程；Windows 的 `-RepairServices` 重装入口已移除。
+首次配置节点需覆盖已有 Codex 配置（Linux 也包括网关配置）时，另行确认并加 `--replace-existing`（Linux/Mac）或 `-ReplaceExisting`（Windows）；先备份，保留 auth/sessions。
+Linux 入口先检查端口；`--check` **随后仍会下载、安装和检查 npm 依赖**，但不部署服务。
+已完成的同版本、同配置节点允许继续验收和导出；复用现有程序、身份、证书、密钥，不覆盖运行版本、不重启服务，不把重跑安装当更新。
+Mac 缺少 Node 时，检查只说明引导计划；获准安装后下载并校验官方 Node，再执行完整预检。
+独立的 `node install-codey.mjs` 仍只安装运行包，不配置隧道、证书或后台服务。
 
-### macOS arm64 / x64
+## 完整安装流程
 
-在原生 GUI 登录终端中使用 Python 3.12+，不使用 root 或 Rosetta：
+1. **预检**：确认原用户、原生系统/架构、机名、现有安装、配置覆盖和 `3001/4141/8443` 端口。
+   端口空闲则继续；占用时，须由系统的 PID、所属用户、安装路径和启动配置确认来自本用户的 Codey，才复用并继续。
+   任一端口属于其他程序或无法确认归属，立即终止安装；不凭进程名/健康页认领，不强杀、不自动改端口。配置服务前再次检查，防止检查后被抢占。
+   旧 Python/升级代理节点须单独迁移；不要把重跑安装当作更新、卸载或事务恢复。
+2. **准备应用**：从官方来源取得工具并校验，将唯一 Codey npm 包装到用户私有目录，按锁文件准备依赖，检查 SQLite/PTY 等原生模块。
+3. **身份与证书**：生成节点 ID、模型 key、SSO/数据访问/隧道续期密钥，不再生成升级凭据。
+   本机生成自签名非 CA 服务端证书，SAN 为 `<nodeId>.nodes.codey.internal`；私钥只留私有目录，不购买域名、不导入系统根证书库。
+   已接入节点不可静默换证书；续期或轮换须同步 Portal 的证书指纹。
+4. **DevTunnel**：检查本人 GitHub 登录，必要时设备码登录；不切换其他账号。
+   创建或复用私有 `codey-<nodeId>` 隧道，记录实际 tunnel/cluster ID；仅转发 HTTPS `3001/8443`，禁止匿名访问，不转发 `4141`。
+5. **服务与模型**：`4141` 为带 API key 的本地模型网关；`3001` 为 HTTPS Workspace + Portal SSO；`8443` 为鉴权只读用量/历史接口。
+   三者只监听 `127.0.0.1`，两项 HTTPS 共用节点证书。按需单独完成 Copilot API 的 GitHub 登录，配置 Codex 并保留 auth/sessions。
+   模型配置统一来自 `templates/codex-config.toml`，平台脚本只填入本机模型目录路径。
+   `8443` 是同一网关的第二个监听，不是更新器。当前 `4141` 为 HTTP 且含模型/管理接口，不能直接当作 HTTPS 只读入口；合并需另改 TLS 与鉴权，本流程暂保留隔离。
+6. **启动与守护**：配置稳定的 `codey` 命令和用户 PATH，启动 Codey、DevTunnel host 与 connect token 定时续期。
+   Linux 使用 systemd 用户服务与 linger，并保留隧道健康监测；Windows 使用计划任务；Mac 使用 Node worker + LaunchAgents。后两者依赖原用户登录。
+7. **验收**：检查服务守护、隧道云端 host、TLS、SSO、数据鉴权和匿名拒绝；经授权执行有超时的 Codex CLI/SDK 短请求并核对真实响应。
+   不能只凭 npm 安装成功、PID 或 `doctor` 判定完整安装成功。
+8. **接入 Portal**：取得新鲜 connect-only token，在原用户 Home 写出私有 `codey-machine-registration.json`。
+   内容包含平台、节点/隧道信息、公开证书和节点接入凭据，不含 TLS 私钥、模型 key 或 GitHub 登录令牌；Unix 权限 `0600`，Windows 为原用户/SYSTEM 私有 ACL。
+   只报告绝对路径。用户导入 Portal，经隧道/TLS/SSO 验收后绑定节点与证书指纹，再删除文件；导入前只报告“本机完成，待接入”。不注册升级代理。
 
-```bash
-python3 -I -B scripts/install-macos.py --apply --network-approved --expected-computer "$(hostname)"
-```
+## codey 命令行用法
 
-去掉三个授权参数可查看只读计划。
+`[...]` 为可选参数，`PORT`/`FILE` 替换为实际值；有空格的路径加双引号。
 
-### Linux x64
+| 命令 | 用途 |
+| --- | --- |
+| `codey --help` / `codey --version` | 帮助 / 应用版本 |
+| `codey doctor [--json] [--package-only]` | 检查运行包与原生模块；`--package-only` 跳过原生模块，不验证隧道、登录或模型 |
+| `codey auth login --provider copilot` | 登录模型网关，与 DevTunnel 登录分开 |
+| `codey start [--workspace-port PORT] [--gateway-port PORT]` | 前台运行 Workspace + 网关，默认 `127.0.0.1:3001/4141`；`Ctrl+C` 停止 |
+| `codey workspace --host 127.0.0.1 --port 3001` | 仅前台运行 Workspace |
+| `codey gateway` | 仅前台运行网关，默认 `127.0.0.1:4141` |
+| `codey gateway debug --json` | 网关诊断；分享前脱敏 |
+| `codey gateway --help` / `codey mcp --help` | 网关 / MCP 参数 |
+| `codey setup [--config FILE] --check` | 只检查 Linux 运行包/公开配置，不部署服务 |
+| `codey setup [--config FILE] --expected-computer NAME [--replace-existing]` | Linux 托管安装或同版本重复验收；不用于更新或恢复 |
 
-使用普通用户，确认联网、服务/配置替换范围并准备好所需 sudo 授权：
+启动命令不安装后台服务、不启动 DevTunnel；后台节点已运行时不要重复启动。
+`codey update`、`codey --update` 及恢复/工具更新入口已移除，不提供替代的覆盖升级流程。
 
-```bash
-bash scripts/install-npm.sh --package assets/codey-*.tgz
-```
+## 删除与边界
 
-加 `--check` 只安装并检查应用包，不配置节点。完整安装会替换托管服务/模型配置、
-停止旧 Codey 和当前用户的旧 Codex 进程；保留 auth/sessions。
+当前尚无统一 `codey uninstall` 命令，不把它写成已可用功能。
+删除时先列出本安装拥有的原生服务、程序目录、CLI/PATH 项，获准后停止并移除；默认保留配置、登录凭据与数据。
+程序只清理确认过的版本目录，不整删 `runtimeRoot`，其中可能含数据和登录凭据。
+不删除项目、共享工具、其他程序的配置/会话，不自动删除 Portal 记录或云端隧道。
 
-## 已有安装或失败
-
-- Windows/macOS 覆盖已有 Codex 配置需要单独授权，再加
-  `-ReplaceExisting` / `--replace-existing`；不删除 auth/sessions、不接管无关服务。
-- 若提示退出 Codex/Desktop，交由用户从外部终端处理，不强杀、不绕过检查。
-- 已完成节点可重跑原命令，保留身份和凭据；仅升级器/导出失败时无需重装应用。
-  macOS 的未完成失败事务需要先检查状态，再按提示使用 `--retry-failed`。
-- `scripts/install-runtime.mjs`、`codey doctor` 或仅安装 npm 包不是完整节点安装，
-  不能以这些步骤代替注册文件和升级器。
-
-## 完成条件
-
-安装器必须验通服务、TLS/SSO、模型及原生守护，自动配置升级器，再导出有效的
-schema-2 注册 JSON。Windows/macOS 的后台任务在原用户登录后运行，不是无人登录服务。
-
-只报告原用户 Home 下 **`codey-machine-registration.json` 的绝对路径**，
-不显示内容。文件包含本机真实平台、身份和私密凭据；不得用空文件或模板代替。
-Unix 权限为 `0600`，Windows 为原用户/SYSTEM 私有 ACL。
-
-用户只需把这个 JSON 上传到自己的 Portal，节点与升级器同时绑定，验收后删除文件。
-上传前升级器等待激活是正常状态；缺少文件、登录未完成或任一验证失败都不能报告成功。
+只在原用户的外部终端操作，不从 Codey/Codex 进程树内安装；需要的额外权限单独确认。
+不从公共 npm 安装同名 `codey` 项目。未知归属、未完成事务或安全校验失败时停止，不强制接管。

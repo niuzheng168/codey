@@ -12,26 +12,35 @@ Usage: bash install-codey-linux.sh --package FILE.tgz|HTTPS_URL [options]
   --prefix DIR     New private npm prefix; never overwrite an existing prefix.
   --node-dir DIR   Reuse a Node.js 22.13+ installation instead of downloading Node.
   --config FILE    Public Portal setup JSON (otherwise use the package's config).
-  --check          Install and validate only; do not stop processes/configure services.
+  --check          Install and validate only; do not configure services.
+  --expected-computer NAME  Required for setup; must match hostname exactly.
+  --replace-existing       Back up existing Codex/gateway settings before configuring.
 
 No ZIP extraction is required. npm installs one Codey package; codey setup then
-configures the gateway, workspace and updater. Setup retains auth/session files
-but replaces service/model settings and stops the current user's old Codex processes.
+configures the gateway, workspace and private DevTunnel. Port ownership is checked
+before downloads. Same-release managed nodes are verified and reused, not reinstalled.
+Foreign/unverified listeners stop installation; no process is killed to free a port.
 Do not install the unrelated public npm package named codey.
 HELP
 }
 die() { echo "ERROR: $*" >&2; exit 1; }
+# BEGIN_CODEY_PREFLIGHT
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)/skills/config-new-codey-machine/scripts/linux-preflight.sh"
+# END_CODEY_PREFLIGHT
 PACKAGE_SPEC=""
 REGISTRY=""
 PREFIX=""
 NODE_DIR=""
 SETUP_ARGS=()
 CHECK=false
+EXPECTED_COMPUTER=""
+REPLACE_EXISTING=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help|-h) usage; exit 0 ;;
     --check) CHECK=true; shift ;;
-    --package|--registry|--prefix|--node-dir|--config)
+    --replace-existing) REPLACE_EXISTING=true; SETUP_ARGS+=(--replace-existing); shift ;;
+    --package|--registry|--prefix|--node-dir|--config|--expected-computer)
       [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || die "Missing value for $1"
       case "$1" in
         --package) PACKAGE_SPEC="$2" ;;
@@ -39,6 +48,7 @@ while [[ $# -gt 0 ]]; do
         --prefix) PREFIX="$2" ;;
         --node-dir) NODE_DIR="$2" ;;
         --config) SETUP_ARGS+=(--config "$(realpath -- "$2")") ;;
+        --expected-computer) EXPECTED_COMPUTER="$2"; SETUP_ARGS+=(--expected-computer "$2") ;;
       esac
       shift 2 ;;
     *) die "Unknown option: $1" ;;
@@ -50,6 +60,14 @@ fi
 [[ -n "$PACKAGE_SPEC" ]] || { usage >&2; die "Provide a Codey npm package file or HTTPS URL."; }
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || die "Linux x64 is required."
 [[ "$(id -u)" != 0 ]] || die "Run as the target user, not root."
+[[ "$CHECK" == true || "$EXPECTED_COMPUTER" == "$(hostname)" ]] ||
+  die "Use --expected-computer with this machine's exact hostname."
+codey_linux_preflight || exit 1
+if [[ "$CHECK" != true && -z "$CODEY_EXISTING_PACKAGE" && "$REPLACE_EXISTING" != true ]]; then
+  [[ ! -e "$HOME/.codex/config.toml" && ! -e "$HOME/.codex/models.json" &&
+     ! -e "$HOME/.local/share/copilot-api/config.json" ]] ||
+    die "Existing Codex/gateway configuration requires --replace-existing."
+fi
 for command in curl sha256sum tar mktemp realpath; do
   command -v "$command" >/dev/null 2>&1 || die "Missing command: $command"
 done

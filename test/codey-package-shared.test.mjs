@@ -8,7 +8,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { runDoctor, doctorOptions } from "../packages/codey/lib/doctor.mjs";
 import { RUNTIME_PLATFORMS, readPackageInfo, runtimePlatform, validateRuntimeLock } from "../packages/codey/lib/package-info.mjs";
-import { readInstalledPackageInfo } from "../packages/codey/lib/update-files.mjs";
+import { readInstalledPackageInfo } from "../packages/codey/lib/package-files.mjs";
 import { installerPlatform, installLauncher, installOptions, launcherContents, npmCandidates, npmPackageRoot, WINDOWS_PATH_SCRIPT } from "../scripts/install-codey-runtime.mjs";
 
 const exec = promisify(execFile);

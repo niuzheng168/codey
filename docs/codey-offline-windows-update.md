@@ -1,3 +1,5 @@
+> **历史说明**：当前源码已移除 Portal/本地更新器，Mac 安装与守护已改为 Node。本文中的旧更新命令、Python 要求或代理操作不适用于新源码；旧机器不会自动迁移。以 `skills/config-new-codey-machine/SKILL.md` 为准。
+
 # Windows {{CODEY_VERSION}} 离线升级包
 
 这是交付说明模板，构建器会在包内 README 中填入版本和目标电脑。

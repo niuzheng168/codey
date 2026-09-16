@@ -128,7 +128,7 @@ class Builder:
                 "worktreesModified": False, "legacyMcpPresent": legacy_mcp}
 
     def check(self, name, label, args, env, timeout=None):
-        # The full Portal suite includes native updater transaction fixtures with
+        # The full Portal suite includes isolated installation fixtures with
         # durable disk writes. Only the test-runner budget changes here, not any
         # application activity, health or rollout safeguard.
         if timeout is None:
@@ -320,8 +320,6 @@ class Builder:
                     self.report["portalDependencyCache"] = self.dependency_cache("portal", env)
                 for label, args in [
                     ("skill", ["npm", "run", "skill:build"]), ("check", ["npm", "run", "check"]),
-                    ("updater-check", ["npm", "run", "updates:check"]),
-                    ("updater-transactions", ["/usr/bin/python3", "-m", "unittest", "discover", "-s", "test", "-p", "test_node_updater.py"]),
                     ("tests", ["npm", "test"]),
                 ]:
                     self.check("portal", label, args, env)
@@ -363,6 +361,7 @@ class Builder:
         return manifest
 
     def activate(self):
+        require(not self.request.get("enableNodeUpdates"), "Node updater deployment has been removed")
         source = self.production_source()
         verify_source_files(self.root, source, self.source)
         before = read(self.job / "aca-before.private.json")
@@ -383,16 +382,6 @@ class Builder:
         template["revisionSuffix"] = suffix
         revision = "codey--" + suffix
         portal = template["containers"][0]
-        if self.request.get("enableNodeUpdates"):
-            require(any(item.get("mountPath") == "/data" for item in portal.get("volumeMounts", [])),
-                    "Node updates require the existing /data share; no volume/resource is created")
-            store = self.publisher().AzureStore({**self.config, "directory": "node-updates"})
-            require(store.read("release-public.pem", 8192) and store.read("catalog.json", 4 * 1024 * 1024),
-                    "Publish the signed node feed before enabling the Portal")
-            values = {"PORTAL_NODE_UPDATE_ROOT": "/data/node-updates",
-                      "PORTAL_NODE_UPDATE_PUBLIC_KEY_FILE": "/data/node-updates/release-public.pem"}
-            portal["env"] = [item for item in portal.get("env", []) if item["name"] not in values]
-            portal["env"].extend({"name": name, "value": value} for name, value in values.items())
         patch = self.job / "aca-patch.private.json"
         save(patch, {"properties": {"template": canonical(template)}})
         save(self.job / "aca-rollback.json", {"expectedRevision": revision,
@@ -443,8 +432,6 @@ class Builder:
             for label, args in [
                 ("skill", ["npm", "run", "skill:build"]),
                 ("check", ["npm", "run", "check"]),
-                ("updater-check", ["npm", "run", "updates:check"]),
-                ("updater-transactions", ["/usr/bin/python3", "-m", "unittest", "discover", "-s", "test", "-p", "test_node_updater.py"]),
                 ("tests", ["npm", "test"]),
             ]:
                 self.check("portal", label, args, env)
@@ -463,7 +450,7 @@ class Builder:
                              "sourceCommit": provenance["commit"]}}
         files = {"/": sha(source / "public/index.html"), "/app.js": sha(source / "public/app.js")}
         files["/settings"] = sha(source / "public/settings.html")
-        for name in ["settings.css", "machine-updates.js", "client-aggregator.js", "node-transport.js", "styles.css"]:
+        for name in ["settings.css", "admin-nodes.js", "client-aggregator.js", "node-transport.js", "styles.css"]:
             files["/" + name] = sha(source / "public" / name)
         features = {}
         if (source / "public/portal-features.js").is_file():

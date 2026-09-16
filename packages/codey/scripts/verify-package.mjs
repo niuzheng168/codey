@@ -3,11 +3,12 @@ import { stat } from "node:fs/promises";
 for (const name of [
   "npm-shrinkwrap.json", "codey-build.json", "dist-server/server/index.js",
   "dist/index.html", "gateway/main.js", "pages/index.html", "lib/codex-sdk/index.js",
-  "lib/setup.mjs", "onboarding/scripts/install.sh", "onboarding/templates/a100-models.json",
+  "lib/setup.mjs", "onboarding/scripts/install.sh",
+  "onboarding/templates/a100-models.json", "onboarding/templates/codex-config.toml",
+  "onboarding/scripts/linux-preflight.sh", "onboarding/scripts/windows-runtime.mjs",
   "onboarding/scripts/install-devtunnel-health.sh", "onboarding/scripts/linux-devtunnel-health.mjs",
   "lib/package-info.mjs", "lib/doctor.mjs",
-  "lib/update.mjs", "lib/update-files.mjs", "lib/update-archive.mjs",
-  "lib/update-probe.mjs", "lib/update-service.py", "lib/update-windows.ps1",
+  "lib/package-files.mjs", "lib/package-archive.mjs", "lib/package-dependencies.mjs",
 ]) {
   try {
     if (!(await stat(new URL(`../${name}`, import.meta.url))).isFile()) throw new Error("Not a file");

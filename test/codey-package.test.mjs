@@ -86,6 +86,16 @@ test("help and version work without importing either server; errors return a fai
   await assert.rejects(f.invoke(["invalid"]), error => error.code === 1 && /Unknown command/.test(error.stderr));
 });
 
+test("retired updater entrypoints fail before loading a service or changing an installation", async t => {
+  const f = await fixture(t);
+  assert.doesNotMatch((await f.invoke(["--help"])).stdout, /codey update|codey --update/);
+  for (const args of [["--update"], ["update"], ["update", "--recover"], ["update", "new.tgz"],
+    ["update", "codex", "tool-update.json"], ["update", "devtunnel", "--help"]]) {
+    assert.throws(() => commandPlan(args), /updater has been removed/);
+    await assert.rejects(f.invoke(args), error => error.code === 1 && /updater has been removed/.test(error.stderr));
+  }
+});
+
 test("the npm prepack guard refuses to publish an unbuilt source scaffold", async () => {
   await assert.rejects(exec(process.execPath, [
     fileURLToPath(new URL("../packages/codey/scripts/verify-package.mjs", import.meta.url)),

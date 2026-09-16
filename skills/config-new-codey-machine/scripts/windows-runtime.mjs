@@ -24,7 +24,7 @@ export function parseTunnelJson(text) {
   } catch { throw new Error("DevTunnel did not return a valid JSON object"); }
 }
 
-export function validateTunnel(raw, expectedId) {
+export function validateTunnel(raw, expectedId, expectedCluster) {
   const tunnel = raw?.tunnel ?? raw;
   let { tunnelId, clusterId } = tunnel ?? {};
   if (typeof tunnelId === "string" && tunnelId.includes(".")) {
@@ -33,6 +33,7 @@ export function validateTunnel(raw, expectedId) {
     [tunnelId, clusterId] = parts;
   }
   requireValue(tunnelId === expectedId && /^[a-z][a-z0-9]{1,15}$/.test(clusterId ?? ""), "Unexpected tunnel identity");
+  requireValue(expectedCluster === undefined || clusterId === expectedCluster, "Tunnel cluster changed during installation");
   const ports = tunnel.ports;
   requireValue(Array.isArray(ports) && ports.length === 2 &&
     [3001, 8443].every(port => ports.some(item => item.portNumber === port && item.protocol === "https")),
@@ -182,7 +183,7 @@ async function sdkProbe(config) {
 async function main() {
   const [command, file] = process.argv.slice(2);
   if (command === "check-tunnel") {
-    console.log(JSON.stringify(validateTunnel(await read(file), process.argv[4])));
+    console.log(JSON.stringify(validateTunnel(await read(file), process.argv[4], process.argv[5])));
     return;
   }
   const config = await read(file);

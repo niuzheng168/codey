@@ -19,9 +19,5 @@
   "npmPackage": {
     "name": "codey",
     "dependencies": "npm-shrinkwrap.json"
-  },
-  "updater": {
-    "supported": true,
-    "mode": "automatic"
   }
 }

@@ -3,34 +3,33 @@ import { requestError } from "./signed-store.mjs";
 export const MACHINE_PLATFORMS = Object.freeze([
   Object.freeze({
     id: "linux-x64", name: "Linux", entrypoint: "scripts/install.sh",
-    nodeSuffix: "linux-x64.tar.xz", updater: true, implemented: true, registrationSupported: true,
+    nodeSuffix: "linux-x64.tar.xz", implemented: true, registrationSupported: true,
     tunnel: true, privateNetwork: true, dataRelay: false,
     description: "Linux x64 · 直接 npm 安装 · codey setup · 私有 DevTunnel · systemd 守护",
     files: ["scripts/install.sh", "templates/a100-models.json"],
   }),
   Object.freeze({
     id: "windows-x64", name: "Windows", entrypoint: "scripts/install.ps1",
-    // Native agents auto-enroll with new registrations. Keep native health
-    // monitoring and the legacy platform-specific download gate independent.
-    nodeSuffix: "win-x64.zip", updater: false, portalUpdater: true, implemented: false, registrationSupported: true,
+    // Shared-Skill registration is independent of the legacy per-platform download gate.
+    nodeSuffix: "win-x64.zip", implemented: false, registrationSupported: true,
     tunnel: true, privateNetwork: true, dataRelay: true,
-    description: "共享 Skill 原生安装 Windows 节点及升级器；导入注册文件时自动绑定",
+    description: "共享 Skill 原生安装 Windows 节点；私有 DevTunnel 与计划任务守护，无升级代理",
     files: ["scripts/install.ps1", "scripts/windows-common.ps1", "scripts/windows-process.cs",
       "scripts/windows-service.ps1", "scripts/windows-runtime.mjs", "scripts/windows-command.ps1",
       "templates/a100-models.json"],
   }),
   Object.freeze({
-    id: "macos-arm64", name: "macOS · Apple Silicon", entrypoint: null,
-    nodeSuffix: "darwin-arm64.tar.gz", updater: false, portalUpdater: true, implemented: false, registrationSupported: true,
+    id: "macos-arm64", name: "macOS · Apple Silicon", entrypoint: "scripts/install-macos.sh",
+    nodeSuffix: "darwin-arm64.tar.gz", implemented: false, registrationSupported: true,
     tunnel: true, privateNetwork: true, dataRelay: true,
-    description: "共享 Skill 原生安装 macOS 节点及升级器；导入注册文件时自动绑定，不迁移旧布局",
+    description: "共享 Skill 使用 Node 安装 macOS 节点；LaunchAgents 守护，无 Python 或升级代理",
     files: [],
   }),
   Object.freeze({
-    id: "macos-x64", name: "macOS · Intel", entrypoint: null,
-    nodeSuffix: "darwin-x64.tar.gz", updater: false, portalUpdater: true, implemented: false, registrationSupported: true,
+    id: "macos-x64", name: "macOS · Intel", entrypoint: "scripts/install-macos.sh",
+    nodeSuffix: "darwin-x64.tar.gz", implemented: false, registrationSupported: true,
     tunnel: true, privateNetwork: true, dataRelay: true,
-    description: "共享 Skill 原生安装 macOS 节点及升级器；导入注册文件时自动绑定，不迁移旧布局",
+    description: "共享 Skill 使用 Node 安装 macOS 节点；LaunchAgents 守护，无 Python 或升级代理",
     files: [],
   }),
 ]);

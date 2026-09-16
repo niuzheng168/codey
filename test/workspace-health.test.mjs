@@ -104,7 +104,7 @@ test("gateway caches concurrent health checks, expires them and never probes unc
   await gateway.close();
 });
 
-test("admin differentiates live Workspace reachability from a missing updater heartbeat", async () => {
+test("admin checks Workspace reachability without an updater or fabricated heartbeat", async () => {
   const registered = [{ id: "local", name: "windows-devbox", region: "Windows", ownerId: "owner" }];
   const health = { reachable: true, checkedAt: now, version: "1.37.2" };
   let checks = 0;
@@ -112,17 +112,14 @@ test("admin differentiates live Workspace reachability from a missing updater he
   const api = new SettingsApi({
     nodePolicy: { inventory: async () => registered },
     accounts: { list: async () => [{ id: "owner", username: "zhn", enabled }] },
-    machineUpdates: { inventory: async () => ({
-      generatedAt: now, heartbeatTimeoutMs: 90000,
-      nodes: new Map([["local", { status: "not_enrolled", lastSeen: null, components: {} }]]),
-    }) },
     cloudCliGateway: { healthMetadata: async () => { checks++; return health; } },
   });
   const result = await api.adminNodes();
   assert.deepEqual(result.summary, { total: 1, owners: 1, online: 1, stale: 0, unknown: 0 });
   const row = result.nodes[0];
   assert.equal(row.status, "workspace_online");
-  assert.equal(row.updaterStatus, "not_enrolled");
+  assert.equal(row.updaterStatus, undefined);
+  assert.equal(result.telemetryAvailable, false);
   assert.equal(row.lastSeen, null, "Do not synthesize an updater heartbeat");
   assert.equal(row.components.cloudcli.source, "workspace_health");
   assert.equal(row.components.cloudcli.version, "1.37.2");

@@ -1,280 +1,105 @@
-# Codey Linux / Windows / macOS 一键节点接入
+# Codey Linux / Windows / macOS 节点接入
 
-## 三个平台共用的应用包
+当前源码已移除 Portal 更新代理、本地更新器与升级凭据。Mac 安装器、命令包装和
+LaunchAgent worker 使用 Node，不再要求 Python。此变更尚未发布，原生 Windows/macOS
+验收与旧节点迁移需单独完成。
 
-新版 `codey-<version>.tgz` 是三个系统共用的运行包，不独立生成 Windows/macOS 应用发行物。
-构建器从同一源码与公共 npm 锁生成一次，打包前规范化文本换行；
-不把任一系统的 `node_modules` 或原生二进制装进应用包。原生依赖在目标机安装。
-包内 `runtimePlatforms` 列出 `linux-x64`、`windows-x64`、`macos-arm64` 和 `macos-x64`；
-旧的 Linux/Windows 包不会因此自动变成 Mac 发行物。
+完整操作以 [安装 Skill](../skills/config-new-codey-machine/SKILL.md) 为准；运行包的
+CLI 参考见 [Codey 包说明](../packages/codey/README.md)。
 
-随包提供的 `install-codey.mjs` 可在已有 Node.js 22.13+（含 npm）的三个系统上运行，
-检查内置 SHA-256、npm 安装、新的 `codey doctor` 原生模块自检及用户 PATH。
-它只安装运行包，不接管服务、凭据或 DevTunnel，**不生成 Portal 注册 JSON**。
-完整一键安装必须走下面对应系统的原生入口。
+## 一个发行包
 
-## Skill ZIP 交付
+同一份 `codey-<version>.tgz` 和 SHA-256 支持 Linux x64、Windows x64、macOS arm64/x64。
+包含编译后的 Workspace、模型网关与统一依赖锁；不内置另一份应用、平台原生二进制、
+`node_modules`、Python 脚本或升级器。原生 npm 依赖在目标机准备。
 
-需要 Skill 时，应交付 `config-new-codey-machine.zip`，而不是只有 README 和脚本的
-普通 ZIP。完整包以 `config-new-codey-machine/` 为根，包含 `SKILL.md`、
-`agents/openai.yaml`、Linux `scripts/install-npm.sh`、Windows `scripts/install.ps1`、
-macOS `scripts/install-macos.py`、全部平台依赖/守护/注册辅助文件、`scripts/install-runtime.mjs`
-和唯一的 `assets/codey-<version>.tgz`。
+完整 `config-new-codey-machine.zip` 包含 Skill、平台依赖声明、Linux/Windows 原生入口、
+Mac 的 `install-macos.sh` / `install-macos.mjs` / `macos-service.mjs`、共享注册与验证工具，
+以及唯一的应用 `.tgz`。不能把独立运行包安装成功当作节点已接入。
 
-“账号与节点 → 添加节点”只有一个“下载 Codey 安装 Skill”按钮，不按操作系统分栏。
-它使用不带平台参数的 `POST /api/settings/machines/shared-skill`；只有已发布并校验
-跨平台安装器及对应 npm 包的发行版才可用。旧 Linux 专用包不会冒充共用包。
-安装时读取 `SKILL.md` 按实际系统执行；注册时仍校验 JSON 中的真实平台，
-使用对应的 systemd、Task Scheduler 或 LaunchAgents，不跨平台调用服务管理器。
-发布器拒绝缺少任一平台完整入口或注册 helper 的新版 Skill。
+Portal 的 `POST /api/settings/machines/shared-skill` 仍提供一个跨平台下载入口。
+新发布器拒绝夹带 Python 或升级器的运行包；新 Portal 不再提供声明包含升级器的旧 Skill，
+不会为了维持下载入口而回退到旧安装器。发布新的完整 Skill 后该入口才可用。
 
-Linux 完整节点部署在 Skill 根目录执行：
+## 安装与依赖
 
-```bash
-bash scripts/install-npm.sh --package assets/codey-*.tgz
+- Linux：Bash、curl、tar/xz、OpenSSL、ss、systemd 用户服务及必要的 sudo。
+- Windows：原生 PowerShell 5.1、.NET Framework 4.7.2+、任务计划程序；不使用管理员终端。
+- Mac：原生 GUI 登录会话、系统 Bash/curl/tar/OpenSSL/plutil/shasum/launchctl/lsof/ps；无 Node 时由薄引导准备。
+- 脚本准备 Node/npm、官方 Codex 与 Microsoft DevTunnel；正常流程不要求 Python 或 Bun。
+  若原生模块没有匹配的预编译文件并要求源码编译，停止说明缺失模块，不擅自安装 Python/编译工具链。
+
+在完整 Skill 目录中：
+
+```sh
+# Linux：--check 仍安装/验证 npm 依赖，但不部署服务
+bash scripts/install-npm.sh --package assets/codey-*.tgz --check
+# 确认目标后安装；覆盖已有 Codex 配置另加 --replace-existing
+bash scripts/install-npm.sh --package assets/codey-*.tgz --expected-computer "$(hostname)"
 ```
-
-Windows/macOS 先执行默认只读计划；确认联网、目标和已有配置替换范围后执行：
 
 ```powershell
-powershell -NoProfile -File .\scripts\install.ps1 -Apply -NetworkApproved -ExpectedComputerName $env:COMPUTERNAME
+# Windows：默认只读计划；确认后增加 Apply/NetworkApproved/机名
+powershell.exe -NoProfile -File .\scripts\install.ps1
+powershell.exe -NoProfile -File .\scripts\install.ps1 -Apply -NetworkApproved -ExpectedComputerName $env:COMPUTERNAME
 ```
 
-```bash
-python3 -I -B scripts/install-macos.py --apply --network-approved --expected-computer "$(hostname)"
+```sh
+# Mac：缺少 Node 时只显示引导计划；获准后下载、校验 Node 再完整预检
+bash scripts/install-macos.sh --check
+bash scripts/install-macos.sh --apply --network-approved --expected-computer "$(hostname)"
 ```
 
-Windows 使用外部非管理员 PowerShell 和系统 .NET Framework 4.7.2+ 生成 TLS 证书，
-无需为证书安装 Git/OpenSSL。已校验的 Node/DevTunnel 下载可复用，正常运行且源码、
-凭据未变化的升级器不会重新编译/重启；耗时命令显示不含凭据的进度和用时。
-macOS 需要原生 Python 3.12+、
-GUI 登录会话，不使用 Rosetta/root。已有 Codex config/models 需另行批准
-`-ReplaceExisting` / `--replace-existing`；保留 auth/sessions，不终止无关服务或 Desktop。
+已有 Codex config/models 的覆盖必须另行批准。原用户 auth/sessions、节点身份和数据不用于
+修复升级器；不接管旧 Python/代理布局，也不覆盖未完成的更新事务。
+独立 `node install-codey.mjs` 只安装运行包和 CLI，不配置服务、隧道或 Portal 注册。
+Linux 完整安装只走 npm → `codey setup`，Skill 中的 `install.sh` 也转到该入口；
+不再维护第二套 Node 下载、应用暂存和运行目录切换。Windows `-RepairServices` 重装分支已移除。
+三平台共用 `templates/codex-config.toml`，只替换本机模型目录路径，避免配置各自漂移。
 
-**三个系统完整安装的最后产物都是原用户 Home 下的 `codey-machine-registration.json`**。
-文件必须通过 schema、真实平台、身份凭据、TLS 证书和有效 connect-only token 检查；
-Unix 使用 `0600`，Windows 使用私有 ACL。没有此文件时不能报告节点安装完成。
-Windows/macOS 已完成节点重跑可刷新或补回导出，不重装应用、不旋转身份、不重启应用服务。
-三个系统均在导出前自动配置并启动签名升级器；Portal 导入 JSON 时同步绑定升级器，
-不再要求用户单独下载和接入。安装包只含公钥和无凭据的升级器代码，本机生成私密配置；
-已有升级器的凭据和防降级序号保持不变。上传前代理等待机器激活，不代表安装失败。
-计划和 `--check` 模式不产生注册文件；导入 Portal 成功后删除文件。
+预检覆盖原用户、原生架构、机名、现有安装、配置覆盖和 `3001/4141/8443`：
+端口空闲或经系统 PID/用户/路径/启动配置确认属于本用户 Codey 才继续。
+其他程序占用或归属不明时终止，不按进程名猜测、不强杀清端口。配置服务前重新检查。
+同版本、同配置的完成节点复用身份、证书和密钥，继续验收/导出，不覆盖运行版本或重启服务。
 
-这里解压的是 Skill 载体，应用仍由 npm 安装；无需手工解压 `.tgz`。
-下面的独立 npm 包和小型脚本下载是另一种入口，不替代 Skill ZIP。
+## 服务、证书与隧道
 
-## 独立 npm 入口
+- 模型网关 HTTP `4141` 只监听 loopback，要求模型 API key。
+- Workspace HTTPS `3001` 验证 Portal SSO；只读用量/历史 HTTPS `8443` 验证数据访问票据。
+  `8443` 与 `4141` 属于同一网关进程，不是更新器端口。可以设计统一 HTTPS 网关，
+  但不能直接把当前 HTTP `4141` 改作隧道入口：还需处理本地客户端证书信任、只读票据与模型/管理权限。
+  本轮保留两个监听，避免为减少端口引入协议混用或关闭证书验证。
+- 两项 HTTPS 共用本节点自签名非 CA 证书，SAN 为 `<nodeId>.nodes.codey.internal`。
+  Portal 验证并绑定证书指纹；不购买域名、不将节点证书导入系统根证书库。私钥不离开节点。
+- GitHub 私有 DevTunnel 仅转发 `3001/8443`，拒绝匿名访问，不暴露模型网关。
+- systemd/计划任务/LaunchAgents 负责应用和隧道守护；connect token 定期续期。
+  Mac 的守护包装使用同一 Node 运行时，不是另一套升级代理。
 
-活动入口是 `skills/config-new-codey-machine/SKILL.md`。旧的独立下载 API 仍保留：
-Linux x64 可下载 `codey-<version>.tgz` 和 `install-codey-linux.sh`，放在同一目录后执行：
+验收保留 TLS、SSO、匿名拒绝、数据鉴权、真实 Codex CLI/SDK 响应及隧道 host 检查。
+`doctor` 或进程存活不能代替这些验收。
 
-```bash
-bash install-codey-linux.sh
+## 注册与兼容边界
+
+成功后在原用户 Home 输出 `codey-machine-registration.json`，Unix `0600`，Windows 为
+原用户/SYSTEM 私有 ACL。它包含公开证书、connect-only token、三个互异的节点接入密钥、
+Workspace subject/username，不包含 TLS 私钥、模型 key、GitHub 登录令牌或升级凭据。
+
+导入仍验证登录、CSRF、平台、隧道、TLS、SSO、账号状态及节点归属；失败的激活不可访问，
+相同身份重试保持幂等。旧 schema-2 文件可带合法的 `updaterCredential`，但会被忽略、
+不会持久化或触发代理注册。旧节点的数据/认证格式不因此自动迁移。
+
+节点总览改为按需 Workspace 健康检查，不建立状态上报代理；Workspace 版本不冒充 Codey
+整包版本。当前可以在节点使用 `codey --version` 查询应用版本。
+
+`codey update`、`--update`、工具更新、恢复和旧离线更新包入口均已移除。
+统一 `codey uninstall` 尚未实现；删除须确认本安装资源，默认保留数据、凭据、项目和云资源。
+
+## 构建与发布
+
+```sh
+npm run machine:build -- --output artifacts/codey-machine --portal-origin https://YOUR-PORTAL
 ```
 
-安装包可并行复制到多台机器，包内没有节点 token。运行时在目标机生成独立身份，
-最后只上传 `~/codey-machine-registration.json`。
-
-不再要求用户先解压 ZIP。脚本通过 npm 安装唯一 Codey 应用，再运行包内的
-`codey setup`。它支持本地 `.tgz`、明确的 HTTPS `.tgz` URL，以及固定版本加显式
-私有 registry：
-
-```bash
-bash scripts/linux/install-codey.sh --package ./codey-0.1.3.tgz
-bash scripts/linux/install-codey.sh --package https://packages.example/codey-0.1.3.tgz
-bash scripts/linux/install-codey.sh --package codey@0.1.3 --registry https://npm.example/
-```
-
-上述 `scripts/linux/install-codey.sh` 是仓库内的源脚本。发布后的脚本名为
-`install-codey-linux.sh`，已填好同目录 npm 文件名。默认安装到新的、当前用户所有的
-`~/.local/share/codey-machine/releases/npm-*` prefix；准备依赖和检查配置完成后才会
-停止旧服务。`--prefix` 不允许覆盖已有目录。
-
-已有 Node.js 22.13+ 时也可以直接安装并部署：
-
-```bash
-npm install --global --prefix "$HOME/.local" --umask=0077 ./codey-0.1.3.tgz
-"$HOME/.local/bin/codey" setup --check
-"$HOME/.local/bin/codey" setup
-```
-
-仅 npm 安装不会自动部署。`codey setup --check` 不改服务或凭据、不做模型调用；
-一键脚本的 `--check` 会安装并验证 npm 依赖，但不执行部署。不要把安装包放在
-系统级 root 所有的 prefix；升级器只管理当前用户 HOME 下受支持的 npm 路径。
-
-一键部署或 `codey setup` 会创建稳定入口 `~/.local/bin/codey`，并将
-`$HOME/.local/bin` 自动加入 Bash 的持久化 PATH：写入 `.profile`、`.bashrc`，
-以及已存在的 `.bash_profile` / `.bash_login`，不覆盖其他配置或重复添加目录。
-新终端可直接运行 `codey`。已打开的终端不能由安装子进程修改环境；
-立即使用时执行 `export PATH="$HOME/.local/bin:$PATH"`。仅 npm 安装及
-`--check` 不修改这些 shell 配置。
-
-`machine:build` 在包内加入 `onboarding/setup.json`，只有 Portal origin、`platform: auto`、
-隧道方式和升级器公钥，没有机器身份、账号或 token。普通 `codey:build` 不绑定
-Portal，部署时需显式提供 `codey setup --config <公开配置.json>`。
-
-## 网关默认设置
-
-`codey start`、`codey gateway` 和 `codey auth` 在加载网关前启用 Codey 模式。
-该模式下 `useResponsesApiWebSocket` 默认 `false`，新配置和缺少该字段的已有配置
-都会使用此默认值；已有的显式 `true` / `false` 优先，不会被默认值覆盖。
-安装器不再重复写入该字段，也不影响 Workspace 自身的 WebSocket。
-
-## 固定流程
-
-1. 从 Microsoft 官方源下载并校验 DevTunnel，使用 GitHub device code 登录，配置私有 HTTPS `3001/8443`。
-2. 先停止旧 Workspace 和 Codex，再停止旧 copilot-api，使用已安装的 npm 包覆盖配置并启动。
-3. 停止旧 Codex，从 OpenAI 官方 installer 更新或安装 latest，覆盖模型配置并做真实请求。
-4. 停止旧 CloudCLI，使用同一 npm 包启动 Workspace，并通过 Codex SDK 做真实请求。
-5. 安装包内签名 updater。
-6. 启用 systemd 用户服务、DevTunnel renew/health timer 和 user linger，验证异常退出与隧道失联自动恢复。
-
-### Linux 隧道进程存活但节点离线
-
-DevTunnel 的 host 进程可能在网络断线、重连鉴权失败后继续存活，此时
-`Restart=always` 不会触发。Linux 安装器额外启用
-`codey-devtunnel-health.timer`，每分钟通过 `devtunnel show --json` 检查**云端主机连接数**，
-不以进程存活或 Portal 升级器心跳代替隧道连通性。
-
-- 同一服务实例连续三次明确返回 `hostConnections: 0`，才只对
-  `codey-devtunnel.service` 请求 `try-restart`；不重启 Workspace、网关或 Codex。
-- 启动有两分钟宽限期，恢复尝试之间至少间隔十分钟；过密、过期或跨启动的样本不累积。
-- 服务被手动停止、存在待执行的服务操作、进程不匹配或检查期间实例改变时不恢复，
-  不覆盖管理员的停止/更新任务。定时服务不并发运行。
-- 网络超时、管理接口鉴权失败或无法识别的 JSON 是“无法确认”，不是离线证据：
-  清零连续失败计数，不自动登录、不生成 token、不输出 CLI 原始内容或凭据。
-  这与每六小时续期 Portal **connect token** 的任务独立。
-
-已有节点可仅安装监测，无需重新注册、升级应用或执行会停止 Codex 的完整 `setup`。
-从本仓库运行以下命令，参数必须与现有 `codey-devtunnel.service` 的 Node 工具环境、
-DevTunnel 稳定入口及私有隧道匹配（也可使用新 npm 包 `onboarding/scripts/` 下的同名脚本）：
-
-```bash
-bash skills/config-new-codey-machine/scripts/install-devtunnel-health.sh \
-  /absolute/path/to/node /absolute/path/to/devtunnel codey-NODE_ID.CLUSTER
-systemctl --user status codey-devtunnel-health.timer
-journalctl --user -u codey-devtunnel-health.service -n 20
-```
-
-只读检查可给已安装的 `~/.local/share/codey-machine/linux-devtunnel-health.mjs`
-传入 `DEVTUNNEL TUNNEL.CLUSTER STATE_FILE --check`，不会写状态或重启。
-故障计数及冷却时间保存在私有的
-`~/.local/state/codey-machine/devtunnel-health.json`。
-停用监测时运行 `systemctl --user disable --now codey-devtunnel-health.timer`，
-再 `systemctl --user stop codey-devtunnel-health.service`；不会停止隧道本身。
-
-## 包内容
-
-只有一个真正的 npm 应用包 `codey-<version>.tgz`，主包定义在
-`packages/codey/package.json`。两份 submodule 是构建输入，不再是两个
-独立安装的 npm 应用，也不是 `codey` 的 npm dependencies。
-
-```text
-package/
-├── package.json          # name: codey；唯一应用 manifest 和 bin
-├── npm-shrinkwrap.json   # 统一生产依赖锁
-├── bin/codey.mjs         # 唯一 CLI
-├── lib/                 # CLI 和内联的 Codex SDK JS
-├── dist-server/         # Workspace 后端
-├── dist/                # Workspace 静态前端
-├── gateway/             # 模型网关后端
-├── pages/               # 网关静态页面
-├── updater/             # 签名更新器
-├── onboarding/          # Linux 部署脚本、模型模板；机器构建还包含公开 setup.json
-└── codey-build.json      # 源码版本与构建指纹
-```
-
-兼容 ZIP 的 `assets/manifest.json` 使用 schema 2、`name: codey` 和
-`dependencyMode: npm-codey-package`，记录 npm 包的 SHA-256、Codey 版本和统一
-release ID，同时保留两份源码各自的 commit/version 以便追溯。安装器只执行
-一次 `npm install --global --prefix <私有 release> <包内 tgz>`，并在停止旧服务前
-检查入口、构建指纹、共享依赖和 SQLite/PTY 原生模块。
-
-直接 npm 安装后的 `codey setup` 从 `codey-build.json` 派生临时公开元数据，
-使用 `dependencyMode: npm-installed`；不会寻找 `assets/*.tgz`、重新执行 npm 安装、
-移动应用目录或清理其他 npm prefix。两条入口最终共用相同的六步配置逻辑。
-新机器的 installer release ID 来自 `codey-build.json` 的 SHA-256 前 16 位，
-与是否经过兼容 ZIP、目标机的具体 Node 版本无关。
-
-两个服务的 `WorkingDirectory` 都指向同一个 `lib/node_modules/codey`。
-它们共用 Node、主 manifest 和依赖树，入口分别为 `codey workspace`、
-`codey gateway start`，没有嵌套的应用包或第二棵应用依赖树。
-两个源码 submodule、现有服务名、端口和数据路径不变。
-
-Node、Codex、DevTunnel 不进入应用包；目标机从各自官方源下载。CloudCLI 通过
-`CODEY_CODEX_EXECUTABLE` 使用同一份官方 Codex，不携带 Codex native runtime。
-锁定版 Codex SDK 的 JS 和许可证在构建阶段内联为 `#codey/codex-sdk`；
-避免其 npm 依赖再引入第二份 Codex。其他第三方依赖由 npm 按统一 shrinkwrap 安装。
-
-外层 `config-new-codey-machine.zip` 同时是完整 Skill 的交付和发布交接格式。
-Skill 通过 `scripts/install-npm.sh --package assets/codey-*.tgz` 走相同的 npm 安装流程。
-旧入口 `bash scripts/install.sh` 仍保留兼容，但不手工解压安装应用。
-也可构建用于普通服务启动的标准 npm 包：
-
-```bash
-npm run codey:build -- --output artifacts/codey-npm
-npm install --global --umask=0077 ./artifacts/codey-npm/codey-0.1.3.tgz
-codey --version
-codey start
-```
-
-公共 npm registry 的 `codey` 名称已被其他项目使用；没有取得名称权限前，
-只分发此 `.tgz` 或使用明确配置的私有 registry，不要执行公共源的
-`npm install -g codey`。本地构建不执行任何 npm publish。
-
-## 整包升级
-
-新节点的 updater 报告 `layout: npm` 及 `components.codey`，只接受一个 `codey`
-组件的签名发布。升级按 shrinkwrap 准备统一依赖，停止两个服务，原子替换一个
-包目录，再启动和验收两个服务；失败时整体回滚代码与构建标记，不回滚用户数据。
-旧节点继续使用原来的分组件协议，两种布局互相拒绝不兼容的发行版。
-新发行目录的 `codey-package.json` 可以直接交给 `scripts/publish-node-update.mjs`，
-但仍须提供独立的 `validation.json` 或 `report.json` 验收证据才可签名。
-
-## 数据边界
-
-脚本可以使用 `sudo` 停止旧服务、释放固定端口和启用 linger，但不删除整个 Home。
-`~/.codex/auth.json`、`~/.codex/sessions/` 和其他用户文件保留；
-`~/.codex/config.toml`、`~/.codex/models.json` 以及 Codey 服务配置按当前版本覆盖。
-
-Linux 使用 systemd/user linger；Windows/macOS 原生守护在 owner 登录后运行。
-Windows/macOS 自动安装自己的原生 Portal 升级代理，不以 Linux updater 替代；
-三个系统的注册入口均要求 Portal 已配置签名升级器。已有节点的独立接入入口仍可用于维护。
-源码修改需重新构建并发布完整 Skill 才会改变 Portal 下载内容；已有 ZIP 不会自动更新。
-
-## 独立发布
-
-发行版发布到共享存储的 `machine-bundles/packages-v2/`，使用不可变
-`releases/<releaseId>/` 和原子 `active.json`。发布器从已验证的兼容 ZIP 中取出
-原样的 Codey npm 包、Linux 一键脚本和共享运行包安装器，连同 Skill ZIP 及 manifest
-全部上传成功才切换 active。共享运行包安装器也包含在 Skill ZIP 内。
-Portal 从共享存储直接流式返回文件，不从镜像拼装，不把应用内嵌为 Base64 脚本。
-
-- `POST /api/settings/machines/shared-skill`：UI 唯一入口，Linux/Windows 共用安装 Skill，不接受平台参数。
-- `POST /api/settings/machines/npm`：标准 Codey npm `.tgz`，保留独立下载兼容。
-- `POST /api/settings/machines/installer`：`install-codey-linux.sh`。
-- `POST /api/settings/machines/skill`：旧 ZIP 兼容入口。
-
-下载入口保持相同的登录、CSRF、下载并发和无身份副作用边界。新文件必须通过
-路径、大小、文件类型和 SHA-256 校验；旧发行版未提供 `npmSetup: 1` 及独立文件时，
-npm 请求返回 503，不把 ZIP 伪装成 npm 包。共用入口还要求 `runtimeInstaller`
-指向已发布的 `install-codey.mjs`，内置文件名和 SHA-256 必须匹配同一 npm 包；
-缺失时禁用共用下载按钮，共用请求返回 503，而不是回退到旧 Linux 专用 Skill。
-
-- 更新 Portal：只部署 ACA 镜像，不修改下载包 `active.json`。
-- 更新下载包：运行 `scripts/publish-machine-skill.py`，不重启 ACA 或节点服务。
-- 首次迁移到 npm 布局时，先部署支持 `codey` 整包更新的 Portal，再发布新的
-  安装 Skill；Portal 仍兼容旧 ZIP 与旧节点。不要只发布新包而保留不认识 npm
-  布局的旧 Portal 更新服务。
-
-构建完整 Skill：
-
-```bash
-npm run machine:build -- --output <新目录> \
-  --portal-origin <HTTPS-origin> --updater-public-key-file <公钥文件>
-```
-
-构建器生成 `codey-<version>.tgz`、`install-codey-linux.sh`、`codey-package.json`、`manifest.json` 和兼容
-Skill ZIP。发布器会检查 npm 包内唯一的应用 manifest、统一 shrinkwrap 和编译入口，
-不再接受旧的三个分包或仅改名的普通 tar。已发布 ZIP 和 Portal 外层 manifest
-仍保留，不迁移或覆盖旧下载内容。
+不再需要 `--updater-public-key-file`。仍使用 main-only 来源门禁、冻结的子模块 gitlinks、
+唯一锁文件、包摘要和独立发布器；构建端 Python/Bun 不属于用户执行 Skill 的依赖。
+本地测试与构建不自动上传、发布或改动既有节点。发布前必须完成对应原生平台验收。

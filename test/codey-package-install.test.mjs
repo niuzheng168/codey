@@ -32,10 +32,15 @@ test("built npm package installs as Codey and starts both real servers without u
   const prefix = path.join(home, ".local");
   const apiHome = path.join(home, "gateway-data");
   await mkdir(apiHome, { recursive: true });
+  const stubs = path.join(root, "preflight-stubs");
+  await mkdir(stubs);
+  for (const [name, body] of Object.entries({
+    ss: "exit 0", getent: 'printf "fixture:x:%s:1000::%s:/bin/bash\\n" "$(id -u)" "$HOME"', pgrep: "exit 1",
+  })) await writeFile(path.join(stubs, name), `#!/bin/sh\n${body}\n`, { mode: 0o700 });
   const apiKey = "local-codey-package-smoke-key-not-a-real-credential";
   await writeFile(path.join(apiHome, "config.json"), JSON.stringify({ auth: { apiKeys: [apiKey] } }));
   const env = {
-    PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
+    PATH: `${stubs}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
     HOME: home, CODEX_HOME: path.join(home, ".codex"), COPILOT_API_HOME: apiHome,
     DATABASE_PATH: path.join(home, "workspace.db"), CODEY_PORTAL_SSO: "false",
     npm_config_cache: path.join(os.homedir(), ".npm"), CI: "true", NODE_ENV: "production",
@@ -71,9 +76,7 @@ test("built npm package installs as Codey and starts both real servers without u
   // commands are blocked, and the script is cut before the first service action.
   const preflightRoot = path.join(root, "preflight");
   const preflightAssets = path.join(preflightRoot, "assets");
-  const stubs = path.join(preflightRoot, "stubs");
   await mkdir(preflightAssets, { recursive: true });
-  await mkdir(stubs);
   await mkdir(path.join(preflightRoot, "scripts"));
   await mkdir(path.join(preflightRoot, "templates"));
   const prepared = await installedSetup(installed, publicConfig);
@@ -85,13 +88,15 @@ test("built npm package installs as Codey and starts both real servers without u
   }
   await writeFile(path.join(preflightAssets, "SHA256SUMS"), sums.join("\n") + "\n");
   await writeFile(path.join(preflightRoot, "templates/a100-models.json"), "{}");
+  await writeFile(path.join(preflightRoot, "templates/codex-config.toml"),
+    await readFile(path.join(installed, "onboarding/templates/codex-config.toml")));
   await writeFile(path.join(preflightRoot, "scripts/registration.mjs"),
     await readFile(path.join(installed, "onboarding/scripts/registration.mjs")));
-  for (const name of ["install-devtunnel-health.sh", "linux-devtunnel-health.mjs"]) {
+  for (const name of ["install-devtunnel-health.sh", "linux-devtunnel-health.mjs", "linux-preflight.sh", "windows-runtime.mjs"]) {
     await writeFile(path.join(preflightRoot, "scripts", name),
       await readFile(path.join(installed, "onboarding/scripts", name)));
   }
-  for (const name of ["systemctl", "loginctl", "pkill", "pgrep", "fuser", "curl", "sudo", "npm"]) {
+  for (const name of ["systemctl", "loginctl", "curl", "sudo", "npm"]) {
     const body = name === "sudo"
       ? '#!/bin/sh\n[ "$*" = "-n true" ] || exit 88\n'
       : '#!/bin/sh\necho "Unexpected external operation during preflight" >&2\nexit 88\n';
@@ -104,7 +109,7 @@ test("built npm package installs as Codey and starts both real servers without u
   const preflightFile = path.join(preflightRoot, "scripts/preflight.sh");
   await writeFile(preflightFile, setupScript.slice(0, stop));
   const entryBefore = await readFile(path.join(installed, "bin/codey.mjs"));
-  await exec("bash", [preflightFile], { env: {
+  await exec("bash", [preflightFile, "--expected-computer", os.hostname()], { env: {
     ...env, PATH: `${stubs}:${env.PATH}`, CODEY_INSTALLED_PACKAGE: installed,
     CODEY_SETUP_ASSETS: preflightAssets, CODEY_SETUP_NODE: process.execPath,
   }, timeout: 20000 });

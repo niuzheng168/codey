@@ -12,7 +12,7 @@ import zipfile
 from codey_package import ROOT, MACHINE_SKILL_FILES, RUNTIME_PLATFORMS, build_package, metadata, write_runtime_installer
 
 
-def assemble_bundle(output, built, portal_origin, public_key, source_root=None):
+def assemble_bundle(output, built, portal_origin, source_root=None):
     source_root = Path(source_root or ROOT)
     output = Path(output).resolve()
     work = output / ".build-machine"
@@ -25,7 +25,7 @@ def assemble_bundle(output, built, portal_origin, public_key, source_root=None):
         "releaseSource": built.get("releaseSource"),
         "sharedWorkspaceUiRequired": True, "bunBuildTool": built["bunBuildTool"],
         "nodeDistribution": built["nodeDistribution"], "dependencyMode": "npm-codey-package",
-        "artifacts": artifacts, "bundledRuntimes": ["cloudcli", "copilot-api", "updater"],
+        "artifacts": artifacts, "bundledRuntimes": ["cloudcli", "copilot-api"],
         "downloadedOfficialRuntimes": ["node", "codex", "devtunnel"],
     }
     manifest["releaseId"] = "machine-" + built["codey"]["entrySha256"][:16]
@@ -41,6 +41,10 @@ def assemble_bundle(output, built, portal_origin, public_key, source_root=None):
         raise RuntimeError("Invalid npm installer template")
     installer = installer.replace('DEFAULT_PACKAGE_FILE=""',
                                   "DEFAULT_PACKAGE_FILE=" + shlex.quote(artifacts[0]["file"]))
+    start = installer.index("# BEGIN_CODEY_PREFLIGHT")
+    end = installer.index("# END_CODEY_PREFLIGHT") + len("# END_CODEY_PREFLIGHT")
+    preflight = (source_root / "skills/config-new-codey-machine/scripts/linux-preflight.sh").read_text()
+    installer = installer[:start] + preflight + installer[end:]
     (output / "install-codey-linux.sh").write_text(installer)
     (package_root / "scripts/install-npm.sh").write_text(installer)
     runtime_installer = write_runtime_installer(output, artifacts[0], source_root)
@@ -54,7 +58,6 @@ def assemble_bundle(output, built, portal_origin, public_key, source_root=None):
         "schema": 1, "portalOrigin": portal_origin, "releaseId": manifest["releaseId"],
         "platform": "linux-x64", "network": {"mode": "devtunnel"},
         "tunnelAuthProvider": "github",
-        "updater": {"protocol": 1, "releasePublicKey": public_key},
     }
     (assets / "setup.json").write_text(json.dumps(setup, indent=2) + "\n")
     checksums = [
@@ -87,19 +90,15 @@ def build(args):
     if (origin.scheme != "https" or not origin.hostname or origin.username or origin.password
             or origin.path or origin.query or origin.fragment):
         raise RuntimeError("--portal-origin must be an exact HTTPS origin")
-    public_key = Path(args.updater_public_key_file).read_text()
-    if not public_key.startswith("-----BEGIN PUBLIC KEY-----\n") or len(public_key) > 8192:
-        raise RuntimeError("Invalid updater public key")
     setup = {
         "schema": 1, "portalOrigin": args.portal_origin, "platform": "auto",
         "network": {"mode": "devtunnel"}, "tunnelAuthProvider": "github",
-        "updater": {"protocol": 1, "releasePublicKey": public_key},
     }
     built = build_package(args.output, allow_reviewed_diff=args.allow_reviewed_diff,
                           node_dir=args.node_dir, keep_work=True, setup_config=setup,
                           source_commit=getattr(args, "source_commit", None))
     source_root = Path(args.output).resolve() / ".build-codey/source/portal" if built.get("releaseSource") else ROOT
-    result = assemble_bundle(args.output, built, args.portal_origin, public_key, source_root)
+    result = assemble_bundle(args.output, built, args.portal_origin, source_root)
     if not args.keep_work:
         shutil.rmtree(Path(args.output).resolve() / ".build-codey")
     return result
@@ -110,7 +109,6 @@ if __name__ == "__main__":
     parser.add_argument("--output", required=True)
     parser.add_argument("--platform", choices=["linux-x64"], default="linux-x64")
     parser.add_argument("--portal-origin", required=True)
-    parser.add_argument("--updater-public-key-file", required=True)
     parser.add_argument("--allow-reviewed-diff", action="store_true", help="Development-only build; cannot be published")
     parser.add_argument("--source-commit", help="Expected origin/main SHA; components use its recorded gitlinks")
     parser.add_argument("--node-dir", help="Use an existing Node distribution for the build")

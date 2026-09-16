@@ -12,7 +12,6 @@ import shlex
 import shutil
 import sys
 import time
-import zipfile
 
 from common import NODES, command, phase, read, release_name, require, save, sha
 from release_source import commits as source_commits, git, select_main, validate_source, verify_tooling
@@ -37,6 +36,8 @@ class Deploy:
         if getattr(args, "local_builder", False):
             require(args.scope == "portal" and self.root == Path(args.remote_root).resolve(),
                     "Local builder is Portal-only and requires matching workspace/remote roots")
+        require(args.scope != "workspace" and (args.scope == "portal" or getattr(args, "node_transport", None) == "ssh"),
+                "Updater-based node deployment has been removed; use Portal-only deployment or explicitly selected legacy SSH")
         self.job = self.root / "artifacts" / self.release
         self.job.mkdir(mode=0o700, parents=True, exist_ok=bool(resumed))
         self.scripts = Path(__file__).resolve().parent
@@ -76,8 +77,6 @@ class Deploy:
             self.base["reconcileAca"] = True
         self.report["selectedNodes"] = list(self.nodes)
         self.report["skippedNodes"] = [node for node in NODES if node not in self.nodes]
-        if args.node_transport == "updater" and args.scope == "fleet":
-            self.base["enableNodeUpdates"] = True
         if args.seed:
             self.base["seed"] = args.seed
         self.manifest = None
@@ -225,117 +224,8 @@ class Deploy:
             return node, result
         return dict(self.pool.map(inspect, self.nodes))
 
-    def preserved_gateway(self):
-        script = ("import json,pathlib; "
-                  "p=pathlib.Path.home()/'.config/codey-updater/installed.json'; "
-                  "x=json.loads(p.read_text()); "
-                  "print(json.dumps({'releaseId':x['releaseId'],'gateway':x['components']['copilotApi']}))")
-        rows = {}
-        for node in self.nodes:
-            rows[node] = json.loads(self.ssh(node, ["python3", "-I", "-S", "-c", script], timeout=20))
-        return {"releaseId": next(iter(rows.values()))["releaseId"],
-                "nodes": {node: row["gateway"] for node, row in rows.items()}}
 
-    def refresh_reviewed_updater(self):
-        # A recovery may use newer committed maintenance code, but never local
-        # edits. The application's original immutable manifest remains pinned.
-        source = validate_source(self.main_source)
-        attempt = len(self.report.get("previousAttempts", []))
-        archive = self.job / f"reviewed-updater-source-{attempt}.zip"
-        require(not archive.exists(), "Do not overwrite reviewed updater evidence")
-        hashes = {}
-        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
-            for name in ["updater.py", "engine.py", "probe.mjs", "install.py", "UPGRADE.md"]:
-                body = git(self.root, "show", source["commit"] + ":node-updater/" + name, binary=True)
-                hashes[name] = hashlib.sha256(body).hexdigest()
-                bundle.writestr("codey-updater/" + name, body)
-        self.upload(self.args.builder, [str(archive)], self.remote)
-        results = [self.install_updater({
-            "node": node, "alreadyEnrolled": True, "useExistingConfig": True,
-            "file": self.remote + "/" + archive.name, "sha256": sha(archive),
-        }) for node in self.nodes]
-        return {"nodes": results, "reviewedFiles": hashes, "archiveSha256": sha(archive),
-                "releaseSource": source, "credentialReused": True, "applicationServicesRestarted": False}
 
-    def run_workspace(self):
-        self.report["scope"] = "workspace-only"
-        self.report["components"] = ["cloudcli"]
-        self.report["forceActualRollout"] = False
-        self.base["components"] = ["cloudcli"]
-        try:
-            if self.args.resume_release:
-                with phase(self.report, "resume-existing-signed-workspace-release", self.record):
-                    self.upload_workers()
-                    self.manifest = self.worker("resume_workspace", timeout=60)
-                    if self.manifest.get("acaReconciliation"):
-                        self.report["acaReconciliation"] = self.manifest["acaReconciliation"]
-                    attempt = len(self.report["previousAttempts"])
-                    for name in ("node-update-jobs", "node-update-progress"):
-                        command(["scp", "-q", f"{self.args.builder}:{self.remote}/{name}.json",
-                                 str(self.job / f"{name}-attempt-{attempt}.json")], timeout=30)
-                    self.worker("ready", script="updates.py", timeout=60)
-                    require(self.protected_local() == self.report["localBefore"], "Protected local gateway changed")
-                    require(self.node_services(services=("copilot-api.service",)) == self.report["gatewayBefore"],
-                            "Protected node gateway changed before recovery")
-                    self.report["worktreeBefore"] = command(["git", "status", "--short"], cwd=self.root)[0]
-            else:
-                with phase(self.report, "workspace-preflight-and-source", self.record):
-                    self.report["localBefore"] = self.protected_local()
-                    self.report["nodesBefore"] = self.node_services(nodes=NODES)
-                    self.report["gatewayBefore"] = self.node_services(services=("copilot-api.service",))
-                    self.report["updaterBefore"] = self.node_services(services=("codey-node-updater.service",))
-                    self.report["worktreeBefore"] = command(["git", "status", "--short"], cwd=self.root)[0]
-                    self.upload_workers()
-                    self.report["source"] = self.worker("prepare", timeout=110)
-                    self.idle(self.nodes)
-                    self.report["nativeBefore"] = self.native_idle()
-                    self.base["preservedGateway"] = self.preserved_gateway()
-                with phase(self.report, "cloudcli-only-build-and-tests", self.record):
-                    self.manifest = self.worker("build_workspace", timeout=480)
-                    save(self.job / "manifest.json", self.manifest)
-                with phase(self.report, "sign-cloudcli-only-release", self.record):
-                    self.report["nodeRelease"] = self.worker("publish", script="updates.py", timeout=160)
-                    require(self.report["nodeRelease"]["components"] == ["cloudcli"], "Gateway entered the release")
-            if self.args.refresh_updater:
-                with phase(self.report, "reviewed-independent-updater-repair", self.record):
-                    self.worker("ready", script="updates.py", timeout=60)
-                    before = self.node_services(nodes=NODES)
-                    self.report["updaterRepair"] = self.refresh_reviewed_updater()
-                    require(self.node_services(nodes=NODES) == before, "Updater repair restarted an application")
-                    self.report.setdefault("updaterOriginalBefore", self.report["updaterBefore"])
-                    self.report["updaterBefore"] = self.node_services(services=("codey-node-updater.service",))
-            with phase(self.report, "selected-node-owner-confirmed-update", self.record):
-                self.idle(self.nodes)
-                self.report["nativeAtConfirmation"] = self.native_idle()
-                # Existing enrolled updaters only. Do not bootstrap or replace an
-                # updater as a side effect of changing the application backend.
-                self.report["nodeUpdates"] = self.worker("rollout", script="updates.py", timeout=510)
-            if self.args.verify_steering:
-                with phase(self.report, "real-same-turn-steering-canary", self.record):
-                    self.report["steering"] = self.worker("steering", script="portal.py", timeout=170)
-            with phase(self.report, "shared-ui-and-real-steering-acceptance", self.record):
-                self.report["ui"] = self.worker("publish_ui", timeout=200)
-                self.report["aca"] = self.worker("verify_aca_unchanged", timeout=60)
-                self.report["e2e"] = self.worker("verify", script="portal.py", extra={"modelNodes": []}, timeout=100)
-            with phase(self.report, "protected-services-and-worktree-check", self.record):
-                self.report["nodesAfter"] = self.node_services(nodes=NODES)
-                self.report["gatewayAfter"] = self.node_services(services=("copilot-api.service",))
-                self.report["updaterAfter"] = self.node_services(services=("codey-node-updater.service",))
-                self.report["localAfter"] = self.protected_local()
-                require(self.report["localAfter"] == self.report["localBefore"], "Protected local gateway changed")
-                require(self.report["gatewayAfter"] == self.report["gatewayBefore"], "A protected gateway changed")
-                require(self.report["updaterAfter"] == self.report["updaterBefore"], "An updater was replaced")
-                require(all(self.report["nodesAfter"][node] == self.report["nodesBefore"][node]
-                            for node in NODES if node not in self.nodes), "An excluded node service changed")
-                self.report["worktreeAfter"] = command(["git", "status", "--short"], cwd=self.root)[0]
-                require(self.report["worktreeAfter"] == self.report["worktreeBefore"], "Development worktree changed")
-            self.report["status"] = "complete"
-        except Exception as error:
-            self.report["status"] = "needs-attention"
-            self.report["error"] = str(error)
-        finally:
-            self.finish()
-        return 0 if self.report["status"] == "complete" and self.report["withinTarget"] else 1
 
     def run_portal(self):
         self.report["scope"] = "portal-only"
@@ -362,12 +252,10 @@ class Deploy:
         return 0 if self.report["status"] == "complete" and self.report["withinTarget"] else 1
 
     def run(self):
-        if self.args.scope == "workspace":
-            return self.run_workspace()
         if self.args.scope == "portal":
             return self.run_portal()
-        if self.args.node_transport == "updater":
-            return self.run_updater_fleet()
+        require(self.args.scope == "fleet" and self.args.node_transport == "ssh",
+                "Updater-based node deployment has been removed")
         try:
             with phase(self.report, "preflight-source-and-node-snapshots", self.record):
                 self.report["localBefore"] = self.protected_local()
@@ -422,117 +310,7 @@ class Deploy:
             self.finish()
         return 0 if self.report["status"] == "complete" and self.report["withinTarget"] else 1
 
-    def install_updater(self, row):
-        if row.get("alreadyEnrolled") and not row.get("file"):
-            return row
-        node = row["node"]
-        require(node in NODES, "Unexpected bootstrap node")
-        local = self.job / (node + "-updater-private.zip")
-        command(["scp", "-q", f"{self.args.builder}:{row['file']}", str(local)], timeout=30)
-        # ZIP contains only this node's updater credential. Restrict its Windows ACL.
-        sid = command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-                       "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"], timeout=10)[0]
-        require(sid.startswith("S-1-") and all(char in "S-0123456789" for char in sid), "Invalid Windows owner SID")
-        # PS7 may export an incompatible PSModulePath to Windows PowerShell 5.
-        # Use the native ACL utility and .NET readback, not Get-Acl module autoload.
-        command(["icacls.exe", str(local), "/inheritance:r", "/grant:r", "*" + sid + ":(F)"], timeout=15)
-        check = ("$ErrorActionPreference='Stop';$a=[System.IO.File]::GetAccessControl('" +
-                 str(local).replace("'", "''") + "');foreach($r in $a.GetAccessRules($true,$true," +
-                 "[System.Security.Principal.SecurityIdentifier])){if($r.AccessControlType -eq 'Allow' -and " +
-                 "$r.IdentityReference.Value -ne '" + sid + "'){throw 'Private bootstrap ACL is not owner-only'}}")
-        command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", check], timeout=15)
-        require(sha(local) == row["sha256"], "Private bootstrap transfer checksum differs")
-        destination = self.node_job + "/updater-bootstrap"
-        self.upload(node, [str(local)], destination)
-        script = """import sys,os,zipfile,subprocess,json,shutil,hashlib
-from pathlib import Path
-root=Path(sys.argv[1]); archive=root/sys.argv[2]
-existing=sys.argv[3]=='1'; expected_node=sys.argv[4]
-def ensure(value,message):
- if not value: raise RuntimeError(message)
-with zipfile.ZipFile(archive) as source:
- names=source.namelist()
- wanted=['install.py','updater.py','engine.py','probe.mjs','UPGRADE.md']+([] if existing else ['config.json'])
- ensure(len(names)==len(wanted) and len(set(names))==len(wanted),'Invalid bootstrap entries')
- ensure(set(names)=={'codey-updater/'+name for name in wanted},'Unrecognized bootstrap paths')
- ensure(sum(row.file_size for row in source.infolist())<1024*1024,'Oversized bootstrap')
- source.extractall(root)
-config=Path.home()/'.config/codey-updater/config.json' if existing else root/'codey-updater/config.json'
-ensure(config.is_file(),'An enrolled node lacks its local credential; explicit re-pairing is required')
-ensure(json.loads(config.read_text())['nodeId']==expected_node,'Bootstrap belongs to another node')
-config.chmod(0o600)
-installed=Path.home()/'.local/share/codey-updater/agent-v1'
-def digest(file): return hashlib.sha256(file.read_bytes()).hexdigest()
-same=existing and all((installed/name).is_file() and digest(installed/name)==digest(root/'codey-updater'/name) for name in ['updater.py','engine.py','probe.mjs'])
-if same:
- print(json.dumps({'node':expected_node,'updaterUnchanged':True,'nodeServicesRestarted':False}));sys.exit(0)
-ensure(not (Path.home()/'.config/codey-updater/pending.json').exists(),'Finish the current updater transaction before replacing its implementation')
-python=None
-for name in [sys.executable,'python3.12','python3.13','/opt/az/bin/python3']:
- candidate=shutil.which(name)
- if not candidate: continue
- try:
-  check=subprocess.run([candidate,'-I','-S','-c','import sys,shutil,ssl,sqlite3,tomllib; sys.exit(0 if sys.version_info>=(3,12) else 1)'],capture_output=True,timeout=10)
-  if check.returncode==0: python=candidate;break
- except subprocess.TimeoutExpired: pass
-ensure(python,'No healthy independent Python 3.12+ interpreter; do not modify global runtimes')
-result=subprocess.run([python,'-I','-S',str(root/'codey-updater/install.py'),'--config',str(config),'--apply'],capture_output=True,text=True,timeout=180)
-(root/'install.private.log').write_text(result.stdout+result.stderr)
-ensure(result.returncode==0,'Updater-only installation failed; inspect the private install log')
-print(json.dumps({'node':json.loads(config.read_text())['nodeId'],'updaterInstalled':True,'nodeServicesRestarted':False}))
-"""
-        output = self.ssh(node, ["python3", "-I", "-S", "-", destination, local.name,
-                                "1" if row.get("useExistingConfig") else "0", node], input=script, timeout=200,
-                          log=self.job / (node + "-updater-install.log"))
-        # Remove only this credential-bearing temporary file, not an artifact directory.
-        require(local.resolve().parent == self.job.resolve(), "Unexpected credential temporary path")
-        local.unlink()
-        return json.loads(output)
 
-    def run_updater_fleet(self):
-        self.report["scope"] = "fleet-updater"
-        self.report["forceActualRollout"] = False
-        try:
-            with phase(self.report, "preflight-and-committed-source", self.record):
-                self.report["localBefore"] = self.protected_local()
-                self.report["nodesBefore"] = self.node_services()
-                self.upload_workers()
-                self.report["source"] = self.worker("prepare", timeout=100)
-                self.idle(self.nodes)
-                self.report["nativeBefore"] = self.native_idle()
-            with phase(self.report, "build-and-test-once", self.record):
-                self.manifest = self.worker("build", timeout=380)
-                save(self.job / "manifest.json", self.manifest)
-            with phase(self.report, "sign-and-publish-node-feed", self.record):
-                self.report["nodeRelease"] = self.worker("publish", script="updates.py", timeout=160)
-            with phase(self.report, "aca-and-shared-ui", self.record):
-                aca = self.pool.submit(self.worker, "activate", timeout=330)
-                ui = self.pool.submit(self.worker, "publish_ui", timeout=200)
-                self.report["aca"] = aca.result()
-                self.report["ui"] = ui.result()
-            with phase(self.report, "bootstrap-independent-updaters-if-needed", self.record):
-                rows = self.worker("bootstrap", script="updates.py", timeout=100)["nodes"]
-                self.report["updaterInstallation"] = list(self.pool.map(self.install_updater, rows))
-                require(self.node_services() == self.report["nodesBefore"], "Updater bootstrap changed an application service")
-            with phase(self.report, "owner-confirmed-canary-and-batch-model-e2e", self.record):
-                self.idle(self.nodes)
-                self.report["nativeAtConfirmation"] = self.native_idle()
-                self.report["nodeUpdates"] = self.worker("rollout", script="updates.py", timeout=510)
-            with phase(self.report, "final-aca-fleet-and-local-acceptance", self.record):
-                self.report["e2e"] = self.worker("verify", script="portal.py", extra={"modelNodes": []}, timeout=100)
-                self.report["nodesAfter"] = self.node_services()
-                self.report["localAfter"] = self.protected_local()
-                require(self.report["localAfter"] == self.report["localBefore"], "Protected local gateway changed")
-                nodes = self.report["nodeUpdates"]
-                self.report["realModelCalls"] = {"codey": nodes.get("codeyModelCalls", 0),
-                                                "codex": nodes.get("codexModelCalls", 0)}
-            self.report["status"] = "complete"
-        except Exception as error:
-            self.report["status"] = "needs-attention"
-            self.report["error"] = str(error)
-        finally:
-            self.finish()
-        return 0 if self.report["status"] == "complete" and self.report["withinTarget"] else 1
 
     def finish(self):
         # Wait for mutation/rollback workers; cleanup time is part of the measurement.

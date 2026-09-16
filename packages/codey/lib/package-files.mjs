@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { readPackageInfo, runtimePlatform, validateRuntimeLock } from "./package-info.mjs";
@@ -25,42 +25,21 @@ export const inside = (root, file) => {
 export async function ownedPath(file, home, { allowSymlink = false } = {}) {
   file = path.resolve(file);
   home = await realpath(home);
-  if (!inside(home, file)) throw new Error("Local updates require an installation under your own HOME.");
+  if (!inside(home, file)) throw new Error("Use an installation under your own HOME.");
   let cursor = file;
   while (cursor !== home) {
     try {
       const info = await lstat(cursor);
-      if (info.isSymbolicLink() && !allowSymlink) throw new Error("Linked update/state paths require manual review.");
+      if (info.isSymbolicLink() && !allowSymlink) throw new Error("Linked installation paths require manual review.");
       if (process.getuid && (info.uid !== process.getuid() || info.mode & 0o022)) {
-        throw new Error("Update paths must be owned by you and not writable by other users.");
+        throw new Error("Installation paths must be owned by you and not writable by other users.");
       }
       const resolved = await realpath(cursor);
-      if (resolved !== home && !inside(home, resolved)) throw new Error("Update path resolves outside your HOME.");
+      if (resolved !== home && !inside(home, resolved)) throw new Error("Installation path resolves outside your HOME.");
     } catch (error) { if (error.code !== "ENOENT") throw error; }
     cursor = path.dirname(cursor);
   }
   return file;
-}
-
-export async function privateDirectory(directory, home) {
-  await ownedPath(directory, home);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await chmod(directory, 0o700);
-  return directory;
-}
-
-export async function atomicWrite(file, value) {
-  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(typeof value === "string" ? value : JSON.stringify(value, null, 2) + "\n");
-  if (await exists(file)) {
-    const info = await lstat(file);
-    if (!info.isFile() || info.isSymbolicLink()) throw new Error("Refusing to overwrite a linked or non-file update record.");
-  }
-  const temporary = file + "." + randomBytes(8).toString("hex") + ".next";
-  const stream = await open(temporary, "wx", 0o600);
-  try { await stream.writeFile(bytes); await stream.sync(); }
-  finally { await stream.close(); }
-  try { await rename(temporary, file); }
-  finally { await rm(temporary, { force: true }); }
 }
 
 export async function fileHash(file) {
@@ -96,17 +75,15 @@ export async function readInstalledPackageInfo(root, { platform = process.platfo
   }
 }
 
-/** Captured output can contain private paths; callers log it only in the job directory. */
-export async function execute(file, args, { cwd, env = process.env, log, timeout = 60000 } = {}) {
+/** Run a bounded local package probe without echoing child errors or credentials. */
+export async function execute(file, args, { cwd, env = process.env, timeout = 60000 } = {}) {
   try {
     const result = await promisify(execFile)(file, args, {
       cwd, env, timeout, maxBuffer: 16 * 1024 * 1024, windowsHide: true, shell: false,
     });
-    if (log) await atomicWrite(log, result.stdout + result.stderr);
     return result.stdout.trim();
   } catch (error) {
-    if (log) await atomicWrite(log, (error.stdout ?? "") + (error.stderr ?? "") + "\n" + (error.code ?? "failed"));
-    throw new Error(`${path.basename(file)} failed${log ? `; inspect ${log}` : ""}.`, { cause: error });
+    throw new Error(`${path.basename(file)} failed.`, { cause: error });
   }
 }
 
@@ -124,7 +101,7 @@ export async function findNpm(node, platform = process.platform) {
   for (const candidate of npmPaths(node, platform)) {
     if (await exists(candidate)) return realpath(candidate);
   }
-  throw new Error("The existing Node runtime must include npm; codey update will not install a runtime.");
+  throw new Error("The selected Node runtime must include npm.");
 }
 
 /** Native dependency hooks must not inherit provider credentials, NODE_OPTIONS or npm overrides. */
@@ -149,18 +126,4 @@ export function buildEnvironment(home, node, source = process.env) {
     npm_config_cache: path.join(home, ".npm"),
     DATABASE_PATH: ":memory:", CODEY_MANAGED: "false", CODEY_PORTAL_SSO: "false",
   };
-}
-
-/** Service discovery needs the owner's OS session, not application/provider or npm overrides. */
-export function controlEnvironment(home, source = process.env) {
-  const result = { HOME: home, USERPROFILE: home, PYTHONDONTWRITEBYTECODE: "1" };
-  for (const name of [
-    "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "SYSTEMDRIVE", "TEMP", "TMP",
-    "OS", "COMPUTERNAME", "PROCESSOR_ARCHITECTURE", "APPDATA", "LOCALAPPDATA",
-    "USER", "LOGNAME", "LANG", "LC_ALL", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
-  ]) if (source[name] !== undefined) result[name] = source[name];
-  result.PATH = process.platform === "win32"
-    ? [source.SystemRoot && path.join(source.SystemRoot, "System32"), source.SystemRoot].filter(Boolean).join(path.delimiter)
-    : "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-  return result;
 }

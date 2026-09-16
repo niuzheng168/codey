@@ -11,7 +11,7 @@ const owner = { id: "owner-zhn", username: "zhn", enabled: true };
 const bob = { id: "owner-bob", username: "bob", enabled: true };
 const version = { version: "0.1.0", commit: "a".repeat(40), nodeMajor: 24 };
 const node = (id, values = {}) => ({
-  id, name: id, region: "Japan East", owner, status: "online", lastSeen: now,
+  id, name: id, region: "Japan East", owner, status: "workspace_online", lastSeen: null, workspaceHealth: { reachable: true, checkedAt: now },
   releaseId: "installed-release",
   components: { codey: version, cloudcli: { ...version, version: "1.37.2" },
     copilotApi: { ...version, version: "2.5.1", commit: "c".repeat(40) } },
@@ -19,17 +19,17 @@ const node = (id, values = {}) => ({
 });
 const defaults = [
   node("zhn-a100"),
-  node("bob-machine", { owner: bob, status: "stale", lastSeen: now - 120000,
+  node("bob-machine", { owner: bob, status: "workspace_unreachable", lastSeen: null, workspaceHealth: { reachable: false, checkedAt: now },
     components: { codey: { ...version, commit: "b".repeat(40) } } }),
-  node("first-start", { owner: bob, status: "unreported", lastSeen: null, components: { codey: null } }),
-  node("local", { status: "not_enrolled", lastSeen: null, components: { codey: null } }),
+  node("first-start", { owner: bob, status: "unknown", lastSeen: null, workspaceHealth: null, components: { codey: null } }),
+  node("local", { status: "unknown", lastSeen: null, workspaceHealth: null, components: { codey: null } }),
 ];
 
 function inventory(nodes, generatedAt = now) {
-  const online = nodes.filter((item) => ["online", "workspace_online"].includes(item.status)).length;
-  const stale = nodes.filter((item) => item.status === "stale").length;
+  const online = nodes.filter((item) => item.status === "workspace_online").length;
+  const stale = nodes.filter((item) => item.status === "workspace_unreachable").length;
   return {
-    generatedAt, heartbeatTimeoutMs: 90000, telemetryAvailable: true,
+    generatedAt, heartbeatTimeoutMs: null, telemetryAvailable: false,
     workspaceHealthAvailable: nodes.some((item) => item.workspaceHealth),
     summary: { total: nodes.length, owners: new Set(nodes.map((item) => item.owner.id)).size,
       online, stale, unknown: nodes.length - online - stale },
@@ -104,17 +104,17 @@ test("inventory renders all-owner counts, node versions and explicit unknown sta
   }
   assert.equal(p.rows().length, 4);
   const known = p.rows().find((row) => row.dataset.nodeId === "zhn-a100");
-  assert.match(known.textContent, /zhn.*心跳在线.*0\.1\.0.*aaaaaaaa · Node 24/s);
-  assert.match(known.children[2].querySelector("span").title, /仅表示升级器.*不代表数据接口/);
+  assert.match(known.textContent, /zhn.*Workspace 在线.*0\.1\.0.*aaaaaaaa · Node 24/s);
+  assert.doesNotMatch(known.children[2].textContent, /升级器|心跳/);
   assert.equal(known.children.length, 4);
   assert.doesNotMatch(known.textContent, /1\.37\.2|2\.5\.1/);
   assert.match(known.children[3].title, new RegExp("Commit: " + "a".repeat(40)));
   assert.match(known.children[3].title, /installed-release/);
   const local = p.rows().find((row) => row.dataset.nodeId === "local");
-  assert.match(local.textContent, /未接入升级器.*尚无心跳记录.*未上报 Codey 版本/);
+  assert.match(local.textContent, /状态未知.*尚无健康检查结果.*未上报 Codey 版本/);
   assert.ok(!local.textContent.includes("1.37.2"), "Never fill unknown installed versions from a target release");
-  assert.match(p.get("admin-node-message").textContent, /90 秒.*30 秒/);
-  assert.match(p.get("admin-node-help").textContent, /不代表模型或服务健康/);
+  assert.match(p.get("admin-node-message").textContent, /按需检查 Workspace.*30 秒/);
+  assert.match(p.get("admin-node-help").textContent, /连通不代表模型已登录/);
   assert.equal(p.get("admin-node-list").querySelectorAll("a").length, 0);
   assert.equal(p.get("admin-node-list").querySelectorAll("button").length, 0);
   assert.equal(p.get("admin-node-list").querySelectorAll("input").length, 0);
@@ -139,7 +139,7 @@ test("Windows Workspace health counts as online without claiming an updater hear
   assert.equal(p.get("admin-node-online").textContent, "1");
   assert.equal(p.get("admin-node-unknown").textContent, "0");
   const row = p.rows()[0];
-  assert.match(row.textContent, /windows-devbox.*兼容 ID: local.*Workspace 在线.*健康检查.*未接入升级器/s);
+  assert.match(row.textContent, /windows-devbox.*兼容 ID: local.*Workspace 在线.*健康检查/s);
   assert.ok(!row.textContent.includes("心跳在线"));
   assert.match(row.children[3].textContent, /未上报 Codey 版本/);
   assert.doesNotMatch(row.textContent, /1\.37\.2/);
@@ -186,13 +186,13 @@ test("search, owner and status filters combine without changing global totals", 
   assert.equal(p.requests.length, 1, "Filtering is local and cannot start node probes");
 });
 
-test("unknown filter includes never-enrolled, first-heartbeat, revoked, disabled and unavailable nodes", async () => {
-  const nodes = ["online", "stale", "not_enrolled", "unreported", "revoked", "owner_disabled", "unavailable", "unknown"]
+test("unknown filter includes legacy statuses, disabled and unavailable nodes", async () => {
+  const nodes = ["workspace_online", "workspace_unreachable", "not_enrolled", "unreported", "revoked", "owner_disabled", "unavailable", "unknown"]
     .map((status) => node(status, { status, ...(status === "owner_disabled" ? { owner: { ...bob, enabled: false } } : {}) }));
   const p = await page({ nodes });
   p.filter("admin-node-status", "unknown");
   assert.equal(p.rows().length, 6);
-  assert.ok(p.rows().every((row) => !["online", "stale"].includes(row.dataset.nodeId)));
+  assert.ok(p.rows().every((row) => !["workspace_online", "workspace_unreachable"].includes(row.dataset.nodeId)));
   assert.match(p.get("admin-node-list").textContent, /账号已停用/);
   assert.match(p.get("admin-node-owner").textContent, /bob（已停用）/);
   p.filter("admin-node-owner", bob.id);
@@ -323,9 +323,9 @@ test("a role change discards both cached inventory and a late successful respons
   assert.equal(p.rows().length, 4);
 });
 
-test("an unavailable telemetry service or malformed response is explicit rather than fabricated status", async () => {
+test("no telemetry service is required, and malformed inventory is rejected", async () => {
   const missing = await page({ respond: () => ({ value: { ...inventory(defaults), telemetryAvailable: false, heartbeatTimeoutMs: null } }) });
-  assert.match(missing.get("admin-node-message").textContent, /尚未配置上报服务/);
+  assert.match(missing.get("admin-node-message").textContent, /按需检查 Workspace/);
   const malformed = await page({ respond: () => ({ value: { nodes: [], summary: { total: 99 }, generatedAt: now } }) });
   assert.match(malformed.get("admin-node-message").textContent, /响应无效/);
   assert.equal(malformed.get("admin-node-total").textContent, "—");

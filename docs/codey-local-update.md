@@ -1,3 +1,5 @@
+> **历史说明**：当前源码已移除 Portal/本地更新器，Mac 安装与守护已改为 Node。本文中的旧更新命令、Python 要求或代理操作不适用于新源码；旧机器不会自动迁移。以 `skills/config-new-codey-machine/SKILL.md` 为准。
+
 # 本地更新器：Codey、Codex、DevTunnel
 
 更新器以已安装的 **Codey 0.1.3** 为工具管理兼容基线，一次明确更新一个组件。

@@ -9,7 +9,6 @@
     <link rel="stylesheet" href="/settings.css" />
     <script type="module" src="/settings.js"></script>
     <script type="module" src="/admin-nodes.js"></script>
-    <script type="module" src="/machine-updates.js"></script>
     <script type="module" src="/portal-session.js"></script>
   </head>
   <body>
@@ -25,7 +24,6 @@
 
       <div class="settings-tabs" role="tablist" aria-label="设置分类">
         <button id="nodes-tab" type="button" role="tab" data-settings-panel="nodes" aria-controls="nodes" aria-selected="true">我的节点 <span id="nodes-count" class="tab-count">—</span></button>
-        <button id="updates-tab" type="button" role="tab" data-settings-panel="machine-updates" aria-controls="machine-updates" aria-selected="false" tabindex="-1">软件更新 <span id="node-update-count" class="tab-count" hidden><span id="node-update-count-label" class="count-label"></span><span id="node-update-count-compact" class="count-compact" aria-hidden="true"></span></span></button>
         <button id="account-tab" type="button" role="tab" data-settings-panel="account" aria-controls="account" aria-selected="false" tabindex="-1">账号安全</button>
         <button id="admin-tab" type="button" role="tab" data-settings-panel="admin-section" aria-controls="admin-section" aria-selected="false" tabindex="-1" hidden>全局管理</button>
       </div>
@@ -43,30 +41,6 @@
         <p class="panel-footnote">仅显示你的节点，归属由服务端隔离。移除只撤销门户访问，不会关机或删除机器上的文件。</p>
       </section>
 
-      <section id="machine-updates" class="settings-panel" role="tabpanel" aria-labelledby="updates-tab" tabindex="0" hidden>
-        <div class="panel-heading">
-          <div>
-            <h2 id="machine-updates-heading">Codey 软件更新</h2>
-            <p class="muted">统一更新 Codey npm 包，Workspace 与模型网关一起切换。先预览，再确认；仅更新你拥有的机器。</p>
-          </div>
-          <button id="node-update-refresh" class="quiet" type="button">刷新状态</button>
-        </div>
-        <div class="update-controls update-toolbar">
-          <label class="release-picker">目标 Codey 版本<select id="node-update-release" disabled aria-label="目标 Codey 版本"></select></label>
-          <button id="node-update-download" type="button" disabled>下载 Codey 更新包</button>
-          <button id="node-update-selected" class="primary" type="button" disabled>更新选中机器</button>
-          <button id="node-update-all" type="button" disabled>更新全部可升级机器</button>
-        </div>
-        <p id="node-update-download-info" class="muted"></p>
-        <p class="panel-footnote">下载仅包含 Codey 应用，不包含 Node 或依赖缓存，也不会提交节点升级任务。已有 0.1.6+ 可在外部终端运行 <code>codey update 包路径 --offline</code>，复用锁文件一致的现有依赖；新机安装仍使用“添加节点”中的安装 Skill。</p>
-        <p id="node-update-message" role="status" aria-live="polite" class="muted">正在读取升级状态…</p>
-        <div id="node-update-list"></div>
-        <details id="node-update-history" class="secondary-details" hidden>
-          <summary>升级记录 <span id="node-update-job-count" class="muted"></span></summary>
-          <div id="node-update-jobs" aria-label="机器升级任务"></div>
-        </details>
-        <p class="panel-footnote">批量更新先灰度一台，成功后最多并行三台。升级器的接入与停用在各机器的“管理”中。</p>
-      </section>
 
       <section id="account" class="settings-panel" role="tabpanel" aria-labelledby="account-tab" tabindex="0" hidden>
         <div class="panel-heading">
@@ -101,7 +75,7 @@
             <span><strong id="admin-node-total">—</strong> 台节点</span>
             <span><strong id="admin-node-owners">—</strong> 位所属用户</span>
             <span><strong id="admin-node-online">—</strong> 节点在线</span>
-            <span><strong id="admin-node-stale">—</strong> 心跳超时</span>
+            <span><strong id="admin-node-stale">—</strong> Workspace 暂未连通</span>
             <span><strong id="admin-node-unknown">—</strong> 状态未知</span>
           </div>
           <div class="inventory-filters">
@@ -109,8 +83,8 @@
             <label>所属用户<select id="admin-node-owner" disabled><option value="">全部用户</option></select></label>
             <label>节点状态<select id="admin-node-status" disabled>
               <option value="">全部状态</option>
-              <option value="online">在线（心跳或 Workspace）</option>
-              <option value="stale">心跳超时</option>
+              <option value="online">Workspace 在线</option>
+              <option value="stale">Workspace 暂未连通</option>
               <option value="unknown">状态未知</option>
             </select></label>
           </div>
@@ -134,7 +108,7 @@
               <button id="admin-node-next" class="quiet" type="button" aria-label="下一页节点" disabled>下一页</button>
             </div>
           </div>
-          <p id="admin-node-help" class="panel-footnote">心跳仅代表升级器近期上报，不代表模型或服务健康。未接入升级器的受信任节点另用 Workspace 健康检查判断可达性，不伪造心跳；检查成功也不代表模型已登录。Codey 版本只使用节点实际的包版本上报，不以旧组件版本或目标发行版代替。此总览不提供连接、会话、密钥或跨用户更新权限。</p>
+          <p id="admin-node-help" class="panel-footnote">通过受信任连接按需检查 Workspace 可达性，不安装心跳或升级代理；连通不代表模型已登录。没有实际 Codey 整包版本时显示未知，不以 Workspace 组件版本代替。本页不提供会话、密钥或跨用户操作权限。</p>
         </section>
 
         <section id="admin-users-panel" role="tabpanel" aria-labelledby="admin-users-tab" tabindex="0" hidden>
@@ -216,17 +190,6 @@
         <button id="hide-enrollment" type="button" autofocus>隐藏接入资料</button>
       </dialog>
 
-      <dialog id="node-update-confirm" aria-labelledby="node-update-confirm-title" aria-describedby="node-update-confirm-help">
-        <h2 id="node-update-confirm-title">确认 Codey 整包升级计划</h2>
-        <p id="node-update-plan-note"></p>
-        <div id="node-update-plan-targets"></div>
-        <p id="node-update-confirm-help" class="muted">升级会短暂停止受影响的服务，并验证 Codey/Codex 模型调用（可能产生少量用量）。请先结束原生 Codex 任务。离线/忙碌机器会等待；未知迁移不会被强行执行。</p>
-        <p id="node-update-plan-error" role="status" aria-live="polite"></p>
-        <div class="dialog-actions">
-          <button id="node-update-cancel" type="button" autofocus>取消</button>
-          <button id="node-update-apply" class="primary" type="button">确认升级</button>
-        </div>
-      </dialog>
 
     </main>
   </body>

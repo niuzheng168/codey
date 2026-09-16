@@ -88,7 +88,7 @@ test("settings starts with one compact panel, closed dialogs and a hidden admini
   const p = await page();
   const tabs = p.document.querySelectorAll("[data-settings-panel]");
   const panels = p.document.querySelectorAll('[role="tabpanel"]');
-  assert.equal(tabs.length, 4);
+  assert.equal(tabs.length, 3);
   assert.deepEqual(panels.filter((panel) => !panel.hidden).map((panel) => panel.id), ["nodes"]);
   assert.equal(p.get("admin-tab").hidden, true);
   assert.equal(p.get("nodes-count").textContent, "1");
@@ -127,8 +127,8 @@ test("Left/Right, Home and End navigate only the visible settings tabs", async (
   p.get("account-tab").dispatch("keydown", { key: "Home" });
   assert.equal(p.document.activeElement, p.get("nodes-tab"));
   p.get("nodes-tab").dispatch("keydown", { key: "ArrowRight" });
-  assert.equal(p.document.activeElement, p.get("updates-tab"));
-  p.get("updates-tab").dispatch("keydown", { key: "End" });
+  assert.equal(p.document.activeElement, p.get("account-tab"));
+  p.get("account-tab").dispatch("keydown", { key: "End" });
   assert.equal(p.document.activeElement, p.get("account-tab"));
 });
 

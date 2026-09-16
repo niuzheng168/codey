@@ -128,7 +128,7 @@ WantedBy=default.target
 
 新增完整机器使用新版 `config-new-codey-machine` Skill：Linux 执行
 `scripts/install-npm.sh`，Windows 执行 `scripts/install.ps1`，macOS 执行
-`scripts/install-macos.py`，按 Skill 说明确认计划后应用。三个系统使用同一个 npm
+`scripts/install-macos.sh`，按 Skill 说明确认计划后应用。三个系统使用同一个 npm
 应用包，Node、Codex 和 DevTunnel 从官方源下载；不得跨平台运行 Linux 服务脚本。
 完整安装最后必须验通原用户 Home 下的 `codey-machine-registration.json`，
 不能把 `install-runtime.mjs` 仅安装运行包当成节点安装完成。

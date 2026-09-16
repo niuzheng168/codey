@@ -27,7 +27,6 @@ def load(name, file):
 
 bundle = load("codey_machine_bundle", "scripts/build-machine-bundle.py")
 publisher = load("codey_machine_publisher", "scripts/publish-machine-skill.py")
-offline_builder = load("codey_offline_builder", "scripts/build-codey-offline-windows.py")
 
 
 def write_json(file, value):
@@ -67,35 +66,6 @@ class MemoryStore:
     def rmdir(self, name): self.directories.remove(name)
 
 
-class OfflineWindowsBuilderTests(unittest.TestCase):
-    def test_accepts_published_two_and_four_platform_packages_but_not_relabelled_matrices(self):
-        for platforms in [
-            ["linux-x64", "windows-x64"],
-            ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"],
-        ]:
-            offline_builder.validate_runtime_platforms(platforms)
-        for platforms in [
-            None, [], ["linux-x64"], ["windows-x64"],
-            ["linux-x64", "windows-x64", "macos-arm64"],
-            ["windows-x64", "linux-x64"],
-            ["linux-x64", "windows-x64", "android-arm64"],
-        ]:
-            with self.subTest(platforms=platforms), self.assertRaises(ValueError):
-                offline_builder.validate_runtime_platforms(platforms)
-
-    def test_delivered_readme_matches_the_actual_package_version_and_computer(self):
-        for version in ["0.1.4", "0.1.5"]:
-            text = offline_builder.render_readme(version, "CPC-zhn-VZO0BX3")
-            self.assertIn(f"Update-Codey-{version}.ps1", text)
-            self.assertIn(f"codey-{version}.tgz", text)
-            self.assertIn("CPC-zhn-VZO0BX3", text)
-            self.assertIn("接入升级器", text)
-            self.assertNotIn("{{", text)
-        for version, computer in [("../0.1.5", "CPC-zhn"), ("0.1.5", "wrong/computer")]:
-            with self.assertRaises(ValueError):
-                offline_builder.render_readme(version, computer)
-
-
 @unittest.skipUnless(sys.platform == "linux", "Linux package builder")
 class CodeyPackageTests(unittest.TestCase):
     def setUp(self):
@@ -119,9 +89,10 @@ class CodeyPackageTests(unittest.TestCase):
         for name in (
             "dist-server/server/index.js", "dist/index.html", "gateway/main.js", "pages/index.html",
             "lib/codex-sdk/index.js",
-            "updater/install.py", "updater/engine.py", "updater/updater.py", "updater/probe.mjs",
-            "onboarding/scripts/install.sh", "onboarding/scripts/registration.mjs", "onboarding/templates/a100-models.json",
+            "onboarding/scripts/install.sh", "onboarding/scripts/registration.mjs",
+            "onboarding/templates/a100-models.json", "onboarding/templates/codex-config.toml",
             "onboarding/scripts/install-devtunnel-health.sh", "onboarding/scripts/linux-devtunnel-health.mjs",
+            "onboarding/scripts/linux-preflight.sh", "onboarding/scripts/windows-runtime.mjs",
         ):
             file = self.runtime / name
             file.parent.mkdir(parents=True, exist_ok=True)
@@ -136,14 +107,8 @@ class CodeyPackageTests(unittest.TestCase):
         self.setup = {
             "schema": 1, "portalOrigin": "https://codey.example.test", "platform": "auto",
             "network": {"mode": "devtunnel"}, "tunnelAuthProvider": "github",
-            "updater": {"protocol": 1, "releasePublicKey": subprocess.check_output([
-                str(self.node / "bin/node"), "-e",
-                "process.stdout.write(require('node:crypto').generateKeyPairSync('ed25519').publicKey.export({type:'spki',format:'pem'}))",
-            ], text=True)},
         }
         write_json(self.runtime / "onboarding/setup.json", self.setup)
-        subprocess.run([str(self.node / "bin/node"), str(ROOT / "scripts/build-native-updaters.mjs"),
-                        str(self.runtime / "updater/native")], check=True)
         write_json(self.runtime / "codey-build.json", {
             "schema": 1, "name": "codey", "version": pkg["version"], "sourceCommit": "b" * 40,
             "sourceDirty": False, "releaseSource": self.release_source,
@@ -163,8 +128,7 @@ class CodeyPackageTests(unittest.TestCase):
             "codey": package.inspect_npm_package(self.file), "artifact": self.artifact,
             "releaseSource": self.release_source,
         }
-        bundle.assemble_bundle(self.root, built, "https://codey.example.test",
-                               self.setup["updater"]["releasePublicKey"])
+        bundle.assemble_bundle(self.root, built, "https://codey.example.test")
         return self.root / "config-new-codey-machine.zip"
 
     def rewritten(self, transform):
@@ -335,26 +299,38 @@ class CodeyPackageTests(unittest.TestCase):
         ], check=True, capture_output=True, text=True)
         self.assertEqual(json.loads(result.stdout)["azureRequests"], 0)
 
-    def test_complete_skill_can_run_its_documented_npm_entrypoint_without_other_downloads(self):
+    def test_complete_skill_preserves_guidance_and_legacy_npm_entrypoint(self):
         file = self.machine_bundle()
         extracted = self.root / "extracted"
         with zipfile.ZipFile(file) as archive:
             archive.extractall(extracted)
         skill = extracted / "config-new-codey-machine"
-        self.assertTrue((skill / "SKILL.md").is_file())
-        self.assertTrue((skill / "agents/openai.yaml").is_file())
-        self.assertIn("bash scripts/install-npm.sh --package assets/codey-*.tgz",
-                      (skill / "SKILL.md").read_text())
+        for relative in ("SKILL.md", "agents/openai.yaml"):
+            self.assertEqual(
+                (skill / relative).read_bytes(),
+                (ROOT / "skills/config-new-codey-machine" / relative).read_bytes(),
+                "The Skill must ship its current guidance and metadata unchanged",
+            )
         self.assertEqual(len(list((skill / "assets").glob("*.tgz"))), 1)
         home = self.root / "skill-home"
         home.mkdir()
+        stubs = self.root / "preflight-stubs"
+        stubs.mkdir()
+        for name, body in {
+            "ss": "exit 0",
+            "getent": 'printf "fixture:x:%s:1000::%s:/bin/bash\\n" "$(id -u)" "$HOME"',
+        }.items():
+            file = stubs / name
+            file.write_text("#!/bin/sh\n" + body + "\n")
+            file.chmod(0o700)
         prefix = home / ".local/share/codey-skill-check"
         result = subprocess.run([
             "bash", "-c",
             'bash scripts/install-npm.sh --package assets/codey-*.tgz --node-dir "$1" --prefix "$2" --check',
             "skill-check", str(self.node), str(prefix),
         ], cwd=skill, env={
-            **os.environ, "HOME": str(home), "npm_config_offline": "true",
+            **os.environ, "HOME": str(home), "SUDO_USER": "", "npm_config_offline": "true",
+            "PATH": str(stubs) + os.pathsep + os.environ["PATH"],
             "npm_config_cache": str(home / ".npm"),
         }, check=True, capture_output=True, text=True, timeout=60)
         self.assertIn('"serviceChanges":false', result.stdout)
@@ -417,8 +393,8 @@ class CodeyPackageTests(unittest.TestCase):
         file = self.machine_bundle()
         with zipfile.ZipFile(file) as archive:
             files = {name: archive.read(name) for name in archive.namelist()}
-        for missing in ["scripts/install.ps1", "scripts/install-macos.py", "scripts/registration.mjs",
-                        "scripts/windows-common.ps1", "scripts/macos-service.py", "dependencies.macos.json"]:
+        for missing in ["scripts/install.ps1", "scripts/install-macos.mjs", "scripts/install-macos.sh", "scripts/registration.mjs",
+                        "scripts/windows-common.ps1", "scripts/macos-service.mjs", "dependencies.macos.json"]:
             modified = self.root / "incomplete.zip"
             with zipfile.ZipFile(modified, "w", compression=zipfile.ZIP_STORED) as archive:
                 for name, body in files.items():
@@ -427,19 +403,18 @@ class CodeyPackageTests(unittest.TestCase):
             with self.subTest(missing=missing), self.assertRaises(publisher.PublishError):
                 publisher.inspect_package(modified)
 
-    def test_native_updaters_remain_checksum_valid_after_package_text_normalization(self):
-        package.normalize_runtime_text(self.runtime)
-        for platform in package.RUNTIME_PLATFORMS[1:]:
-            root = self.runtime / "updater/native" / platform
-            manifest = json.loads((root / "agent-files.json").read_text())
-            self.assertEqual(manifest["platform"], platform)
-            self.assertFalse((root / "config.json").exists(), "Do not publish target credentials")
-            for name, checksum in manifest["files"].items():
-                self.assertEqual(package.metadata(root / name)["sha256"], checksum, name)
-        with self.assertRaisesRegex(RuntimeError, "credential-free"):
-            package.inspect_npm_package(self.rewritten(lambda files: files.update({
-                "package/updater/native/windows-x64/config.json": b'{"credential":"fixture-must-not-ship"}',
-            })))
+    def test_runtime_and_skill_do_not_ship_python_or_updaters(self):
+        with tarfile.open(self.file) as archive:
+            names = archive.getnames()
+        self.assertFalse(any(name.endswith((".py", ".pyc")) or "/updater/" in name for name in names))
+        self.assertNotIn("package/lib/update.mjs", names)
+        with zipfile.ZipFile(self.machine_bundle()) as archive:
+            self.assertFalse(any(name.endswith((".py", ".pyc")) for name in archive.namelist()))
+            setup = json.loads(archive.read("config-new-codey-machine/assets/setup.json"))
+            self.assertNotIn("updater", setup)
+        for name in ["package/lib/worker.py", "package/updater/agent.mjs", "package/lib/update.mjs"]:
+            with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, "retired updaters"):
+                package.inspect_npm_package(self.rewritten(lambda files: files.update({name: b"retired"})))
 
     def test_source_dependency_changes_require_updating_the_single_manifest(self):
         package.validate_dependencies({"dependencies": {"a": "1"}, "optionalDependencies": {}},

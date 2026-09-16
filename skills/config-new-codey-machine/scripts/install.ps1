@@ -6,14 +6,13 @@ Native Windows counterpart of install.sh. Default: read-only installation plan.
 Use the shared Codey npm artifact from the complete installation Skill.
 Apply requires an external, non-elevated owner terminal and explicit
 network approval. Replacement is limited to this installer's own tasks/services.
-The Linux/systemd signed updater is deliberately NOT installed on Windows.
+No Portal agent or local updater is installed.
 #>
 [CmdletBinding()]
 param(
     [switch]$Apply,
     [switch]$NetworkApproved,
     [switch]$ReplaceExisting,
-    [switch]$RepairServices,
     [string]$ExpectedComputerName = '',
     [string]$CodexHome = ''
 )
@@ -37,19 +36,15 @@ function Read-CodeyWindowsPackage {
     # an explicitly shared application; legacy Linux-only packages still fail.
     if ($manifest.PSObject.Properties['runtimePlatforms']) {
         if ((@($manifest.runtimePlatforms) -join ',') -ne 'linux-x64,windows-x64,macos-arm64,macos-x64' -or
-            $manifest.platform -ne 'linux-x64' -or $setup.platform -ne 'linux-x64' -or
-            $setup.updater.protocol -ne 1 -or
-            $setup.updater.releasePublicKey -notmatch '^-----BEGIN PUBLIC KEY-----' -or
-            $setup.updater.releasePublicKey -match 'PRIVATE KEY') { throw 'Invalid shared machine package metadata.' }
+            $manifest.platform -ne 'linux-x64' -or $setup.platform -ne 'linux-x64') {
+            throw 'Invalid shared machine package metadata.'
+        }
         $manifest.platform = 'windows-x64'
         $manifest.node = $pins.node.version
         $manifest.nodeDistribution = $pins.node
         $manifest | Add-Member -NotePropertyName dependencyRegistry -NotePropertyValue 'https://registry.npmjs.org/' -Force
         $setup.platform = 'windows-x64'
     }
-    $publicUpdater = $setup.updater.PSObject.Properties['protocol'] -and $setup.updater.protocol -eq 1 -and
-        $setup.updater.PSObject.Properties['releasePublicKey'] -and $setup.updater.releasePublicKey -match '^-----BEGIN PUBLIC KEY-----'
-    $legacyUpdater = $setup.updater.PSObject.Properties['supported'] -and $setup.updater.supported -eq $false
     $artifact = @($manifest.artifacts)[0]
     if ($pins.schema -ne 2 -or $pins.platform -ne 'windows-x64' -or
         $pins.npmPackage.name -ne 'codey' -or $pins.npmPackage.dependencies -ne 'npm-shrinkwrap.json' -or
@@ -64,9 +59,8 @@ function Read-CodeyWindowsPackage {
         $artifact.sha256 -notmatch '^[a-f0-9]{64}$' -or $artifact.size -le 0 -or
         $manifest.codey.entrySha256 -notmatch '^[a-f0-9]{64}$' -or
         $manifest.codey.lockSha256 -notmatch '^[a-f0-9]{64}$' -or
-        (@($manifest.bundledRuntimes) -join ',') -ne 'cloudcli,copilot-api,updater' -or
+        (@($manifest.bundledRuntimes) -join ',') -ne 'cloudcli,copilot-api' -or
         $setup.network.mode -ne 'devtunnel' -or $setup.tunnelAuthProvider -ne 'github' -or
-        -not ($publicUpdater -or $legacyUpdater) -or
         $pins.codex.url -ne 'https://chatgpt.com/codex/install.ps1' -or $pins.codex.release -ne 'latest' -or
         $pins.devTunnel.url -ne 'https://aka.ms/TunnelsCliDownload/win-x64' -or
         $pins.devTunnel.sha256 -notmatch '^[a-f0-9]{64}$' -or $pins.devTunnel.provider -ne 'github' -or
@@ -105,6 +99,10 @@ function Read-CodeyWindowsPackage {
     if ($artifact.sha256 -ne $sums[$artifact.file]) { throw 'Codey npm package does not match the manifest.' }
     $models = Join-Path $Root 'templates\a100-models.json'
     $null = Read-CodeyJson $models
+    $template = Get-Content -LiteralPath (Join-Path $Root 'templates\codex-config.toml') -Raw -Encoding UTF8
+    if ([regex]::Matches($template, '__CODEY_MODEL_CATALOG__').Count -ne 1) {
+        throw 'The shared model configuration template is invalid.'
+    }
     return [pscustomobject]@{
         Manifest = $manifest; Setup = $setup; Pins = $pins; Assets = $assets
         Models = $models; Artifact = $artifactPath
@@ -166,13 +164,35 @@ function Get-CodeyForeignListeners {
     param($Listeners, $Processes, $Previous)
     foreach ($listener in $Listeners) {
         $process = @($Processes | Where-Object { $_.ProcessId -eq $listener.OwningProcess })
-        $expectedEntry = if ($Previous) { Join-Path $Previous.codeyDirectory 'bin\codey.mjs' } else { '' }
-        $expectedCommand = if ($listener.LocalPort -eq 3001) { 'workspace' } else { 'gateway' }
+        $pattern = ''
+        if ($Previous) {
+            $entry = Join-Path $Previous.codeyDirectory 'bin\codey.mjs'
+            $arguments = if ($listener.LocalPort -eq 3001) { @('workspace', '--host', '127.0.0.1', '--port', '3001') }
+                else { @('gateway', 'start', '--headless', '--host', '127.0.0.1', '--port', '4141') }
+            # Match whole native arguments, not a path appearing in --eval,
+            # another filename or a script's unrelated argument.
+            $tokens = @($Previous.nodeExe, $entry) + $arguments
+            $pattern = '^' + (($tokens | ForEach-Object {
+                $escaped = [regex]::Escape($_)
+                if ($_ -match '\s') { '"' + $escaped + '"' }
+                else { '(?:"' + $escaped + '"|' + $escaped + ')' }
+            }) -join '[ \t]+') + '$'
+        }
         if (-not $Previous -or $process.Count -ne 1 -or
             $process[0].ExecutablePath -ne $Previous.nodeExe -or
-            -not $process[0].CommandLine.Contains($expectedEntry) -or
-            $process[0].CommandLine -notmatch "(?:^|\s)$expectedCommand(?:\s|$)" -or
+            -not $process[0].CommandLine -or $process[0].CommandLine -notmatch $pattern -or
             $listener.LocalAddress -notin @('127.0.0.1', '::1')) { $listener }
+    }
+}
+
+function Assert-CodeyPortOwnership {
+    param([string]$OwnerSid, $Previous)
+    $listeners = @(Get-CodeyListeners)
+    $processes = @(Get-CodeyProcesses $OwnerSid)
+    $foreign = @(Get-CodeyForeignListeners $listeners $processes $Previous)
+    if ($foreign.Count) {
+        $ports = @($foreign | Select-Object -ExpandProperty LocalPort -Unique) -join '/'
+        throw "Ports $ports have foreign or unverified listeners; installation stopped. No process was killed."
     }
 }
 
@@ -212,20 +232,6 @@ function Export-CodeyRegistration {
     return $output
 }
 
-function Install-CodeyAutomaticUpdater {
-    param($Config, [string]$ConfigPath)
-    $bootstrap = Join-Path $Config.configRoot ('updater-bootstrap-' + [Guid]::NewGuid().ToString('N'))
-    New-CodeyDirectory $bootstrap
-    try {
-        $null = Invoke-CodeyProcess $Config.nodeExe @(
-            (Join-Path $PSScriptRoot 'updater-bootstrap.mjs'), $ConfigPath, $bootstrap
-        ) -WorkingDirectory $Config.ownerHome -TimeoutSeconds 60
-        $null = Invoke-CodeyProcess $Config.powershellExe @(
-            '-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $bootstrap 'install.ps1'), '-Apply'
-        ) -WorkingDirectory $Config.ownerHome -TimeoutSeconds 300 -Activity 'Ensure automatic updater'
-    } finally { Remove-Item -LiteralPath $bootstrap -Recurse }
-}
-
 function New-CodeyIdentity {
     param([string]$File, $Owner)
     if (Test-Path -LiteralPath $File) {
@@ -235,7 +241,7 @@ function New-CodeyIdentity {
             $identity.nodeId -notmatch '^n-[a-f0-9]{24}$' -or
             $identity.workspaceSubject -notmatch '^m-[a-f0-9]{24}$' -or
             $identity.workspaceUsername -notmatch '^[a-z][a-z0-9_-]{0,31}$') { throw 'Existing identity requires review; it will not be replaced.' }
-        foreach ($key in @('clientSigningKey', 'workspaceSsoKey', 'tunnelUpdateKey', 'updaterCredential')) {
+        foreach ($key in @('clientSigningKey', 'workspaceSsoKey', 'tunnelUpdateKey')) {
             if ($identity.$key -notmatch '^[A-Za-z0-9_-]{43}$') { throw 'Invalid existing identity credential.' }
         }
         return $identity
@@ -245,7 +251,7 @@ function New-CodeyIdentity {
         workspaceSubject = 'm-' + (New-CodeySecret -Bytes 12 -Hex)
         workspaceUsername = 'owner'
         clientSigningKey = New-CodeySecret; workspaceSsoKey = New-CodeySecret
-        tunnelUpdateKey = New-CodeySecret; updaterCredential = New-CodeySecret }
+        tunnelUpdateKey = New-CodeySecret }
     Write-CodeyJson $File $identity
     return [pscustomobject]$identity
 }
@@ -254,33 +260,8 @@ function Get-CodeyCodexConfiguration {
     param([string]$ModelsFile)
     # JSON's quoted string escaping is compatible with a TOML basic string.
     $catalog = ConvertTo-Json -InputObject $ModelsFile -Compress
-    return @"
-model = "gpt-6-astra"
-model_provider = "copilot_api"
-model_reasoning_effort = "max"
-model_reasoning_summary = "auto"
-model_context_window = 872000
-model_auto_compact_token_limit = 722000
-model_catalog_json = $catalog
-personality = "pragmatic"
-approvals_reviewer = "user"
-sandbox_mode = "danger-full-access"
-approval_policy = "never"
-
-[model_providers.copilot_api]
-name = "OpenAI"
-base_url = "http://127.0.0.1:4141"
-env_key = "CODEY_MODEL_API_KEY"
-requires_openai_auth = false
-supports_websockets = false
-wire_api = "responses"
-request_max_retries = 3
-stream_max_retries = 1
-stream_idle_timeout_ms = 300000
-
-[features]
-remote_compaction_v2 = true
-"@
+    $template = Join-Path (Split-Path -Parent $PSScriptRoot) 'templates\codex-config.toml'
+    return (Get-Content -LiteralPath $template -Raw -Encoding UTF8).Replace('__CODEY_MODEL_CATALOG__', $catalog)
 }
 
 function Set-CodeyUserModelKey {
@@ -366,7 +347,7 @@ function Assert-CodeyInstalledPackage {
     $codeyBin = Join-Path $codey 'bin\codey.mjs'
     foreach ($entry in @(
         'package.json', 'npm-shrinkwrap.json', 'bin\codey.mjs', 'codey-build.json',
-        'dist-server\server\index.js', 'gateway\main.js', 'updater\install.py'
+        'dist-server\server\index.js', 'gateway\main.js'
     )) {
         if (-not (Test-Path -LiteralPath (Join-Path $codey $entry) -PathType Leaf)) {
             throw "Installed Codey npm package is incomplete: $entry"
@@ -407,119 +388,16 @@ function Assert-CodeyInstalledPackage {
     }
 }
 
-function Repair-CodeyWindowsServices {
-    param($Previous, [string]$ConfigPath, $Package, $Owner)
-    if (-not $Previous -or (-not $Previous.ready -and
-        -not ($Previous.PSObject.Properties['repairPending'] -and $Previous.repairPending))) {
-        throw 'Service repair requires an existing successful installation (or an interrupted service repair).'
-    }
-    $tasks = Get-CodeyTaskFolder
-    foreach ($component in @('codey', 'tunnel', 'renew')) {
-        Assert-CodeyTask ($tasks.Folder.GetTask("Codey Machine $($Previous.nodeId) $component")) `
-            $Previous $ConfigPath $component
-    }
-    $mutex = [Threading.Mutex]::new($false, ('Local\CodeyWindowsInstall-' + $Owner.Sid))
-    $held = $false
-    $stopped = $false
-    try {
-        try { $held = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $held = $true }
-        if (-not $held) { throw 'Another installer is running for this owner.' }
-        $originalHash = (Get-FileHash -LiteralPath $ConfigPath).Hash
-        $stage = Assert-CodeyPath (Join-Path $Previous.runtimeRoot (
-            'service-repairs\' + [Guid]::NewGuid().ToString('N'))) $Previous.runtimeRoot
-        New-CodeyDirectory $stage
-        $node = Assert-CodeyPath $Previous.nodeExe $Previous.runtimeRoot
-        if ((Invoke-CodeyProcess $node @('--version')).Stdout.Trim() -ne "v$($Package.Pins.node.version)") {
-            throw 'Repair cannot replace Node; use a reviewed full upgrade for a different Node version.'
-        }
-        $npm = Join-Path (Split-Path -Parent $node) 'node_modules\npm\bin\npm-cli.js'
-        $prefix = Join-Path $stage 'app'
-        Write-Host '[repair 1/3] Stage and verify the fixed npm package; current services remain running'
-        $null = Invoke-CodeyProcess $node @($npm, 'install', '--global', '--prefix', $prefix, '--omit=dev',
-            '--no-audit', '--no-fund', '--registry', $Package.Manifest.dependencyRegistry, $Package.Artifact) `
-            -Environment @{ npm_config_registry = $Package.Manifest.dependencyRegistry
-                npm_config_cache = Join-Path $Previous.runtimeRoot 'downloads\npm'
-                PATH = (Split-Path -Parent $node) + ';' + $env:PATH
-                NODE_USE_SYSTEM_CA = '1'; ELECTRON_SKIP_BINARY_DOWNLOAD = '1'; CI = 'true' } `
-            -WorkingDirectory $stage -TimeoutSeconds 1200 -Activity 'Stage Codey dependencies'
-        $codey = Join-Path $prefix 'node_modules\codey'
-        Assert-CodeyInstalledPackage $codey $Package $node
-        $supervisor = Join-Path $stage 'supervisor'
-        New-CodeyDirectory $supervisor
-        $hashes = @{}
-        foreach ($name in @('windows-common.ps1','windows-process.cs','windows-service.ps1','windows-runtime.mjs','registration.mjs')) {
-            $target = Join-Path $supervisor $name
-            Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $target
-            Protect-CodeyPath $target
-            $hashes[$name] = (Get-FileHash -LiteralPath $target).Hash
-        }
-        $hostExe = Install-CodeyTaskHost $supervisor
-        $hashes['codey-task-host.exe'] = (Get-FileHash -LiteralPath $hostExe).Hash
-        $config = $Previous | ConvertTo-Json -Depth 20 | ConvertFrom-Json
-        $config.runnerPath = Join-Path $supervisor 'windows-service.ps1'
-        $config.helperPath = Join-Path $supervisor 'windows-runtime.mjs'
-        $config.helperHashes = [pscustomobject]$hashes
-        $config | Add-Member NoteProperty taskHostExe $hostExe -Force
-        $config | Add-Member NoteProperty repairPending $true -Force
-        $config.codeyDirectory = $codey
-        $config.codeyBin = Join-Path $codey 'bin\codey.mjs'
-        $config.releaseId = $Package.Manifest.releaseId
-        $config.npmPackage = [IO.Path]::GetFileName($Package.Artifact)
-        $config.npmPackageSha256 = $Package.Manifest.artifacts[0].sha256
-        $config.dependencyRegistry = $Package.Manifest.dependencyRegistry
-        $config.services.codey.arguments[0] = $config.codeyBin
-        $config.services.codey.workingDirectory = $codey
-        $config.services.codey.environment | Add-Member NoteProperty PATH `
-            ((Split-Path -Parent $node) + ';' + $env:PATH) -Force
-        $config.services.renew.arguments[0] = $config.helperPath
-        foreach ($name in @('COPILOT_API_GITHUB_TOKEN','COPILOT_API_OAUTH_APP','COPILOT_API_ENTERPRISE_URL')) {
-            if (-not $config.services.codey.environment.PSObject.Properties[$name]) {
-                $config.services.codey.environment | Add-Member NoteProperty $name ''
-            }
-        }
-        if ((Get-FileHash -LiteralPath $ConfigPath).Hash -ne $originalHash) {
-            throw 'Runtime changed during staging; no service was stopped.'
-        }
-        Write-Host '[repair 2/3] Switch only this node''s three tasks; preserve all identities, credentials and Codex configuration'
-        Set-CodeyTaskState $Previous $ConfigPath @('codey','tunnel','renew')
-        $stopped = $true
-        Wait-CodeyPortsFree @(3001,4141,8443)
-        $config.ready = $false
-        # Validate/replace the exact old action set, not any similarly named task.
-        Install-CodeyTasks $config $ConfigPath -PreviousConfig $Previous
-        Write-CodeyJson $ConfigPath $config -Backup
-        Set-CodeyTaskState $config $ConfigPath @('codey','tunnel','renew') -Start
-        Write-Host '[repair 3/3] Verify gateway, Workspace, TLS/SSO and running watchdogs'
-        Wait-CodeyProbe $config $ConfigPath 'verify'
-        Assert-CodeyTasksRunning $config $ConfigPath
-        $config.ready = $true
-        $config.repairPending = $false
-        Write-CodeyJson $ConfigPath $config
-        Install-CodeyCommand $config $ConfigPath
-        Write-Output 'WINDOWS_SERVICES_REPAIRED_CREDENTIALS_PRESERVED'
-    } catch {
-        if ($stopped) {
-            # Keep diagnostics and both staged/old runtimes. Never clear tokens,
-            # rotate keys, or attempt device login on behalf of a background task.
-            Write-Warning 'Repair interrupted. Inspect private logs and runtime.json before retrying; no credentials were cleared.'
-        }
-        throw
-    } finally {
-        if ($held) { $mutex.ReleaseMutex() }
-        $mutex.Dispose()
-    }
-}
-
 function Invoke-CodeyWindowsInstall {
+    [CmdletBinding()]
     param([bool]$DoApply, [bool]$ApprovedNetwork, [bool]$Replace, [string]$ExpectedComputer,
-        [string]$RequestedCodexHome, [bool]$Repair = $false)
+        [string]$RequestedCodexHome)
     $owner = Get-CodeyOwner
     if ($DoApply -and (-not $ApprovedNetwork -or $ExpectedComputer -cne $owner.Computer)) {
         throw 'Apply requires -NetworkApproved and -ExpectedComputerName matching this computer exactly.'
     }
     $packageRoot = Split-Path -Parent $PSScriptRoot
     $package = Read-CodeyWindowsPackage $packageRoot
-    if ($Repair -and $Replace) { throw 'Choose -RepairServices or -ReplaceExisting, not both.' }
     $runtimeRoot = Assert-CodeyPath (Join-Path $owner.Home '.local\share\codey-machine-windows') $owner.Home
     $configRoot = Assert-CodeyPath (Join-Path $owner.Home '.config\codey-machine-windows') $owner.Home
     $stateRoot = Join-Path $runtimeRoot 'state'
@@ -530,13 +408,25 @@ function Invoke-CodeyWindowsInstall {
     $previous = $null
     if (Test-Path -LiteralPath $configPath) {
         $previous = Read-CodeyJson $configPath
+        if ($previous.PSObject.Properties['updater'] -and $previous.updater -eq 'automatic') {
+            throw 'This node still has a retired updater. Migrate it explicitly; installation is not an upgrade or recovery command.'
+        }
+        if ($previous.PSObject.Properties['repairPending'] -and $previous.repairPending) {
+            throw 'An unfinished retired service repair requires manual review; no installation will take it over.'
+        }
+        if ($previous.releaseId -ne $package.Setup.releaseId -or $previous.codexHome -ne $codexRoot) {
+            throw 'Existing release or Codex home differs; installation is not an update or configuration migration.'
+        }
         if ($previous.kind -ne 'codey-windows-oneclick' -or $previous.schema -ne 2 -or
             $previous.layout -ne 'npm-codey-package' -or
             $previous.ownerSid -ne $owner.Sid -or $previous.ownerHome -ne $owner.Home -or
             $previous.computer -cne $owner.Computer -or
-            $previous.runtimeRoot -ne $runtimeRoot -or $previous.configRoot -ne $configRoot) {
+            $previous.runtimeRoot -ne $runtimeRoot -or $previous.configRoot -ne $configRoot -or
+            $previous.portalOrigin -ne $package.Setup.portalOrigin) {
             throw 'This directory belongs to another/legacy installation; it will not be taken over.'
         }
+        $null = Assert-CodeyPath $previous.nodeExe $runtimeRoot
+        $null = Assert-CodeyPath $previous.codeyDirectory $runtimeRoot
     } elseif (Test-Path -LiteralPath $configRoot) {
         if (@(Get-ChildItem -LiteralPath $configRoot -Force).Count) {
             throw 'Nonempty configuration directory has no recognized runtime; manual recovery is required.'
@@ -545,6 +435,10 @@ function Invoke-CodeyWindowsInstall {
     $processes = @(Get-CodeyProcesses $owner.Sid)
     $listeners = @(Get-CodeyListeners)
     $foreign = @(Get-CodeyForeignListeners $listeners $processes $previous)
+    if ($foreign.Count) {
+        $ports = @($foreign | Select-Object -ExpandProperty LocalPort -Unique) -join '/'
+        throw "Ports $ports have foreign or unverified listeners; installation stopped. No service or file was changed."
+    }
     $codexProcesses = @($processes | Where-Object { $_.Name -ieq 'codex.exe' })
     $unknownCodex = @($codexProcesses | Where-Object {
         -not $previous -or -not $_.ExecutablePath.StartsWith(
@@ -567,33 +461,21 @@ function Invoke-CodeyWindowsInstall {
         userEnvironmentChanges = @('Codey stable bin added to user PATH',
             'Official Codex installer adds its bin to user PATH', 'CODEY_MODEL_API_KEY')
         startup = 'Original owner logon only; hidden restart watchdogs; not unattended Windows boot'
-        updater = 'automatic: install/start the native agent; Portal import binds it automatically'
         mode = $(if ($DoApply) { 'apply' } else { 'plan' })
-        repairServices = $Repair
     }
-    if ($Repair) {
-        if ($previous) { $plan.codexHome = $previous.codexHome }
+    if ($previous -and $previous.ready) {
         $plan.replaceConfiguration = @()
-        $plan.userEnvironmentChanges = @('Codey stable bin added to user PATH')
-        $plan.requiresClosingUnmanagedCodex = $false
         $plan.requiresReplaceExisting = $false
-        $plan.operation = 'Stage npm package, then restart only this node; preserve credentials, TLS, registration and Codex'
+        $plan.requiresClosingUnmanagedCodex = $false
+        $plan.operation = 'Verify the existing node and refresh registration; no reinstall or restart'
     }
     if (-not $DoApply) { $plan | ConvertTo-Json -Depth 12; return }
     Assert-CodeyExternalTerminal $processes
-    if ($foreign.Count) { throw 'Ports are owned by another service. No service, key, file or firewall rule was changed.' }
-    if ($Repair) {
-        Repair-CodeyWindowsServices $previous $configPath $package $owner
-        return
-    }
-    if ($previous -and $previous.ready -and -not $Replace) {
-        if ($previous.releaseId -ne $package.Manifest.releaseId -or $previous.codexHome -ne $codexRoot) {
-            throw 'An installed node differs from this plan. Replacement must be explicitly approved.'
-        }
+    Assert-CodeyPortOwnership $owner.Sid $previous
+    if ($previous -and $previous.ready) {
         Wait-CodeyProbe $previous $configPath 'verify'
         Assert-CodeyTasksRunning $previous $configPath
         Install-CodeyCommand $previous $configPath
-        Install-CodeyAutomaticUpdater $previous $configPath
         $output = Export-CodeyRegistration $previous $configPath
         Write-Output 'WINDOWS_ALREADY_INSTALLED_VERIFIED_NO_RESTART'
         Write-Output "Registration file refreshed from this machine's existing identity: $output"
@@ -624,6 +506,7 @@ function Invoke-CodeyWindowsInstall {
     try {
         try { $held = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $held = $true }
         if (-not $held) { throw 'Another installer is running for this owner.' }
+        Assert-CodeyPortOwnership $owner.Sid $previous
         foreach ($directory in @($runtimeRoot, $configRoot, $stateRoot, (Join-Path $runtimeRoot 'releases'))) {
             New-CodeyDirectory $directory
         }
@@ -720,7 +603,8 @@ function Invoke-CodeyWindowsInstall {
         $key = Join-Path $configRoot 'node-key.pem'
         $serverName = "$($identity.nodeId).nodes.codey.internal"
 
-        Write-Host '[2/5] Stop owned Codey/Codex, rotate the model key and start the unified package'
+        Write-Host '[2/5] Configure the unified package; retain existing node keys and certificate'
+        Assert-CodeyPortOwnership $owner.Sid $previous
         if ($previous) {
             Set-CodeyTaskState $previous $configPath @('codey')
             Wait-CodeyPortsFree @(3001, 4141, 8443)
@@ -743,12 +627,30 @@ function Invoke-CodeyWindowsInstall {
         $dataRoot = Join-Path $runtimeRoot 'data'
         New-CodeyDirectory $copilotHome
         New-CodeyDirectory $dataRoot
-        $modelKey = New-CodeySecret
-        Write-CodeyJson (Join-Path $copilotHome 'config.json') @{
-            auth = @{ apiKeys = @($modelKey); adminApiKey = New-CodeySecret; sessionHistoryApiKey = New-CodeySecret }
-        } -Backup
-        Write-CodeyFile (Join-Path $configRoot 'provider.env') "CODEY_MODEL_API_KEY=$modelKey`n" -Backup
-        New-CodeyCertificate $node $serverName $cert $key
+        $providerFile = Join-Path $copilotHome 'config.json'
+        if (Test-Path -LiteralPath $providerFile) {
+            $provider = Read-CodeyJson $providerFile
+            $modelKey = @($provider.auth.apiKeys)[0]
+            if ($modelKey -notmatch '^[A-Za-z0-9_-]{43}$') { throw 'Existing model key requires review; it will not be rotated.' }
+        } else {
+            $modelKey = New-CodeySecret
+            Write-CodeyJson $providerFile @{
+                auth = @{ apiKeys = @($modelKey); adminApiKey = New-CodeySecret; sessionHistoryApiKey = New-CodeySecret }
+            }
+        }
+        Write-CodeyFile (Join-Path $configRoot 'provider.env') "CODEY_MODEL_API_KEY=$modelKey`n"
+        if ((Test-Path -LiteralPath $cert) -ne (Test-Path -LiteralPath $key)) {
+            throw 'Incomplete TLS identity requires review; it will not be rotated.'
+        }
+        if (-not (Test-Path -LiteralPath $cert)) { New-CodeyCertificate $node $serverName $cert $key }
+        else {
+            $check = 'const fs=require("node:fs"),{X509Certificate,createPublicKey}=require("node:crypto");' +
+                'const c=new X509Certificate(fs.readFileSync(process.argv[1]));' +
+                'const der=k=>k.export({type:"spki",format:"der"});' +
+                'if(c.ca||!c.checkHost(process.argv[3],{wildcards:false})||Date.parse(c.validTo)<=Date.now()+86400000||' +
+                '!der(c.publicKey).equals(der(createPublicKey(fs.readFileSync(process.argv[2])))))process.exit(2);'
+            $null = Invoke-CodeyProcess $node @('-e', $check, $cert, $key, $serverName)
+        }
         $signingFile = Join-Path $configRoot 'client-signing.key'
         Write-CodeyFile $signingFile "$($identity.clientSigningKey)`n"
         $supervisor = Join-Path $runtimeRoot 'supervisor'
@@ -782,7 +684,7 @@ function Invoke-CodeyWindowsInstall {
             identityFile = $identityFile; tunnelFile = $tunnelFile; certificate = $cert; serverName = $serverName
             portalOrigin = $package.Setup.portalOrigin; setupFile = Join-Path $configRoot 'setup.json'
             registrationStaging = Join-Path $configRoot 'registration.private.json'
-            updater = 'automatic'; logonOnly = $true; services = @{}
+            logonOnly = $true; services = @{}
         }
         $baseEnv = @{ HOME = $owner.Home; USERPROFILE = $owner.Home; NODE_ENV = 'production'; NODE_USE_SYSTEM_CA = '1'
             PATH = $nodeRoot + ';' + $env:PATH }
@@ -864,19 +766,18 @@ function Invoke-CodeyWindowsInstall {
         Write-CodeyJson (Join-Path $copilotHome 'portal-build.json') @{
             schema = 1; sourceCommit = $package.Manifest.copilotApi.commit; version = $package.Manifest.copilotApi.version
         }
-        Write-Host '[5/5] Enable watchdogs, automatically install the updater and export registration'
+        Write-Host '[5/5] Enable application/tunnel watchdogs and export registration'
         Set-CodeyTaskState ([pscustomobject]$config) $configPath @('tunnel', 'renew') -Start
-        Wait-CodeyProbe ([pscustomobject]$config) $configPath 'verify'
+        # App readiness was checked before the SDK probe; registration performs
+        # the final TLS/SSO/data check again before exporting credentials.
         Assert-CodeyTasksRunning ([pscustomobject]$config) $configPath
         Install-CodeyCommand ([pscustomobject]$config) $configPath
         Set-CodeyUserModelKey $modelKey
         $config.ready = $true
         Write-CodeyJson $configPath $config
-        Install-CodeyAutomaticUpdater ([pscustomobject]$config) $configPath
         $output = Export-CodeyRegistration ([pscustomobject]$config) $configPath
         Write-Output "Codey Windows installed and locally verified. Registration: $output"
         Write-Output 'Registration contains private credentials: import only into your Codey Portal. Portal/tunnel acceptance remains a separate step.'
-        Write-Output 'The native updater is installed and running. Import this registration once; Portal binds the updater automatically.'
         Write-Output 'Codey is on your user PATH: codey --version. Reopen the terminal app if its environment is cached.'
     } catch {
         if ($registered -and $config -and -not $config.ready) {
@@ -884,7 +785,7 @@ function Invoke-CodeyWindowsInstall {
             catch { Write-Warning 'Could not stop every task owned by this attempt; inspect its private runtime state.' }
         }
         if ($config -and $config.ready) {
-            Write-Warning 'Application services are verified; updater/registration setup is incomplete. Rerun the Skill to finish without reinstalling the application.'
+            Write-Warning 'Application services are verified; registration setup is incomplete. Rerun the same Skill to finish without reinstalling the application.'
         }
         # Preserve identity, previous releases, backups and diagnostics for retry.
         # Never restore stale provider keys or start old Codex processes.
@@ -897,6 +798,5 @@ function Invoke-CodeyWindowsInstall {
 
 if ($MyInvocation.InvocationName -ne '.') {
     Invoke-CodeyWindowsInstall -DoApply $Apply -ApprovedNetwork $NetworkApproved -Replace $ReplaceExisting `
-        -ExpectedComputer $ExpectedComputerName -RequestedCodexHome $CodexHome `
-        -Repair $RepairServices
+        -ExpectedComputer $ExpectedComputerName -RequestedCodexHome $CodexHome
 }

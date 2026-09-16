@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 export const REGISTRATION_FILE = "codey-machine-registration.json";
 export const PLATFORMS = Object.freeze(["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]);
-const keys = ["clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey", "updaterCredential"];
+const keys = ["clientSigningKey", "workspaceSsoKey", "tunnelUpdateKey"];
 const credentials = [...keys, "workspaceSubject", "workspaceUsername"];
 const requireValue = (condition, message) => { if (!condition) throw new Error(message); };
 const exact = (value, fields) => value && typeof value === "object" && !Array.isArray(value) &&
@@ -39,11 +39,14 @@ export function validateRegistration(document, expected = {}, now = Date.now()) 
     typeof machine.name === "string" && machine.name.trim().length > 0 && machine.name.length <= 80 &&
     typeof machine.region === "string" && machine.region.length <= 120 &&
     !/[\x00-\x1f]/.test(machine.name + machine.region), "Invalid native machine registration.");
-  requireValue(exact(identity, credentials) && /^m-[a-f0-9]{24}$/.test(identity.workspaceSubject) &&
+  const legacy = identity && Object.hasOwn(identity, "updaterCredential");
+  const identityKeys = legacy ? [...keys, "updaterCredential"] : keys;
+  requireValue(exact(identity, legacy ? [...credentials, "updaterCredential"] : credentials) &&
+    /^m-[a-f0-9]{24}$/.test(identity.workspaceSubject) &&
     /^[a-z][a-z0-9_-]{0,31}$/.test(identity.workspaceUsername) &&
-    keys.every(key => typeof identity[key] === "string" && /^[A-Za-z0-9_-]{43}$/.test(identity[key]) &&
+    identityKeys.every(key => typeof identity[key] === "string" && /^[A-Za-z0-9_-]{43}$/.test(identity[key]) &&
       Buffer.from(identity[key], "base64url").toString("base64url") === identity[key]) &&
-    new Set(keys.map(key => identity[key])).size === keys.length, "Invalid or missing node credentials.");
+    new Set(identityKeys.map(key => identity[key])).size === identityKeys.length, "Invalid or missing node credentials.");
   const tunnel = machine.devTunnel;
   requireValue(exact(tunnel, ["tunnelId", "clusterId"]) && tunnel.tunnelId === `codey-${machine.nodeId}` &&
     /^[a-z][a-z0-9]{1,15}$/.test(tunnel.clusterId), "Registration tunnel is not bound to this node.");
