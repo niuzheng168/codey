@@ -86,11 +86,17 @@ function renderOwners() {
   ownerFilter.value = owners.has(selected) ? selected : "";
 }
 
+function runningCodey(node) {
+  const component = node.components?.codey;
+  return node.workspaceHealth?.reachable && component?.source === "workspace_health" &&
+    component.version === node.workspaceHealth.version ? component : null;
+}
+
 function versionCell(component, node) {
   const cell = element("td");
   if (!component) {
-    cell.append(element("span", "未上报 Codey 版本", "muted"));
-    cell.title = "尚未收到 Codey npm 包的实际版本；旧组件版本不能代替。";
+    cell.append(element("span", "Codey 版本未知", "muted"));
+    cell.title = "尚未读取到 Codey 整包身份；独立 Workspace 的版本和最新发行包不能代替当前版本。";
     return cell;
   }
   cell.append(element("strong", component.version, "inventory-version"));
@@ -98,10 +104,8 @@ function versionCell(component, node) {
   cell.append(element("code", detail.join(" · ")));
   cell.title = [
     component.commit && `Commit: ${component.commit}`,
-    node.releaseId && `节点发行版：${node.releaseId}`,
-    component.source === "workspace_health"
-      ? `来源：Workspace 健康检查 · ${date(node.workspaceHealth?.checkedAt)}`
-      : `最近上报：${date(node.lastSeen)}`,
+    component.releaseId && `节点发行版：${component.releaseId}`,
+    `来源：节点 HTTPS 健康检查 · ${date(node.workspaceHealth?.checkedAt)}`,
   ].filter(Boolean).join("\n");
   return cell;
 }
@@ -125,7 +129,7 @@ function renderRow(node) {
   } else {
     state.append(element("span", "尚无健康检查结果", "muted"));
   }
-  row.append(identity, owner, state, versionCell(node.components?.codey, node));
+  row.append(identity, owner, state, versionCell(runningCodey(node), node));
   return row;
 }
 
@@ -138,8 +142,9 @@ function render() {
   const matches = snapshot.nodes.filter((node) => {
     if (ownerFilter.value && node.owner.id !== ownerFilter.value) return false;
     if (statusFilter.value && statusGroup(node.status) !== statusFilter.value) return false;
-    const terms = [node.name, node.id, node.region, node.owner.username, node.releaseId,
-      node.components?.codey?.version, node.components?.codey?.commit];
+    const codey = runningCodey(node);
+    const terms = [node.name, node.id, node.region, node.owner.username,
+      codey?.version, codey?.commit, codey?.releaseId];
     return !query || terms.filter(Boolean).join(" ").toLowerCase().includes(query);
   }).sort((a, b) => (a.owner.username || a.owner.id).localeCompare(b.owner.username || b.owner.id)
     || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));

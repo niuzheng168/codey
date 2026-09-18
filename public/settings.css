@@ -91,6 +91,15 @@ button.danger:hover:not(:disabled) { background: #351c28; border-color: #9f4560;
   vertical-align: middle;
 }
 .count-compact { display: none; }
+.node-version { font-family: ui-monospace, "Cascadia Code", monospace; }
+.node-runtime-detail { overflow-wrap: anywhere; }
+#codey-package-panel { margin-bottom: 20px; }
+#codey-package-panel > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+#codey-package-panel > p, #codey-package-panel > form, #codey-package-panel > pre { margin: 12px; }
+#codey-package-panel pre { overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+#settings-message:empty, #machine-download-message:empty, #machine-package-message:empty {
+  min-height: 0; padding: 0; margin: 0; border: 0;
+}
 
 .settings-panel { margin-top: 20px; padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
 .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }

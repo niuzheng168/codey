@@ -145,7 +145,8 @@ test("failed data requests are not presented as proof that the entire machine is
     errors: ["quota", "summary", "daily", "events"].map(scope => ({ scope, message: "门户返回 HTTP 502" })),
   }, 0);
   assert.match(html, /status-pill offline[^>]*>数据链路异常</);
-  assert.match(html, /title="[^"]*不代表机器[^"]*心跳/);
+  assert.match(html, /title="[^"]*用量接口的读取状态[^"]*机器版本[^"]*Workspace 可达性/);
+  assert.doesNotMatch(html, /升级器|心跳/);
   assert.match(html, /HTTP 502（4 个接口）/);
   assert.doesNotMatch(html, />离线</);
 });

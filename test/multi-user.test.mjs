@@ -231,13 +231,13 @@ test("multi-user security: independent accounts, immutable node ownership and ob
     const text = await response.text();
     const result = JSON.parse(text);
     assert.deepEqual(result.summary, { total: 3, owners: 2, online: 0, stale: 0, unknown: 3 });
-    assert.equal(result.telemetryAvailable, false);
-    assert.equal(result.heartbeatTimeoutMs, null);
+    assert.equal(result.telemetryAvailable, undefined);
+    assert.equal(result.heartbeatTimeoutMs, undefined);
     assert.ok(Number.isSafeInteger(result.generatedAt));
     assert.deepEqual(result.nodes.map((node) => node.id), ["alice-node", "local", nodeB.id]);
     assert.deepEqual(result.nodes.at(-1).owner, { id: bob.id, username: "bob", enabled: true });
     for (const node of result.nodes) {
-      assert.deepEqual(Object.keys(node).sort(), ["components", "id", "lastSeen", "name", "owner", "region", "releaseId", "status"]);
+      assert.deepEqual(Object.keys(node).sort(), ["components", "id", "name", "owner", "region", "releaseId", "status"]);
       assert.deepEqual(node.components, { codey: null, cloudcli: null, copilotApi: null });
       assert.equal(node.status, "unknown");
     }
@@ -246,6 +246,14 @@ test("multi-user security: independent accounts, immutable node ownership and ob
       assert.ok(!text.includes(privateValue), privateValue);
     }
     assert.equal((await api("", "/api/admin/nodes")).status, 401);
+    const ownStatus = await api(cookieB, "/api/settings/node-status?ownerId=owner-a");
+    assert.equal(ownStatus.status, 200);
+    const ownStatusText = await ownStatus.text();
+    assert.deepEqual(JSON.parse(ownStatusText).nodes.map(node => node.id), [nodeB.id],
+      "Status refresh must not let a member select someone else's nodes");
+    assert.doesNotMatch(ownStatusText, /endpoint|credential|updater|heartbeat/);
+    assert.equal((await api("", "/api/settings/node-status")).status, 401);
+    assert.equal((await api(cookieB, "/api/settings/node-status", "POST", {})).status, 405);
     assert.equal((await api(cookieB, "/api/admin/nodes?role=admin&ownerId=owner-a", "GET", undefined,
       { "x-ms-client-principal-id": "owner-a", "x-codey-role": "admin" })).status, 403);
     for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {

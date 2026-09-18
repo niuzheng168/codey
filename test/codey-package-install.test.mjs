@@ -123,7 +123,14 @@ console.log(result.finalResponse);
       const health = await fetch(workspace + "/health");
       const viewer = await fetch(gateway + "/usage-viewer");
       if (health.ok && viewer.ok) {
-        assert.equal((await health.json()).version, pkg.version);
+        const healthBody = await health.json();
+        assert.equal(healthBody.version, pkg.version);
+        assert.deepEqual(healthBody.codey, {
+          name: "codey", version: pkg.version, commit: build.sourceCommit,
+          releaseId: "machine-" + createHash("sha256").update(await readFile(path.join(installed, "codey-build.json"))).digest("hex").slice(0, 16),
+          nodeMajor: Number(process.versions.node.split(".")[0]),
+        }, "The Portal must be able to observe the installed Codey package without an updater");
+        assert.equal(health.headers.get("cache-control"), "no-store");
         assert.match(await viewer.text(), /<html/i);
         ready = true;
         break;

@@ -128,7 +128,8 @@ test("the shared download replaces all platform-specific buttons without enablin
     assert.equal(p.elements.has(id), false);
   }
   assert.deepEqual(p.form.dataset, {});
-  assert.match(p.elements.get("#add-node").textContent, /Windows 安装保留现有服务与 DevTunnel 配置/);
+  assert.equal(p.elements.get("#machine-native-status").textContent, "完整节点安装：Linux x64",
+    "An older runtime-only artifact must not claim native Windows/Mac installation support");
 });
 
 test("the package status presents one Codey npm version rather than two installable apps", async () => {
@@ -212,12 +213,40 @@ test("the settings page has a visible, accessible download status next to the en
   assert.match(html, /不含 token 或机器身份[^<]*分发/);
   assert.match(html, /action="\/api\/settings\/machines\/shared-skill"/);
   assert.doesNotMatch(html, /data-machine-platform|选择目标系统|同平台机器|版本待迁移/);
-  assert.equal((html.match(/id="download-machine-[^"]*"/g) || []).length, 1);
+  assert.equal((html.match(/id="download-machine-skill"/g) || []).length, 1);
+  assert.equal((html.match(/id="download-machine-package"/g) || []).length, 1);
+  assert.match(html, /action="\/api\/settings\/machines\/npm"/);
   assert.match(html, /机器的注册 JSON（最多 32 KB；传输后文件名允许改变）/);
   assert.match(html, /系统类型由注册文件识别/);
   assert.match(html, /含私密凭据[^<]*HTTPS Portal[^<]*立即删除/);
 });
 
+test("the local update package uses the authenticated download boundary and never dispatches a Portal update", async () => {
+  const packageName = "codey-0.1.18.tgz";
+  const p = await page({
+    machineSetup: { ...sharedSetup, enabled: true, codey: "0.1.18", npmAvailable: true,
+      npmFile: packageName, npmSha256: "a".repeat(64),
+      runtimePlatforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"],
+      managedInstallPlatforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"] },
+    download: async () => archiveResponse({ type: "application/gzip", name: packageName, body: "runtime package fixture" }),
+  });
+  const form = p.elements.get("#machine-package-form");
+  const submission = p.submit(form);
+  assert.equal(submission.event.defaultPrevented, true);
+  await submission.finished;
+  assert.deepEqual(p.downloads, [{ href: "blob:test-download", download: packageName }]);
+  assert.equal(p.requests.length, 1);
+  assert.equal(p.requests[0].url, "/api/settings/machines/npm");
+  assert.equal(p.requests[0].options.method, "POST");
+  assert.equal(p.requests[0].options.mode, "same-origin");
+  assert.equal(p.requests[0].options.credentials, "same-origin");
+  assert.equal(p.requests[0].options.redirect, "error");
+  assert.equal(p.requests[0].options.headers.accept, "application/gzip");
+  assert.equal(p.requests[0].options.body, undefined);
+  assert.match(p.elements.get("#machine-package-message").textContent, /Portal 不会启动更新任务/);
+  assert.match(p.elements.get("#machine-native-status").textContent, /Windows x64.*macOS Apple Silicon.*macOS Intel/);
+  assert.match(p.elements.get("#codey-update-command").textContent, /codey update codey-0\.1\.18\.tgz --sha256 a{64} --check/);
+});
 test("old or incomplete releases cannot enable the shared entry or send a hidden Linux fallback request", async () => {
   for (const machineSetup of [
     { enabled: true, node: "24.20.0", bytes: 1000 },

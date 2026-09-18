@@ -9,9 +9,10 @@ const tick = () => new Promise(setImmediate);
 const now = Date.UTC(2026, 8, 8, 9, 0, 0);
 const owner = { id: "owner-zhn", username: "zhn", enabled: true };
 const bob = { id: "owner-bob", username: "bob", enabled: true };
-const version = { version: "0.1.0", commit: "a".repeat(40), nodeMajor: 24 };
+const version = { version: "0.1.0", commit: "a".repeat(40), nodeMajor: 24,
+  releaseId: "machine-" + "a".repeat(16), source: "workspace_health" };
 const node = (id, values = {}) => ({
-  id, name: id, region: "Japan East", owner, status: "workspace_online", lastSeen: null, workspaceHealth: { reachable: true, checkedAt: now },
+  id, name: id, region: "Japan East", owner, status: "workspace_online", workspaceHealth: { reachable: true, checkedAt: now, version: version.version },
   releaseId: "installed-release",
   components: { codey: version, cloudcli: { ...version, version: "1.37.2" },
     copilotApi: { ...version, version: "2.5.1", commit: "c".repeat(40) } },
@@ -109,12 +110,12 @@ test("inventory renders all-owner counts, node versions and explicit unknown sta
   assert.equal(known.children.length, 4);
   assert.doesNotMatch(known.textContent, /1\.37\.2|2\.5\.1/);
   assert.match(known.children[3].title, new RegExp("Commit: " + "a".repeat(40)));
-  assert.match(known.children[3].title, /installed-release/);
+  assert.match(known.children[3].title, /machine-aaaaaaaaaaaaaaaa/);
   const local = p.rows().find((row) => row.dataset.nodeId === "local");
-  assert.match(local.textContent, /状态未知.*尚无健康检查结果.*未上报 Codey 版本/);
+  assert.match(local.textContent, /状态未知.*尚无健康检查结果.*Codey 版本未知/);
   assert.ok(!local.textContent.includes("1.37.2"), "Never fill unknown installed versions from a target release");
   assert.match(p.get("admin-node-message").textContent, /按需检查 Workspace.*30 秒/);
-  assert.match(p.get("admin-node-help").textContent, /连通不代表模型已登录/);
+  assert.match(p.get("admin-node-help").textContent, /连通不代表模型账号可用/);
   assert.equal(p.get("admin-node-list").querySelectorAll("a").length, 0);
   assert.equal(p.get("admin-node-list").querySelectorAll("button").length, 0);
   assert.equal(p.get("admin-node-list").querySelectorAll("input").length, 0);
@@ -141,7 +142,7 @@ test("Windows Workspace health counts as online without claiming an updater hear
   const row = p.rows()[0];
   assert.match(row.textContent, /windows-devbox.*兼容 ID: local.*Workspace 在线.*健康检查/s);
   assert.ok(!row.textContent.includes("心跳在线"));
-  assert.match(row.children[3].textContent, /未上报 Codey 版本/);
+  assert.match(row.children[3].textContent, /Codey 版本未知/);
   assert.doesNotMatch(row.textContent, /1\.37\.2/);
   assert.equal(row.children.length, 4);
   p.filter("admin-node-status", "online");
@@ -156,7 +157,7 @@ test("the overview displays and searches only the actual Codey package, not reta
     node("old-node", { components: { cloudcli: { ...version, version: "8.8.8" }, copilotApi: { ...version, version: "9.9.9" } } }),
   ] });
   assert.match(p.rows()[0].textContent, /0\.1\.0/);
-  assert.match(p.rows()[1].textContent, /未上报 Codey 版本/);
+  assert.match(p.rows()[1].textContent, /Codey 版本未知/);
   assert.doesNotMatch(p.get("admin-node-list").textContent, /8\.8\.8|9\.9\.9/);
   p.filter("admin-node-search", "8.8.8", "input");
   assert.equal(p.rows().length, 0);
@@ -165,6 +166,15 @@ test("the overview displays and searches only the actual Codey package, not reta
   assert.deepEqual(p.rows().map(row => row.dataset.nodeId), ["codey-only"]);
 });
 
+test("an old updater snapshot or an unreachable node cannot masquerade as the current package", async () => {
+  const p = await page({ nodes: [
+    node("old-heartbeat", { components: { codey: { ...version, source: "updater" } }, updaterStatus: "online", lastSeen: now }),
+    node("staged-not-restarted", { workspaceHealth: { reachable: true, checkedAt: now, version: "0.0.9" } }),
+    node("unreachable", { workspaceHealth: { reachable: false, checkedAt: now, version: version.version } }),
+  ] });
+  for (const row of p.rows()) assert.match(row.children[3].textContent, /Codey 版本未知/);
+  assert.doesNotMatch(p.get("admin-node-list").textContent, /0\.1\.0|升级器|心跳/);
+});
 test("search, owner and status filters combine without changing global totals", async () => {
   const p = await page();
   p.filter("admin-node-owner", bob.id);
@@ -178,9 +188,10 @@ test("search, owner and status filters combine without changing global totals", 
   assert.match(p.get("admin-node-list").textContent, /没有匹配/);
   p.filter("admin-node-status", "");
   p.filter("admin-node-search", "bbbbbbbb", "input");
-  assert.deepEqual(p.rows().map((row) => row.dataset.nodeId), ["bob-machine"]);
-  p.filter("admin-node-search", "installed-release", "input");
-  assert.equal(p.rows().length, 2);
+  assert.equal(p.rows().length, 0, "An unreachable node's retained commit is not current version evidence");
+  p.filter("admin-node-owner", "");
+  p.filter("admin-node-search", "machine-aaaaaaaaaaaaaaaa", "input");
+  assert.deepEqual(p.rows().map(row => row.dataset.nodeId), ["zhn-a100"]);
   assert.equal(p.get("admin-node-total").textContent, "4");
   assert.equal(p.get("admin-node-owners").textContent, "2");
   assert.equal(p.requests.length, 1, "Filtering is local and cannot start node probes");

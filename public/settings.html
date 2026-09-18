@@ -35,8 +35,22 @@
             <h2 id="nodes-heading">我的节点</h2>
             <p class="muted">通过私有 DevTunnel 连接 Codey 节点，展开以编辑名称与显示设置。</p>
           </div>
-          <button id="open-add-node" class="primary" type="button" aria-haspopup="dialog" aria-controls="add-node">＋ 添加节点</button>
+          <div class="actions">
+            <button id="refresh-node-status" class="quiet" type="button">刷新状态</button>
+            <button id="open-add-node" class="primary" type="button" aria-haspopup="dialog" aria-controls="add-node">＋ 添加节点</button>
+          </div>
         </div>
+        <details id="codey-package-panel" class="secondary-details">
+          <summary>安装包与本机更新 <span id="published-codey-version" class="badge">正在检查发行包…</span></summary>
+          <p id="published-codey-platforms" class="muted"></p>
+          <form id="machine-package-form" action="/api/settings/machines/npm" method="post">
+            <button id="download-machine-package" type="submit" disabled>↓ 下载运行 / 更新包</button>
+          </form>
+          <p class="muted">下载包后，在目标机器的外部终端先检查，再执行更新；Portal 不会替你启停服务。</p>
+          <pre><code id="codey-update-command">正在检查可用包…</code></pre>
+          <p id="machine-package-message" role="status" aria-live="polite"></p>
+          <p class="muted">状态与诊断：<code>codey status</code> · <code>codey doctor</code>。发行包版本不代表节点已更新，当前版本见下方节点卡片。</p>
+        </details>
         <div id="my-nodes" class="node-list"><p class="muted">正在加载…</p></div>
         <p class="panel-footnote">仅显示你的节点，归属由服务端隔离。移除只撤销门户访问，不会关机或删除机器上的文件。</p>
       </section>
@@ -108,7 +122,7 @@
               <button id="admin-node-next" class="quiet" type="button" aria-label="下一页节点" disabled>下一页</button>
             </div>
           </div>
-          <p id="admin-node-help" class="panel-footnote">通过受信任连接按需检查 Workspace 可达性，不安装心跳或升级代理；连通不代表模型已登录。没有实际 Codey 整包版本时显示未知，不以 Workspace 组件版本代替。本页不提供会话、密钥或跨用户操作权限。</p>
+          <p id="admin-node-help" class="panel-footnote">版本来自节点 HTTPS 健康检查；Workspace 连通不代表模型账号可用。不能确认 Codey 整包身份时显示未知，不以组件版本或最新发行包代替。请在节点终端运行 codey doctor 诊断。本页不提供会话、密钥或跨用户操作权限。</p>
         </section>
 
         <section id="admin-users-panel" role="tabpanel" aria-labelledby="admin-users-tab" tabindex="0" hidden>
@@ -145,11 +159,12 @@
             <span class="step-number" aria-hidden="true">1</span>
             <div class="step-content">
               <h3>下载 Codey 安装 Skill</h3>
-              <p class="muted">Linux x64 / Windows x64 共用一个 codey npm 包，包含 Workspace 与网关。Skill 内附安装脚本，不含 token 或机器身份，可分发到多台机器。</p>
+              <p class="muted">Linux x64、Windows x64、macOS Apple Silicon / Intel 共用一个 codey npm 包，包含 Workspace 与网关。Skill 按原生平台选择安装流程，不含 token 或机器身份，可分发到多台机器。</p>
               <form id="machine-skill-form" action="/api/settings/machines/shared-skill" method="post">
                 <button id="download-machine-skill" class="primary" type="submit" disabled>↓ 下载 Codey 安装 Skill</button>
               </form>
               <p id="machine-package-status" class="muted">正在检查 Codey 共用安装 Skill…</p>
+              <p id="machine-native-status" class="muted"></p>
               <p id="machine-download-message" role="status" aria-live="polite"></p>
             </div>
           </li>
@@ -157,11 +172,12 @@
             <span class="step-number" aria-hidden="true">2</span>
             <div class="step-content">
               <h3>在目标机器执行 Skill</h3>
-              <p class="muted">解压 Skill 后，让目标机器的安装助手按 <code>SKILL.md</code> 执行，识别系统并选择安装步骤。应用始终通过 npm 安装，不要手工解压 .tgz。</p>
-              <p class="muted">仅安装运行包不等于节点已接入；还需完成私有 DevTunnel、模型登录和机器注册。</p>
+              <p class="muted">解压后按 <code>SKILL.md</code> 执行：预检 → 准备运行包 → Copilot / DevTunnel 登录 → TLS 与后台服务 → 验收 → 输出私密注册 JSON。应用始终通过 npm 安装，不要手工解压 .tgz。</p>
+              <p class="muted">安装不会自动注册 Portal；最后由你上传该 JSON，完成接入。</p>
               <details class="setup-help">
                 <summary>支持范围与安全说明</summary>
-                <p class="muted">共用运行包支持 Linux x64 / Windows x64。Linux 包含完整托管部署；Windows 安装保留现有服务与 DevTunnel 配置，不运行 Linux 专用安装脚本。</p>
+                <p class="muted">原生守护分别使用 Linux systemd 用户服务、Windows 计划任务和 macOS LaunchAgents；当前包的完整安装支持范围以上方信息为准。具体依赖详见 Skill，不要求预装 Python 或 Bun。</p>
+                <p class="muted">已有完整节点用 <code>codey update FILE.tgz</code> 更新，不重跑安装器。旧布局或归属不明时先停止并单独迁移；不覆盖身份、证书或正在运行的用户任务。</p>
                 <p class="muted">使用本人 GitHub 登录的私有 DevTunnel 主动连接，无需开放入站端口。每台机器独立生成私密凭据，模型登录另行完成。</p>
                 <p class="muted">下载不会创建或刷新待配置身份。同一个固定 Skill 包可以复用分发，每台机器最终生成各自的私密注册文件。</p>
               </details>

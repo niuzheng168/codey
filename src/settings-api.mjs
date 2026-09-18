@@ -30,43 +30,61 @@ function send(res, status, value, headers = {}) {
   res.end(bytes);
 }
 
+function observedComponents(health) {
+  return {
+    codey: health?.reachable && health.codey
+      ? { version: health.codey.version, commit: health.codey.commit, nodeMajor: health.codey.nodeMajor,
+        releaseId: health.codey.releaseId, source: "workspace_health" } : null,
+    // Keep an unidentified/standalone Workspace version separate from Codey.
+    cloudcli: health?.reachable && !health.codey && health.version
+      ? { version: health.version, commit: null, nodeMajor: null, source: "workspace_health" } : null,
+    copilotApi: null,
+  };
+}
+
 export class SettingsApi {
   constructor({ accounts, nodePolicy, authenticator, cloudCliGateway, nodeDataGateway, machineSetup }) {
     Object.assign(this, { accounts, nodePolicy, authenticator, cloudCliGateway, nodeDataGateway, machineSetup });
   }
 
+  async workspaceHealth(nodes) {
+    const results = new Map();
+    let next = 0;
+    const worker = async () => {
+      while (next < nodes.length) {
+        const node = nodes[next++];
+        const health = await Promise.resolve().then(() => this.cloudCliGateway?.healthMetadata?.(node.id)).catch(() => null);
+        results.set(node.id, health ?? null);
+      }
+    };
+    // Do not starve the fifth and later nodes behind the gateway's four-probe
+    // limit. Every authorized node is checked with bounded concurrency.
+    await Promise.all(Array.from({ length: Math.min(4, nodes.length) }, worker));
+    return results;
+  }
+
   async adminNodes() {
     const [registered, users] = await Promise.all([this.nodePolicy.inventory(), this.accounts.list()]);
     const owners = new Map(users.map((user) => [user.id, user]));
-    const nodes = await Promise.all(registered.map(async ({ id, name, region, ownerId }) => {
+    const healthByNode = await this.workspaceHealth(registered.filter(node => owners.get(node.ownerId)?.enabled));
+    const nodes = registered.map(({ id, name, region, ownerId }) => {
       const owner = owners.get(ownerId);
-      const health = owner?.enabled
-        ? await this.cloudCliGateway?.healthMetadata?.(id) : null;
+      const health = healthByNode.get(id);
       const status = !owner ? "unknown" : !owner.enabled ? "owner_disabled"
         : health?.reachable ? "workspace_online" : health ? "workspace_unreachable" : "unknown";
       return {
         id, name, region,
         owner: { id: ownerId, username: owner?.username ?? null, enabled: owner?.enabled ?? false },
         status,
-        lastSeen: null,
-        releaseId: null,
+        releaseId: health?.codey?.releaseId ?? null,
         ...(health ? { workspaceHealth: health } : {}),
-        components: {
-          // A standalone Workspace health version is not a Codey package version.
-          codey: null,
-          cloudcli: health?.reachable && health.version
-            ? { version: health.version, commit: null, nodeMajor: null, source: "workspace_health" }
-            : null,
-          copilotApi: null,
-        },
+        components: observedComponents(health),
       };
-    }));
+    });
     const online = nodes.filter((node) => node.status === "workspace_online").length;
     const stale = nodes.filter((node) => node.status === "workspace_unreachable").length;
     return {
       generatedAt: Date.now(),
-      heartbeatTimeoutMs: null,
-      telemetryAvailable: false,
       workspaceHealthAvailable: nodes.some((node) => node.workspaceHealth),
       summary: {
         total: nodes.length, owners: new Set(nodes.map((node) => node.owner.id)).size,
@@ -91,15 +109,30 @@ export class SettingsApi {
         const ids = nodes.map((node) => node.id);
         const workspaces = new Set((this.cloudCliGateway?.publicNodes(ids) ?? []).map((node) => node.id));
         const account = await this.accounts.byId(principal.id);
+        const healthByNode = await this.workspaceHealth(nodes);
         send(res, 200, {
           user: publicAccount(account),
           nodes: nodes.map((node) => ({
             ...node, vnetAvailable: Boolean(this.nodeDataGateway?.endpoint(node.id, ids)),
             networkMode: this.nodeDataGateway?.networkMode?.(node.id, ids) ?? node.networkMode ?? "direct",
             workspaceAvailable: workspaces.has(node.id),
+            workspaceHealth: healthByNode.get(node.id),
+            components: observedComponents(healthByNode.get(node.id)),
           })),
           machineSetup: this.machineSetup ? await this.machineSetup.availability(undefined, principal.id) : { enabled: false },
           pendingMachines: await this.nodePolicy.pendingMachines(principal.id),
+        });
+        return true;
+      }
+      if (pathname === "/api/settings/node-status") {
+        if (req.method !== "GET") throw requestError("节点状态仅支持只读查询", 405);
+        const owned = await this.nodePolicy.list(principal.id);
+        const health = await this.workspaceHealth(owned);
+        send(res, 200, {
+          generatedAt: Date.now(),
+          nodes: owned.map(node => ({ id: node.id, workspaceHealth: health.get(node.id),
+            components: observedComponents(health.get(node.id)) })),
+          machineSetup: this.machineSetup ? await this.machineSetup.availability(undefined, principal.id) : { enabled: false },
         });
         return true;
       }

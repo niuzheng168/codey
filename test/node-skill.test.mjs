@@ -261,13 +261,15 @@ test("add-node navigation waits for async node rendering and does not open on or
     const listeners = new Map();
     const element = () => ({
       addEventListener() {}, append() {}, classList: { toggle() {} }, querySelectorAll() { return []; },
-      replaceChildren() { events.push("nodes-rendered"); },
+      replaceChildren() { if (this === nodes.get("#my-nodes")) events.push("nodes-rendered"); },
       showModal() { this.open = true; events.push("opened"); },
       scrollIntoView() { throw new Error("Settings navigation must not scroll a long page"); },
     });
     const window = { location: { hash }, addEventListener(name, fn) { listeners.set(name, fn); } };
     const document = {
       createElement: element,
+      addEventListener() {},
+      dispatchEvent() {},
       querySelectorAll() { return []; },
       querySelector(selector) {
         // The removed legacy form must not be needed to bootstrap settings.
@@ -280,6 +282,7 @@ test("add-node navigation waits for async node rendering and does not open on or
     const gate = new Promise((resolve) => { releaseResponse = resolve; });
     runInNewContext(source, {
       window, document, LEGACY_NODE_CONNECTIONS_ENABLED: false,
+      CustomEvent: class { constructor(type) { this.type = type; } },
       fetch: async () => {
         await gate;
         events.push("response");

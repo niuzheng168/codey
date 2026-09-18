@@ -14,7 +14,7 @@ const ownedNode = {
 const machineId = `n-${"a".repeat(24)}`;
 
 async function page({ role = "user", hash = "", nodes = [ownedNode], pending = [], respond, waitForSettings,
-  legacyConnections = LEGACY_NODE_CONNECTIONS_ENABLED } = {}) {
+  legacyConnections = LEGACY_NODE_CONNECTIONS_ENABLED, machineSetup } = {}) {
   const dom = settingsDom();
   const requests = [];
   const redirects = [];
@@ -27,6 +27,7 @@ async function page({ role = "user", hash = "", nodes = [ownedNode], pending = [
     machineSetup: { enabled: true, sharedSkillAvailable: true, runtimePlatforms: ["linux-x64", "windows-x64"],
       sharedSkillBytes: 4194304, node: "24.20.0", codey: "0.1.1", cloudcli: "1.37.2", copilotApi: "2.5.1" },
   };
+  Object.assign(state.machineSetup, machineSetup);
   const users = [{ id: "owner", username: "demo", role: "admin", enabled: true },
     { id: "member", username: "alice", role: "user", enabled: true }];
   const window = {
@@ -55,6 +56,8 @@ async function page({ role = "user", hash = "", nodes = [ownedNode], pending = [
       if (url === "/api/settings") {
         if (waitForSettings) await waitForSettings;
         value = state;
+      } else if (url === "/api/settings/node-status") {
+        value = { generatedAt: Date.now(), nodes: structuredClone(state.nodes), machineSetup: state.machineSetup };
       } else if (url === "/api/admin/users") {
         if (options.method === "POST") {
           const user = { id: "created", username: request.data.username, role: "user", enabled: true };
@@ -211,7 +214,7 @@ test("the retained legacy editor still preserves its address restrictions behind
     nodes: [{ ...ownedNode, name: "<img src=x onerror=evil()>", networkMode: "vnet", vnetOnly: true }] });
   const row = p.get("my-nodes").children[0];
   assert.match(row.querySelector("summary").textContent, /<img src=x onerror=evil\(\)>/);
-  assert.match(row.querySelector("summary").textContent, /VNet 专用.*Workspace 已配置/);
+  assert.match(row.querySelector("summary").textContent, /VNet 专用.*Workspace 待检查.*Codey 版本未知/);
   assert.deepEqual(row.querySelectorAll("input").map((input) => input.name), ["name", "region", "accent", "endpoint"]);
   assert.equal(row.querySelector('[name="endpoint"]').readOnly, true);
   assert.equal(row.querySelector('[name="endpoint"]').value, "https://alpha.example.test:8443");
@@ -223,7 +226,7 @@ test("the retained legacy editor still preserves its address restrictions behind
 test("the shipped node editor exposes only DevTunnel, display settings and the single Codey package", async () => {
   const p = await page({ nodes: [{ ...ownedNode, name: "<img src=x onerror=evil()>" }] });
   const row = p.get("my-nodes").children[0];
-  assert.match(row.querySelector("summary").textContent, /DevTunnel.*Workspace 已配置/);
+  assert.match(row.querySelector("summary").textContent, /DevTunnel.*Workspace 待检查.*Codey 版本未知/);
   assert.deepEqual(row.querySelectorAll("input").map(input => input.name), ["name", "region", "accent"]);
   assert.equal(row.querySelectorAll("img").length, 0);
   assert.equal(row.querySelector(".node-endpoint-field"), null);
@@ -232,6 +235,43 @@ test("the shipped node editor exposes only DevTunnel, display settings and the s
   assert.doesNotMatch(p.get("add-node").textContent, /CloudCLI|copilot-api|VNet|直连/i);
 });
 
+test("actual node version and published package stay separate; refreshing status preserves unsaved forms", async () => {
+  const running = { ...ownedNode, workspaceHealth: { reachable: true, checkedAt: Date.now(), version: "0.1.17" },
+    components: { codey: { version: "0.1.17", commit: "a".repeat(40), nodeMajor: 24, source: "workspace_health" } } };
+  const p = await page({ nodes: [running], machineSetup: {
+    codey: "0.1.18", npmAvailable: true, npmFile: "codey-0.1.18.tgz", npmSha256: "b".repeat(64),
+    runtimePlatforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"],
+  } });
+  const row = p.get("my-nodes").children[0];
+  assert.match(row.querySelector("summary").textContent, /Workspace 可达.*Codey 0\.1\.17/);
+  assert.equal(p.get("published-codey-version").textContent, "已发布 Codey 0.1.18");
+  assert.match(p.get("published-codey-platforms").textContent, /Linux x64.*Windows x64.*macOS Apple Silicon.*macOS Intel/);
+  assert.equal(p.get("download-machine-package").disabled, false);
+  assert.equal(p.get("codey-update-command").textContent,
+    `codey update codey-0.1.18.tgz --sha256 ${"b".repeat(64)} --check\ncodey update codey-0.1.18.tgz --sha256 ${"b".repeat(64)}`);
+  row.open = true;
+  row.querySelector('[name="name"]').value = "Unsaved";
+  p.state.nodes[0].workspaceHealth.version = "0.1.18";
+  p.state.nodes[0].components.codey.version = "0.1.18";
+  await p.get("refresh-node-status").click(); await tick(); await tick();
+  assert.equal(p.get("my-nodes").children[0], row);
+  assert.equal(row.querySelector('[name="name"]').value, "Unsaved");
+  assert.equal(row.open, true);
+  assert.equal(row.querySelector(".node-version").textContent, "Codey 0.1.18");
+  assert(p.requests.every(request => request.method === "GET"), "Status refresh must not start an update");
+});
+
+test("missing or legacy package evidence never borrows the latest release as an installed version", async () => {
+  const p = await page({ nodes: [{ ...ownedNode,
+    workspaceHealth: { reachable: true, checkedAt: Date.now(), version: "0.1.16" },
+    components: { codey: { version: "0.1.16", source: "updater" } }, updaterStatus: "online",
+  }], machineSetup: { codey: "0.1.18", npmAvailable: true, npmFile: "codey-9.9.9.tgz", npmSha256: "a".repeat(64) } });
+  const row = p.get("my-nodes").children[0];
+  assert.equal(row.querySelector(".node-version").textContent, "Codey 版本未知");
+  assert.doesNotMatch(row.textContent, /0\.1\.16|0\.1\.18|升级器|心跳/);
+  assert.equal(p.get("download-machine-package").disabled, true, "Filename must match the published version");
+  assert.equal(p.get("codey-package-panel").open, false, "Keep package details compact by default");
+});
 test("saving a node uses the original owner-scoped API, keeps its editor open and restores keyboard focus", async () => {
   const p = await page();
   const row = p.get("my-nodes").children[0];

@@ -321,6 +321,8 @@ test("Linux downloads a standalone npm tarball and launcher with the existing au
   assert.equal(availability.npmAvailable, true);
   assert.equal(availability.sharedSkillAvailable, false, "Old Linux npm releases are not shared Skills");
   assert.equal(availability.npmFile, "codey-0.1.0.tgz");
+  assert.equal(availability.npmSha256, createHash("sha256").update(f.manifest.npmBytes).digest("hex"));
+  assert.equal(availability.npmBytes, f.manifest.npmBytes.length);
   assert.equal(availability.entrypoint, "bash install-codey-linux.sh");
   assert.equal(availability.bytes, f.manifest.npmBytes.length);
   assert.deepEqual(await f.policy.list(f.member.id), []);

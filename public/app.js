@@ -768,7 +768,7 @@ function renderNodeCard(node, aggregateTotal) {
           <span class="node-region">${escapeHtml(node.region)}</span>
           <span class="node-endpoint">${escapeHtml(LEGACY_NODE_CONNECTIONS_ENABLED ? node.endpoint : "私有 DevTunnel")}</span>
         </div>
-        <span class="status-pill ${escapeHtml(node.status)}" title="用量接口的读取状态，不代表机器或升级器心跳状态">${escapeHtml(node.id === "local" && node.status === "offline" ? "未连接" : statusLabel(node.status))}</span>
+        <span class="status-pill ${escapeHtml(node.status)}" title="用量接口的读取状态；机器版本与 Workspace 可达性请在账号与节点中查看">${escapeHtml(node.id === "local" && node.status === "offline" ? "未连接" : statusLabel(node.status))}</span>
       </div>
       <strong class="node-token-value">${node.tokenUsageAvailable ? escapeHtml(formatCompact(node.totals.total_tokens)) : "—"}</strong>
       <span class="node-token-label">tokens · ${escapeHtml(PERIOD_LABELS[state.period])}${node.staleScopes?.length ? " · 含上次数据" : ""}</span>
@@ -1179,7 +1179,7 @@ function renderDashboard() {
     renderKpis(data),
     renderOverviewPanels(data),
     renderNodes(data),
-    state.directMode ? "" : renderManagement(),
+    !LEGACY_NODE_CONNECTIONS_ENABLED || state.directMode ? "" : renderManagement(),
     renderModels(data),
     renderEvents(data),
   ].join("");
@@ -1952,7 +1952,7 @@ async function fetchJson(url, options = {}) {
 }
 
 async function fetchManagementStatus() {
-  if (state.directMode) {
+  if (!LEGACY_NODE_CONNECTIONS_ENABLED || state.directMode) {
     state.management = { nodes: [], artifacts: [], checkedAt: null };
     state.managementError = "";
     state.managementLoading = false;

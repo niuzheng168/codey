@@ -202,7 +202,8 @@ export class MachineSetup {
         ...(runtimeInstaller ? { sharedSkillBytes: packageInfo.size,
           runtimePlatforms: manifest.runtimePlatforms ?? ["linux-x64", "windows-x64"],
           managedInstallPlatforms: manifest.managedInstallPlatforms ?? ["linux-x64"] } : {}),
-        ...(npmPackage ? { npmFile: npmPackage.file, entrypoint: installer ? `bash ${installer.file}` : definition.entrypoint } : {}),
+        ...(npmPackage ? { npmFile: npmPackage.file, npmSha256: npmPackage.sha256, npmBytes: npmPackage.size,
+          entrypoint: installer ? `bash ${installer.file}` : definition.entrypoint } : {}),
         node: manifest.node, cloudcli: manifest.cloudcli.version, copilotApi: manifest.copilotApi.version,
         ...(manifest.codey ? { codey: manifest.codey.version } : {}),
       };
@@ -243,7 +244,7 @@ export class MachineSetup {
     if (!available.enabled) throw requestError(available.reason, 503);
     const selected = await this.selectedBundle(platformId);
     if (format === "shared-skill" && !selected.runtimeInstaller) {
-      throw requestError("尚未发布 Linux / Windows 共用安装 Skill；不会以旧的 Linux 专用包代替", 503);
+      throw requestError("尚未发布跨平台共用安装 Skill；不会以旧的 Linux 专用包代替", 503);
     }
     const packageInfo = format === "npm" ? selected.npmPackage : format === "installer" ? selected.installer : selected.package;
     if (!packageInfo) throw requestError("尚未发布支持直接 npm 安装的 Codey 包和 Linux 一键脚本，请先更新机器发行版", 503);

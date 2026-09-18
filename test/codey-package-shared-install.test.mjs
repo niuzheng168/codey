@@ -128,7 +128,12 @@ test("the identical shared artifact installs, validates native modules and start
       const health = await fetch(workspace + "/health");
       const viewer = await fetch(gateway + "/usage-viewer");
       if (health.ok && viewer.ok) {
-        assert.equal((await health.json()).version, info.version);
+        const healthBody = await health.json();
+        assert.equal(healthBody.version, info.version);
+        assert.deepEqual(healthBody.codey, {
+          name: "codey", version: info.version, commit: info.sourceCommit,
+          releaseId: "machine-" + info.entrySha256.slice(0, 16), nodeMajor: info.nodeMajor,
+        });
         ready = true;
         break;
       }

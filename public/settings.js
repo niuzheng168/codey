@@ -11,9 +11,18 @@ const enrollment = document.querySelector("#enrollment");
 const enrollmentValue = document.querySelector("#enrollment-value");
 const machineDownloadMessage = document.querySelector("#machine-download-message");
 const machineSkillButton = document.querySelector("#download-machine-skill");
+const machinePackageButton = document.querySelector("#download-machine-package");
+const refreshNodeButton = document.querySelector("#refresh-node-status");
 const machineSkillFilename = "config-new-codey-machine.zip";
+const platformLabels = {
+  "linux-x64": "Linux x64", "windows-x64": "Windows x64",
+  "macos-arm64": "macOS Apple Silicon", "macos-x64": "macOS Intel",
+};
 let machineSkillDownloading = false;
 let machineSkillAvailable = false;
+let runtimePackage = null;
+let runtimePlatforms = "";
+let nodeStatusLoading = false;
 let settingsReady = false;
 let activePanel = "nodes";
 let activeAdminPanel = "admin-nodes-panel";
@@ -125,6 +134,77 @@ function machineActivationNotice(text, error = false) {
 
 function updateMachineSkillButtons() {
   machineSkillButton.disabled = machineSkillDownloading || !machineSkillAvailable;
+  machinePackageButton.disabled = machineSkillDownloading || !runtimePackage;
+}
+
+function renderPublishedPackage(setup) {
+  runtimePlatforms = (Array.isArray(setup?.runtimePlatforms) ? setup.runtimePlatforms : [])
+    .filter(platform => Object.hasOwn(platformLabels, platform)).map(platform => platformLabels[platform]).join(" / ");
+  machineSkillAvailable = Boolean(setup?.enabled && setup.sharedSkillAvailable &&
+    Array.isArray(setup.runtimePlatforms) &&
+    ["linux-x64", "windows-x64"].every(platform => setup.runtimePlatforms.includes(platform)));
+  runtimePackage = setup?.enabled && setup.npmAvailable &&
+    /^codey-\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?\.tgz$/i.test(setup.npmFile ?? "") &&
+    setup.npmFile === `codey-${setup.codey}.tgz` &&
+    /^[a-f0-9]{64}$/.test(setup.npmSha256 ?? "")
+    ? { filename: setup.npmFile, sha256: setup.npmSha256 } : null;
+  document.querySelector("#machine-package-status").textContent = machineSkillAvailable
+    ? `Codey ${setup.codey}（统一 npm 包） · ${runtimePlatforms} · Skill 约 ${Math.ceil(setup.sharedSkillBytes / 1024 / 1024)} MB`
+    : `Codey 共用安装 Skill 暂不可用。${setup?.reason || "请先发布完整跨平台安装包，不会以旧的 Linux 专用包代替。"}`;
+  document.querySelector("#published-codey-version").textContent = setup?.enabled && setup.codey
+    ? `已发布 Codey ${setup.codey}` : "暂无可用发行包";
+  document.querySelector("#published-codey-platforms").textContent = runtimePlatforms;
+  document.querySelector("#machine-native-status").textContent = setup?.enabled
+    ? `完整节点安装：${(Array.isArray(setup.managedInstallPlatforms) ? setup.managedInstallPlatforms : ["linux-x64"])
+      .filter(platform => Object.hasOwn(platformLabels, platform)).map(platform => platformLabels[platform]).join(" / ")}`
+    : "";
+  document.querySelector("#codey-update-command").textContent = runtimePackage
+    ? `codey update ${runtimePackage.filename} --sha256 ${runtimePackage.sha256} --check\n` +
+      `codey update ${runtimePackage.filename} --sha256 ${runtimePackage.sha256}`
+    : "完整运行包暂不可用，请稍后刷新。";
+  updateMachineSkillButtons();
+}
+
+function updateNodeStatus(card, node) {
+  const health = node.workspaceHealth;
+  const component = node.components?.codey;
+  const codey = health?.reachable && component?.source === "workspace_health" &&
+    component.version === health.version ? component : null;
+  card.querySelector(".node-version").textContent = codey ? `Codey ${codey.version}` : "Codey 版本未知";
+  const status = card.querySelector(".node-health");
+  status.textContent = health ? health.reachable ? "Workspace 可达" : "Workspace 暂不可达"
+    : node.workspaceAvailable === false ? "Workspace 未配置" : "Workspace 待检查";
+  status.classList.toggle("configured", Boolean(health?.reachable));
+  status.classList.toggle("pending", !health?.reachable);
+  const detail = [
+    codey?.commit && `源码 ${codey.commit.slice(0, 8)}`,
+    codey?.nodeMajor && `Node ${codey.nodeMajor}`,
+    !codey && "尚未确认 Codey 整包身份；请在目标机器运行 codey status / codey doctor",
+    Number.isFinite(health?.checkedAt) && `检查于 ${new Date(health.checkedAt).toLocaleString("zh-CN", { hour12: false })}`,
+  ].filter(Boolean).join(" · ");
+  card.querySelector(".node-runtime-detail").textContent = detail || "未取得节点运行版本；请在目标机器运行 codey status / codey doctor。";
+}
+
+async function refreshNodeStatus() {
+  if (!settingsReady || activePanel !== "nodes" || document.hidden || nodeStatusLoading) return;
+  nodeStatusLoading = true;
+  refreshNodeButton.disabled = true;
+  try {
+    const result = await api("/api/settings/node-status");
+    if (!Array.isArray(result.nodes)) throw new Error("节点状态响应无效");
+    const cards = [...nodesRoot.querySelectorAll(".node-card")];
+    for (const node of result.nodes) {
+      const card = cards.find(item => item.dataset.nodeId === node.id);
+      if (card) updateNodeStatus(card, node); // Never rebuild an owner's unsaved settings form.
+    }
+    renderPublishedPackage(result.machineSetup);
+    notice("已刷新节点运行版本与已发布安装包。");
+  } catch (error) {
+    notice(`状态刷新失败：${error.message}；当前保留上次检查结果。`, true);
+  } finally {
+    nodeStatusLoading = false;
+    refreshNodeButton.disabled = false;
+  }
 }
 
 async function api(url, method = "GET", data) {
@@ -197,13 +277,13 @@ function renderNodes(nodes) {
       : !LEGACY_NODE_CONNECTIONS_ENABLED ? "待接入 DevTunnel"
         : node.vnetOnly ? "VNet 专用" : node.vnetAvailable ? "VNet 已配置" : "浏览器直连", "badge");
     connection.title = connection.textContent;
-    badges.append(connection, element("span", node.workspaceAvailable ? "Workspace 已配置" : "Workspace 未配置",
-      `badge ${node.workspaceAvailable ? "configured" : "pending"}`));
+    badges.append(connection, element("span", "", "badge node-health"), element("span", "", "badge node-version"));
     summary.append(identity, endpoint, badges, element("span", "设置", "node-disclosure"));
     card.append(summary);
 
     const editor = element("div", null, "node-editor");
     editor.append(element("p", `${node.id === "local" ? "兼容节点 ID" : "节点 ID"} · ${node.id}`, "node-id"));
+    editor.append(element("p", "", "muted node-runtime-detail"));
     if (LEGACY_NODE_CONNECTIONS_ENABLED && node.id === "local") {
       editor.append(element("p", "保留旧 ID 以兼容现有会话与 SSO；它不是机器名称。此节点的 Workspace 是远程机器，Usage/History 的回环地址仍指向当前浏览器设备，不代表已开通远程 Windows 用量。", "muted"));
     }
@@ -261,6 +341,7 @@ function renderNodes(nodes) {
     editor.append(form);
     card.append(editor);
     nodesRoot.append(card);
+    updateNodeStatus(card, node);
   }
 }
 
@@ -292,14 +373,7 @@ async function renderUsers() {
 async function load() {
   const result = await api("/api/settings");
   renderNodes(result.nodes);
-  const setup = result.machineSetup;
-  machineSkillAvailable = Boolean(setup?.enabled && setup.sharedSkillAvailable &&
-    Array.isArray(setup.runtimePlatforms) &&
-    ["linux-x64", "windows-x64"].every(platform => setup.runtimePlatforms.includes(platform)));
-  document.querySelector("#machine-package-status").textContent = machineSkillAvailable
-    ? `Codey ${setup.codey}（统一 npm 包） · Linux x64 / Windows x64 · Skill 约 ${Math.ceil(setup.sharedSkillBytes / 1024 / 1024)} MB`
-    : `Codey 共用安装 Skill 暂不可用。${setup?.reason || "请先发布包含跨平台安装器的新版本，不会以旧的 Linux 专用包代替。"}`;
-  updateMachineSkillButtons();
+  renderPublishedPackage(result.machineSetup);
   adminTab.hidden = result.user.role !== "admin";
   if (adminTab.hidden && activePanel === "admin-section") activatePanel("nodes", true);
   settingsReady = true;
@@ -309,14 +383,20 @@ async function load() {
   else usersRoot.replaceChildren();
 }
 
-async function downloadMachineSkill(event) {
+async function downloadMachineArtifact(event) {
   event.preventDefault();
-  if (machineSkillDownloading || !machineSkillAvailable) return;
   const form = event.currentTarget;
+  const updating = form.id === "machine-package-form";
+  if (machineSkillDownloading || (updating ? !runtimePackage : !machineSkillAvailable)) return;
+  const filename = updating ? runtimePackage.filename : machineSkillFilename;
+  const report = updating ? (text, error = false) => {
+    const target = document.querySelector("#machine-package-message");
+    target.textContent = text; target.classList.toggle("error", error);
+  } : machineDownloadNotice;
   machineSkillDownloading = true;
   updateMachineSkillButtons();
-  const contentType = "application/zip";
-  machineDownloadNotice("正在下载 Codey 安装 Skill。文件不含节点凭据，Linux x64 / Windows x64 共用。");
+  const contentType = updating ? "application/gzip" : "application/zip";
+  report(`正在下载 ${updating ? filename : "Codey 安装 Skill"}。文件不含节点凭据，${runtimePlatforms} 共用。`);
   try {
     // Native POST navigation under no-referrer can have an opaque Origin.
     // Keep strict server-side CSRF checks and limit this request to our origin.
@@ -332,20 +412,19 @@ async function downloadMachineSkill(event) {
       const result = await response.json().catch(() => null);
       throw new Error(result?.error || `HTTP ${response.status}`);
     }
-    const filename = machineSkillFilename;
     const responseFilename = response.headers.get("content-disposition")
       ?.match(/^attachment;\s*filename="([^"]+)"$/i)?.[1];
     if (response.headers.get("content-type")?.split(";")[0].trim() !== contentType || !filename ||
         !responseFilename) {
-      throw new Error("服务器未返回 Codey 安装 Skill，请刷新页面后重试");
+      throw new Error(`服务器未返回 ${updating ? "Codey 运行包" : "Codey 安装 Skill"}，请刷新页面后重试`);
     }
     if (responseFilename !== filename) {
-      throw new Error("服务器返回的文件名不是 Codey 共用安装 Skill");
+      throw new Error("发行包已变化或文件名不匹配，请刷新后重试");
     }
     const blob = await response.blob();
     const length = response.headers.get("content-length");
     if (!blob.size || (length !== null && Number(length) !== blob.size)) {
-      throw new Error("配置包下载不完整，请重新下载 Skill");
+      throw new Error("配置包下载不完整，请重新下载");
     }
     const url = URL.createObjectURL(blob);
     const link = element("a");
@@ -359,16 +438,20 @@ async function downloadMachineSkill(event) {
       // Give the browser time to consume the Blob before releasing its memory.
       window.setTimeout(() => URL.revokeObjectURL(url), 60000);
     }
-    machineDownloadNotice(`已准备好 ${filename}。Linux x64 / Windows x64 使用同一份 npm 包；在目标机器按 SKILL.md 安装。`);
+    report(`已准备好 ${filename}。${updating ? "请在目标机器按上方命令检查并更新，Portal 不会启动更新任务。" : `${runtimePlatforms} 使用同一份 npm 包；在目标机器按 SKILL.md 安装。`}`);
   } catch (error) {
-    machineDownloadNotice(`下载失败：${error.message}。请重试。`, true);
+    report(`下载失败：${error.message}。请重试。`, true);
   } finally {
     machineSkillDownloading = false;
     updateMachineSkillButtons();
   }
 }
 
-document.querySelector("#machine-skill-form").addEventListener("submit", downloadMachineSkill);
+document.querySelector("#machine-skill-form").addEventListener("submit", downloadMachineArtifact);
+document.querySelector("#machine-package-form").addEventListener("submit", downloadMachineArtifact);
+refreshNodeButton.addEventListener("click", () => { void refreshNodeStatus(); });
+document.addEventListener("visibilitychange", () => { void refreshNodeStatus(); });
+window.setInterval?.(() => { void refreshNodeStatus(); }, 30_000);
 
 document.querySelector("#add-prepared-machine-form").addEventListener("submit", (event) => {
   event.preventDefault();

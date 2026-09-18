@@ -45,8 +45,10 @@ registry，不要从公共源安装同名包。构建不会自动发布或部署
 完整安装流程与命令行用法见 [安装 Skill](./skills/config-new-codey-machine/SKILL.md)。
 
 “账号与节点 → 添加节点”只保留一个 Codey 安装 Skill 下载入口，不再让用户选择系统。
-Skill 内是同一份 Linux/Windows npm 包；安装步骤及注册文件仍按真实平台识别。
+Skill 内是同一份 Linux x64、Windows x64、macOS arm64/x64 npm 包；原生安装支持范围随发行包明确列出。
 旧的 Linux 专用发行版不会被当作共用安装包开放此入口。
+已有节点在“安装包与本机更新”下载 `.tgz`，按页面提供的 SHA-256 命令先检查，
+再在该节点原用户的外部终端执行 `codey update`；Portal 不启动远程更新任务。
 
 Linux 的独立 npm 包和 `install-codey-linux.sh` 入口仍保留，不必解压 Skill ZIP。
 将两者放在同一目录，确认目标机名后运行 `bash install-codey-linux.sh --expected-computer "实际机名"`；也可以从仓库执行：
@@ -92,14 +94,16 @@ npm test
 - [Workspace 前端统一发布（已上线）](./docs/codey-shared-workspace-ui.md)
 - [Workspace `/goal` 与 `/plan` 命令](./docs/codey-goal-plan.md)
 
-**当前 ACA 部署（2026-09-06）：** Codey 支持多个用户名密码账号；原 `zhn`
+**Portal 与节点的职责：** Codey 支持多个用户名密码账号；原 `zhn`
 为管理员，在“账号与节点 → 用户管理”创建账号。节点设置按不可变 owner ID
 保存，新账号不继承任何节点；知道别人的节点名称也不能获得 Usage、未共享的
 Session History 或 Workspace 访问权。Shared 为所有登录用户可读的公共区。
 进入自己的 Workspace 无需二次登录。当前源码 UI 统一使用私有 **DevTunnel**：
 Usage 与 Workspace 不再提供 VNet 或浏览器本地直连入口，也不沿用旧连接偏好。
-“账号与节点”的节点总览与软件更新只展示 **Codey npm 包**，按整包预览和确认更新；
-未收到 Codey 版本上报的节点明确显示未知，不用旧组件版本冒充。
+“账号与节点”分开显示**已发布安装包**与节点**实际运行的 Codey 整包版本**。
+节点版本来自受信任 HTTPS `/health` 的明确包身份，并在进程启动时固定；
+不读取旧升级器快照，不以组件版本或最新下载版本冒充当前版本。未知或不可达时如实标明，
+状态刷新不会覆盖正在编辑的节点设置；日常检查在节点运行 `codey status` / `codey doctor`。
 Workspace 前端已统一托管：纯 UI 更新构建、发布一次即可，API、终端及用户数据仍按节点隔离。
 下文 AAD、直连、VNet、独立组件安装与登录步骤保留为早期/本地兼容实现记录，
 不是当前 UI 的入口；本次界面调整不删除这些后端能力或已有节点配置。

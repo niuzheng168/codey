@@ -58,6 +58,31 @@ test("bad statuses, redirects, HTML, oversized data and malformed versions canno
   assert.equal(value.version, null, "Reachability is not permission to guess a component version");
 });
 
+test("explicit running Codey identity is allowlisted and cannot come from a component or target version", async () => {
+  const identity = { name: "codey", version: "0.1.17", commit: "b".repeat(40),
+    releaseId: "machine-" + "c".repeat(16), nodeMajor: 24 };
+  const result = await readWorkspaceHealth(node, { rejectUnauthorized: true }, {
+    clock: () => now, requestImpl: response(JSON.stringify({
+      status: "ok", version: "0.1.17", codey: { ...identity, token: "DO_NOT_EXPORT", path: "/private/home" },
+      latestVersion: "0.1.18", updaterStatus: "online",
+    })),
+  });
+  assert.deepEqual(result.codey, identity);
+  assert.equal(result.codey.version, "0.1.17", "Latest published package is not the running version");
+  assert.doesNotMatch(JSON.stringify(result), /DO_NOT_EXPORT|private|latestVersion|updaterStatus/);
+  for (const bad of [
+    { ...identity, name: "@cloudcli-ai/cloudcli" }, { ...identity, version: "0.1.16" },
+    { ...identity, commit: "unknown" }, { ...identity, releaseId: "unverified" },
+    { ...identity, nodeMajor: "24" }, { ...identity, nodeMajor: -1 },
+  ]) {
+    const value = await readWorkspaceHealth(node, { rejectUnauthorized: true }, {
+      clock: () => now, requestImpl: response(JSON.stringify({ status: "ok", version: "0.1.17", codey: bad })),
+    });
+    assert.equal(value.reachable, true);
+    assert.equal(value.codey, undefined);
+  }
+});
+
 test("timeout/transport failure is bounded; plain HTTP or relaxed TLS is never requested", async () => {
   let requests = 0;
   const requestImpl = () => {
@@ -119,8 +144,9 @@ test("admin checks Workspace reachability without an updater or fabricated heart
   const row = result.nodes[0];
   assert.equal(row.status, "workspace_online");
   assert.equal(row.updaterStatus, undefined);
-  assert.equal(result.telemetryAvailable, false);
-  assert.equal(row.lastSeen, null, "Do not synthesize an updater heartbeat");
+  assert.equal(result.telemetryAvailable, undefined);
+  assert.equal(result.heartbeatTimeoutMs, undefined);
+  assert.equal(row.lastSeen, undefined, "Do not synthesize an updater heartbeat");
   assert.equal(row.components.cloudcli.source, "workspace_health");
   assert.equal(row.components.cloudcli.version, "1.37.2");
   assert.equal(row.components.cloudcli.commit, null);
@@ -133,6 +159,39 @@ test("admin checks Workspace reachability without an updater or fabricated heart
   enabled = false;
   assert.equal((await api.adminNodes()).nodes[0].status, "owner_disabled");
   assert.equal(checks, 2, "A disabled owner's node is not probed");
+});
+
+test("node metadata checks every authorized node without starving nodes beyond the four-probe limit", async () => {
+  const rows = Array.from({ length: 10 }, (_, index) => ({
+    id: `node-${index}`, name: `Node ${index}`, region: "test", ownerId: index === 9 ? "disabled" : "owner",
+  }));
+  let active = 0, peak = 0;
+  const checked = [];
+  const api = new SettingsApi({
+    nodePolicy: { inventory: async () => rows },
+    accounts: { list: async () => [{ id: "owner", username: "zhn", enabled: true },
+      { id: "disabled", username: "disabled", enabled: false }] },
+    cloudCliGateway: { healthMetadata: async id => {
+      active++; peak = Math.max(peak, active);
+      await new Promise(setImmediate);
+      active--; checked.push(id);
+      return { reachable: true, checkedAt: now, version: "0.1.18",
+        codey: { name: "codey", version: "0.1.18", commit: "d".repeat(40),
+          releaseId: "machine-" + "e".repeat(16), nodeMajor: 24 } };
+    } },
+  });
+  const result = await api.adminNodes();
+  assert(peak <= 4);
+  assert.deepEqual(checked.sort(), rows.slice(0, 9).map(row => row.id).sort());
+  assert.equal(result.summary.online, 9);
+  for (const row of result.nodes.slice(0, 9)) {
+    assert.equal(row.components.codey.version, "0.1.18");
+    assert.equal(row.components.codey.source, "workspace_health");
+    assert.equal(row.components.cloudcli, null, "Whole-package versions must not become CloudCLI component versions");
+    assert.equal(row.releaseId, "machine-" + "e".repeat(16));
+  }
+  assert.equal(result.nodes[9].status, "owner_disabled");
+  assert.doesNotMatch(JSON.stringify(result), /updater|heartbeat|lastSeen/);
 });
 
 test("browser-loopback data remains explicitly separate from the renamed remote Windows Workspace", () => {
