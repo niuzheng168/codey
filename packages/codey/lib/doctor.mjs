@@ -5,21 +5,30 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { readPackageInfo, runtimePlatform } from "./package-info.mjs";
 
-export const DOCTOR_HELP = `Usage: codey doctor [--package-only] [--json]
+export const DOCTOR_HELP = `Usage: codey doctor [--json] [--offline] [--model]
+       codey doctor --runtime-only [--json]
+       codey doctor --package-only [--json]
 
-Verify the shared Codey package and its locked runtime entrypoints.
-By default, also check SQLite, bcrypt, ripgrep, the bundled SDK and a short-lived PTY.
---package-only skips native modules, for validation before npm rebuild.
-No service changes, provider login, credentials or model requests.
+Default: package/native modules, owned services, ports, tools, saved Copilot login,
+DevTunnel account/private tunnel/host connection, certificate and local TLS/SSO/API authentication.
+--offline skips online DevTunnel checks. --model explicitly permits CLI/SDK model requests.
+--runtime-only checks just the application and native modules, not the managed node.
+--package-only skips native modules too. --json emits compact JSON.
+No repair, service changes or interactive login. Exit nonzero on failed checks.
 `;
 
 export function doctorOptions(args) {
   const options = {};
   for (const arg of args) {
     if (["--help", "-h"].includes(arg)) return { help: true };
-    const name = arg === "--package-only" ? "packageOnly" : arg === "--json" ? "json" : null;
+    const name = ({ "--package-only": "packageOnly", "--runtime-only": "runtimeOnly", "--json": "json",
+      "--offline": "offline", "--model": "model" })[arg];
     if (!name || options[name]) throw new Error(`Invalid doctor option: ${arg}`);
     options[name] = true;
+  }
+  if (options.offline && options.model || options.packageOnly && options.runtimeOnly ||
+      (options.packageOnly || options.runtimeOnly) && (options.model || options.offline)) {
+    throw new Error("Incompatible doctor options; use --help");
   }
   return options;
 }
@@ -109,7 +118,7 @@ export async function runDoctor(root, args, {
     runtimePlatforms: build.runtimePlatforms, sourceCommit: build.sourceCommit,
     nodeMajor: Number(process.versions.node.split(".")[0]),
     entrySha256, lockSha256: build.lockSha256, native,
-    managedSetupSupported: target === "linux-x64", serviceChanges: false, modelRequests: false,
+    serviceChanges: false, modelRequests: false,
   };
   log(JSON.stringify(result, null, options.json ? 0 : 2));
   return result;

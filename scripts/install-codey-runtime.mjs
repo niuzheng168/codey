@@ -12,7 +12,7 @@ const DEFAULT_PACKAGE_FILE = "";
 const DEFAULT_PACKAGE_SHA256 = "";
 const MARKER = "CODEY_SHARED_NPM_LAUNCHER";
 const PUBLIC_REGISTRY = "https://registry.npmjs.org";
-const HELP = `Usage: node install-codey.mjs [--package FILE.tgz] [--sha256 HASH] [--prefix DIR] [--check]
+const HELP = `Usage: node install-codey.mjs [--package FILE.tgz] [--sha256 HASH] [--prefix DIR] [--check | --no-launcher]
                               [--reuse-from EXISTING_CODEY_DIRECTORY]
 
 Install the SAME Codey npm artifact on Linux x64, Windows x64 or macOS arm64/x64
@@ -20,7 +20,9 @@ using Node.js 22.13+.
 A published installer has its adjacent package filename and SHA-256 built in.
 Source use requires both --package and --sha256; public npm names are never accepted.
 --prefix must be a new directory under the current user's home.
---check installs and verifies the package/native dependencies, but does not change PATH.
+--check is read-only: verify the local archive SHA-256 and report the installation
+plan without downloads, npm, files or PATH changes. Native dependencies are deferred.
+--no-launcher installs/verifies the runtime without creating a CLI or changing PATH.
 --reuse-from copies identical, already installed dependencies instead of downloading
 or rebuilding them. This offline path requires the same dependency lock and a
 compatible existing Node/native ABI; it never falls back to the registry.
@@ -48,6 +50,7 @@ export function installOptions(args, directory = path.dirname(fileURLToPath(impo
     if (seen.has(flag)) throw new Error(`Duplicate installer option: ${flag}`);
     seen.add(flag);
     if (flag === "--check") options.check = true;
+    else if (flag === "--no-launcher") options.noLauncher = true;
     else if (["--package", "--sha256", "--prefix", "--reuse-from"].includes(flag) && args[index + 1] && !args[index + 1].startsWith("--")) {
       options[flag.slice(2)] = args[++index];
     } else throw new Error(`Invalid installer option: ${flag}`);
@@ -57,6 +60,7 @@ export function installOptions(args, directory = path.dirname(fileURLToPath(impo
     throw new Error("Provide a local Codey .tgz and its SHA-256; do not install the unrelated public npm package.");
   }
   options.sha256 = options.sha256.toLowerCase();
+  if (options.check && options.noLauncher) throw new Error("--check cannot be combined with --no-launcher");
   return options;
 }
 
@@ -220,6 +224,19 @@ export async function installRuntime(args) {
   if (hash.digest("hex") !== options.sha256) throw new Error("Codey artifact SHA-256 mismatch; nothing installed.");
   const donor = options["reuse-from"] ? await realpath(options["reuse-from"]) : null;
   if (donor && !inside(home, donor)) throw new Error("Reuse dependencies only from an existing installation under your own home.");
+  if (options.check) {
+    if (options.prefix) {
+      const prefix = path.resolve(options.prefix);
+      if (!inside(home, prefix)) throw new Error("Use a new npm prefix under your own home.");
+      try { await lstat(prefix); throw new Error("Refusing to overwrite an existing npm prefix."); }
+      catch (error) { if (error.code !== "ENOENT") throw error; }
+    }
+    const plan = { ok: true, mode: "check", platform: target, packageSha256: options.sha256,
+      pathChanged: false, serviceChanges: false, modelRequests: false, downloads: false, fileChanges: false,
+      deferred: ["package/native dependency verification during installation"], registrationFile: null };
+    console.log(JSON.stringify(plan));
+    return plan;
+  }
 
   let prefix;
   if (options.prefix) {
@@ -262,7 +279,7 @@ require('node:module').createRequire(process.argv[1])('pacote').extract(process.
     await verifyStagedPackage(app, artifact);
     const buildHome = path.join(prefix, "build-home");
     await mkdir(buildHome, { mode: 0o700 });
-    await command(node, [path.join(app, "bin/codey.mjs"), "doctor", "--json"], buildEnvironment(buildHome, node));
+    await command(node, [path.join(app, "bin/codey.mjs"), "doctor", "--runtime-only", "--json"], buildEnvironment(buildHome, node));
   } else {
     // Call npm's JS entrypoint directly: npm.cmd is not spawnable without a shell.
     await command(node, [...npmArgs, "ci", "--prefix", app, "--ignore-scripts", ...npmFlags], env);
@@ -273,19 +290,19 @@ require('node:module').createRequire(process.argv[1])('pacote').extract(process.
   await command(node, [cli, "doctor", "--package-only", "--json"], env);
   if (!donor) {
     await command(node, [...npmArgs, "rebuild", "--prefix", app, ...npmFlags], env);
-    await command(node, [cli, "doctor", "--json"], env);
+    await command(node, [cli, "doctor", "--runtime-only", "--json"], env);
   }
-  const bin = options.check ? null : await installLauncher(home, node, app);
+  const bin = options.noLauncher ? null : await installLauncher(home, node, app);
   const result = { ok: true, name: "codey", version: pkg.version, packageSha256: options.sha256,
     platform: target, packageRoot: app, bin, installationKind: "runtime-only", registrationFile: null,
-    pathChanged: !options.check, serviceChanges: false, modelRequests: false,
+    pathChanged: !options.noLauncher, serviceChanges: false, modelRequests: false,
     dependencyMode: donor ? "reuse-installed-offline" : "npm-install" };
   console.log(JSON.stringify(result));
   if (bin) {
     console.log("Open a new terminal to use codey. For the current terminal:");
     console.log(platform === "win32" ? `$env:Path = '${bin.replaceAll("'", "''")};' + $env:Path`
       : 'export PATH="$HOME/.local/bin:$PATH"');
-    console.log("Authenticate with codey auth login --provider copilot; use codey start or codey gateway.");
+    console.log("Authenticate with codey copilot login; use codey start --foreground or codey copilot start.");
   }
   return result;
 }

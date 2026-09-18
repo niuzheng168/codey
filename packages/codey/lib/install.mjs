@@ -1,6 +1,7 @@
-import { spawn } from "node:child_process";
+/** Private bridge from the Linux npm bootstrap to the common installation workflow. */
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import os from "node:os";
 import path from "node:path";
 
@@ -8,24 +9,10 @@ const digest = bytes => createHash("sha256").update(bytes).digest("hex");
 const version = /^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/;
 const sha256 = /^[a-f0-9]{64}$/;
 
-export const SETUP_HELP = `Usage: codey setup [--config FILE] --check
-       codey setup [--config FILE] --expected-computer NAME [--replace-existing]
-
-Configure this installed Codey npm package as a Linux x64 managed node.
-Uses onboarding/setup.json from a machine build, or an explicit public config.
---check validates the package/configuration without installing tools, stopping
-processes, writing credentials, contacting models, or changing system services.
-Apply checks native owner/host and port ownership. Foreign or unverified listeners
-abort; same-release managed nodes are verified and reused without reinstalling.
---replace-existing backs up Codex/gateway settings on a new node; auth/sessions remain.
-Close unmanaged Codex processes yourself. No process is killed to free a port.
-`;
-
-export function setupOptions(args) {
+export function installOptions(args) {
   const options = {};
   for (let index = 0; index < args.length; index++) {
     const name = args[index];
-    if (name === "--help" || name === "-h") return { help: true };
     if (name === "--check" && !options.check) options.check = true;
     else if (name === "--replace-existing" && !options.replaceExisting) options.replaceExisting = true;
     else if (name === "--expected-computer" && !options.expectedComputer && args[index + 1] && !args[index + 1].startsWith("--")) {
@@ -33,7 +20,7 @@ export function setupOptions(args) {
     }
     else if (name === "--config" && !options.config && args[index + 1] && !args[index + 1].startsWith("--")) {
       options.config = path.resolve(args[++index]);
-    } else throw new Error(`Invalid setup option: ${name}`);
+    } else throw new Error(`Invalid installation option: ${name}`);
   }
   return options;
 }
@@ -87,7 +74,11 @@ export async function installedSetup(root, configFile, nodeVersion = process.ver
     }
   }
   for (const name of [
-    "onboarding/scripts/install.sh", "onboarding/scripts/registration.mjs",
+    "onboarding/scripts/install-machine.mjs", "onboarding/scripts/machine-package.mjs",
+    "onboarding/scripts/machine-common.mjs", "onboarding/scripts/machine-resources.mjs",
+    "onboarding/scripts/platform-linux.mjs", "onboarding/scripts/platform-macos.mjs",
+    "onboarding/scripts/platform-windows.mjs", "onboarding/scripts/platform-unix.mjs",
+    "onboarding/scripts/macos-service.mjs", "onboarding/dependencies.json", "onboarding/scripts/registration.mjs",
     "onboarding/templates/a100-models.json", "onboarding/templates/codex-config.toml",
     "onboarding/scripts/install-devtunnel-health.sh", "onboarding/scripts/linux-devtunnel-health.mjs",
     "onboarding/scripts/linux-preflight.sh", "onboarding/scripts/windows-runtime.mjs",
@@ -98,7 +89,7 @@ export async function installedSetup(root, configFile, nodeVersion = process.ver
   try {
     config = JSON.parse(await readFile(configFile ?? path.join(root, "onboarding/setup.json"), "utf8"));
   } catch (error) {
-    if (error.code === "ENOENT") throw new Error("No Portal setup configuration. Use a machine npm build or codey setup --config FILE.");
+    if (error.code === "ENOENT") throw new Error("No Portal setup configuration. Use the complete installation Skill or install-codey-linux.sh --config FILE.");
     if (error instanceof SyntaxError) throw new Error("Setup configuration must be valid JSON");
     throw error;
   }
@@ -116,11 +107,10 @@ export async function installedSetup(root, configFile, nodeVersion = process.ver
   return { root, manifest, setup: { ...config, platform: manifest.platform, releaseId } };
 }
 
-export async function runSetup(root, args, { spawnProcess = spawn, home = os.homedir() } = {}) {
-  const options = setupOptions(args);
-  if (options.help) return console.log(SETUP_HELP);
+export async function runInstall(root, args, { createInstaller, home = os.homedir() } = {}) {
+  const options = installOptions(args);
   if (process.platform !== "linux" || process.arch !== "x64") {
-    throw new Error("Managed service setup supports Linux x64 only. On Windows use the shared npm installer, codey doctor and codey start; existing Windows service/DevTunnel configuration is retained.");
+    throw new Error("Managed service setup supports Linux x64 only. Use the complete Skill's native Windows/macOS entrypoints, or codey doctor --runtime-only and codey start --foreground for a runtime-only package.");
   }
   const prepared = await installedSetup(root, options.config);
   home = await realpath(home);
@@ -128,48 +118,21 @@ export async function runSetup(root, args, { spawnProcess = spawn, home = os.hom
   if (process.getuid() === 0 || (await stat(prepared.root)).uid !== process.getuid() ||
       !allowed.some(name => prepared.root.startsWith(path.join(home, name) + path.sep)) ||
       [prepared.root, home, process.execPath].some(value => /[\s%$"'\\]/.test(value))) {
-    throw new Error("Managed setup requires a user-owned package under a supported HOME npm prefix without spaces or systemd metacharacters. Use the one-click installer or npm install --global --prefix \"$HOME/.local\".");
+    throw new Error("Managed setup requires a user-owned package under a supported HOME npm prefix without spaces or systemd metacharacters. Use the one-click installer.");
   }
-  if (options.check) {
-    console.log(JSON.stringify({
-      ok: true, name: "codey", version: prepared.manifest.codey.version,
-      platform: "linux-x64", portalOrigin: prepared.setup.portalOrigin,
-      releaseId: prepared.manifest.releaseId, serviceChanges: false,
-    }));
-    return;
-  }
-  if (options.expectedComputer !== os.hostname()) {
+  if (!options.check && options.expectedComputer !== os.hostname()) {
     throw new Error("Setup requires --expected-computer matching this machine's exact hostname.");
   }
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codey-npm-setup-"));
-  try {
-    const checksums = [];
-    for (const [name, document] of [["manifest.json", prepared.manifest], ["setup.json", prepared.setup]]) {
-      const bytes = JSON.stringify(document, null, 2) + "\n";
-      await writeFile(path.join(directory, name), bytes, { mode: 0o600 });
-      checksums.push(`${digest(bytes)}  ${name}`);
-    }
-    await writeFile(path.join(directory, "SHA256SUMS"), checksums.join("\n") + "\n", { mode: 0o600 });
-    const child = spawnProcess("bash", [path.join(prepared.root, "onboarding/scripts/install.sh"),
-      "--expected-computer", options.expectedComputer, ...(options.replaceExisting ? ["--replace-existing"] : [])], {
-      stdio: "inherit", shell: false,
-      env: { ...process.env, CODEY_INSTALLED_PACKAGE: prepared.root,
-        CODEY_SETUP_ASSETS: directory, CODEY_SETUP_NODE: process.execPath },
-    });
-    const interrupt = () => child.kill("SIGINT");
-    const terminate = () => child.kill("SIGTERM");
-    process.on("SIGINT", interrupt);
-    process.on("SIGTERM", terminate);
-    try {
-      process.exitCode = await new Promise((resolve, reject) => {
-        child.once("error", reject);
-        child.once("exit", (code, signal) => resolve(code ?? (signal === "SIGINT" ? 130 : 143)));
-      });
-    } finally {
-      process.off("SIGINT", interrupt);
-      process.off("SIGTERM", terminate);
-    }
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  const skill = path.join(prepared.root, "onboarding");
+  const installer = createInstaller ? await createInstaller(skill, { home, prepared }) :
+    new (await import(pathToFileURL(path.join(skill, "scripts/install-machine.mjs")).href)).Installer(skill, { home, prepared });
+  return installer.apply({ check: Boolean(options.check), apply: !options.check,
+    "network-approved": !options.check, "expected-computer": options.expectedComputer,
+    "replace-existing": Boolean(options.replaceExisting) });
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.umask(0o077);
+  try { await runInstall(fileURLToPath(new URL("../", import.meta.url)), process.argv.slice(2)); }
+  catch (error) { console.error(error.message); process.exitCode = 1; }
 }

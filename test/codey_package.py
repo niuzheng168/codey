@@ -89,14 +89,11 @@ class CodeyPackageTests(unittest.TestCase):
         for name in (
             "dist-server/server/index.js", "dist/index.html", "gateway/main.js", "pages/index.html",
             "lib/codex-sdk/index.js",
-            "onboarding/scripts/install.sh", "onboarding/scripts/registration.mjs",
-            "onboarding/templates/a100-models.json", "onboarding/templates/codex-config.toml",
-            "onboarding/scripts/install-devtunnel-health.sh", "onboarding/scripts/linux-devtunnel-health.mjs",
-            "onboarding/scripts/linux-preflight.sh", "onboarding/scripts/windows-runtime.mjs",
         ):
             file = self.runtime / name
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_text("fixture only\n")
+        package.copy_onboarding(ROOT, self.runtime)
         self.cloud = {"version": "1.37.2", "commit": "c" * 40}
         self.copilot = {"version": "2.5.3", "commit": "d" * 40}
         self.release_source = {
@@ -176,12 +173,34 @@ class CodeyPackageTests(unittest.TestCase):
         self.assertEqual([file.name for file in (prefix / "bin").iterdir()], ["codey"])
         output = subprocess.check_output([str(prefix / "bin/codey"), "--version"], text=True)
         self.assertEqual(output.strip(), f"codey {self.version}")
-        help_text = subprocess.check_output([str(prefix / "bin/codey"), "setup", "--help"], text=True)
-        self.assertIn("--check", help_text)
+        help_text = subprocess.check_output([str(prefix / "bin/codey"), "guard", "--help"], text=True)
+        self.assertIn("--timeout", help_text)
+        self.assertIn("supervisors", help_text)
+        removed = subprocess.run([str(prefix / "bin/codey"), "setup", "--help"], capture_output=True, text=True)
+        self.assertEqual(removed.returncode, 1)
+        self.assertIn("Unknown command: setup", removed.stderr)
+
+    def test_npm_onboarding_contains_cli_reference_and_importable_shared_setup(self):
+        reference = "references/codey-cli.md"
+        expected = (ROOT / "skills/config-new-codey-machine" / reference).read_bytes()
+        with tarfile.open(self.file) as archive:
+            self.assertEqual(archive.extractfile("package/onboarding/" + reference).read(), expected)
+        entry = self.runtime / "onboarding/scripts/install-machine.mjs"
+        result = subprocess.run([
+            str(self.node / "bin/node"), "--input-type=module", "-e",
+            "import {pathToFileURL} from 'node:url'; "
+            "const entry=process.argv[1]; process.argv[1]='onboarding-import-fixture'; "
+            "const {Installer}=await import(pathToFileURL(entry).href); "
+            "if(typeof Installer!=='function')process.exit(1);", str(entry),
+        ], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
 
     def test_missing_modules_nested_app_packages_archives_and_traversal_are_rejected(self):
         for transform in (
             lambda files: files.pop("package/gateway/main.js"),
+            lambda files: files.pop("package/lib/workspace.mjs"),
+            lambda files: files.pop("package/lib/install.mjs"),
             lambda files: files.update({"package/cloudcli/package.json": b"{}"}),
             lambda files: files.update({"package/copilot-api.tar.gz": b"old split package"}),
             lambda files: files.update({"package/node_modules/@jeffreycao/copilot-api/index.js": b""}),
@@ -305,7 +324,7 @@ class CodeyPackageTests(unittest.TestCase):
         with zipfile.ZipFile(file) as archive:
             archive.extractall(extracted)
         skill = extracted / "config-new-codey-machine"
-        for relative in ("SKILL.md", "agents/openai.yaml"):
+        for relative in ("SKILL.md", "agents/openai.yaml", "references/codey-cli.md"):
             self.assertEqual(
                 (skill / relative).read_bytes(),
                 (ROOT / "skills/config-new-codey-machine" / relative).read_bytes(),
@@ -333,8 +352,8 @@ class CodeyPackageTests(unittest.TestCase):
             "PATH": str(stubs) + os.pathsep + os.environ["PATH"],
             "npm_config_cache": str(home / ".npm"),
         }, check=True, capture_output=True, text=True, timeout=60)
-        self.assertIn('"serviceChanges":false', result.stdout)
-        self.assertTrue((prefix / "lib/node_modules/codey/bin/codey.mjs").is_file())
+        self.assertIn("Read-only check", result.stdout)
+        self.assertFalse(prefix.exists())
         self.assertFalse((home / ".config/codey-machine").exists())
         self.assertFalse((home / ".codex").exists())
 

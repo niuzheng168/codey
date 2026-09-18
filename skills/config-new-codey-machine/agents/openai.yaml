@@ -1,4 +1,4 @@
 interface:
-  display_name: "Codey 节点安装与命令行"
-  short_description: "跨平台安装 Codey、DevTunnel 与节点证书，说明命令行用法；正常流程无 Python、无升级器"
-  default_prompt: "使用 $config-new-codey-machine 核对完整发行包、目标机器和依赖，确认计划后安装；保留 TLS/SSO，不安装或运行升级器。"
+  display_name: "Codey 安装与日常操作"
+  short_description: "跨平台安装 Codey，并用 CLI 登录、启停、诊断、备份恢复和本地包更新；保留 TLS/SSO"
+  default_prompt: "使用 $config-new-codey-machine 核对目标机器与操作范围，通过平台脚本安装、用 codey guard 及其他 CLI 管理节点；保护凭据，不自动注册 Portal 或安装常驻更新器。"

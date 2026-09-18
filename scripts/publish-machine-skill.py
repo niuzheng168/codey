@@ -15,7 +15,7 @@ import tempfile
 import uuid
 import zipfile
 from urllib.parse import urlsplit
-from codey_package import MACHINE_SKILL_FILES, RUNTIME_PLATFORMS, inspect_npm_package, release_source
+from codey_package import MACHINE_SKILL_FILES, NPM_ONBOARDING_FILES, RUNTIME_PLATFORMS, inspect_npm_package, release_source
 
 MARKER = b'{"schema":1,"kind":"codey-machine-skill-store"}\n'
 RELEASE = re.compile(r"machine-[a-f0-9]{16}")
@@ -133,14 +133,9 @@ def inspect_package(file):
                     release_source.verify_package_source(build, manifest["releaseSource"])
                 try:
                     bundled_setup = json.load(npm.extractfile("package/onboarding/setup.json"))
-                    for required in ["package/lib/setup.mjs", "package/onboarding/scripts/install.sh",
-                                     "package/onboarding/scripts/registration.mjs",
-                                     "package/onboarding/scripts/install-devtunnel-health.sh",
-                                     "package/onboarding/scripts/linux-devtunnel-health.mjs",
-                                     "package/onboarding/scripts/linux-preflight.sh",
-                                     "package/onboarding/scripts/windows-runtime.mjs",
-                                     "package/onboarding/templates/a100-models.json",
-                                     "package/onboarding/templates/codex-config.toml"]:
+                    for required in ["package/lib/install.mjs", *[
+                        "package/onboarding/" + name for name in NPM_ONBOARDING_FILES
+                    ]]:
                         if not npm.getmember(required).isfile():
                             raise KeyError(required)
                 except (KeyError, TypeError, ValueError, AttributeError) as error:

@@ -96,23 +96,43 @@ test("native DevTunnel JSON parsing accepts the CLI banner and fails without dis
   }
 });
 
-test("the real Linux installer export block writes and validates the private file before reporting success", {
+test("the shared Linux registration command verifies auth, writes a private JSON, and never auto-registers with Portal", {
   skip: process.platform !== "linux",
 }, async t => {
   const f = await registrationFixture(t);
-  const script = await readFile(path.join(root, "skills/config-new-codey-machine/scripts/install.sh"), "utf8");
-  const start = script.indexOf('OUTPUT="$HOME_DIR/codey-machine-registration.json"');
-  const end = script.indexOf("\nNODE\n", start) + "\nNODE\n".length;
-  assert.ok(start > 0 && end > start);
-  for (const [name, value] of [
-    ["setup.json", f.setup], ["identity.json", f.identity],
-    ["tunnel.json", f.coordinates], ["connect-token.json", { token: f.token }],
-  ]) await writeFile(path.join(f.home, name), JSON.stringify(value));
-  await run("bash", ["-euc", script.slice(start, end)], { env: {
-    ...process.env, NODE: process.execPath, ROOT: path.join(root, "skills/config-new-codey-machine"),
-    ASSETS: f.home, HOME_DIR: f.home, IDENTITY: path.join(f.home, "identity.json"), CONFIG_ROOT: f.home,
-    TOKEN_FILE: path.join(f.home, "connect-token.json"), CERT: path.join(f.home, "cert.pem"),
-  } });
+  for (const [name, value] of [["setup.json", f.setup], ["identity.json", f.identity],
+    ["tunnel.json", { ...f.coordinates, ports: [3001, 8443].map(portNumber => ({ portNumber, protocol: "https" })) }]]) {
+    await writeFile(path.join(f.home, name), JSON.stringify(value), { mode: 0o600 });
+  }
+  const tunnel = path.join(f.home, "devtunnel");
+  await writeFile(tunnel, `#!/bin/sh\nprintf '%s\\n' '{"token":"${f.token}"}'\n`, { mode: 0o700 });
+  const config = { schema: 2, kind: "codey-linux-oneclick", layout: "npm-codey-package", platform: "linux-x64",
+    ownerHome: f.home, computer: "fixture-machine", identityFile: path.join(f.home, "identity.json"),
+    setupFile: path.join(f.home, "setup.json"), tunnelFile: path.join(f.home, "tunnel.json"),
+    certificate: path.join(f.home, "cert.pem"), serverName: f.identity.nodeId + ".nodes.codey.internal",
+    modelKey: "fixture-model-key", devtunnelExe: tunnel };
+  const file = path.join(f.home, "runtime.json"), preload = path.join(f.home, "local-only.cjs");
+  await writeFile(file, JSON.stringify(config), { mode: 0o600 });
+  await writeFile(preload, `
+const {EventEmitter} = require("node:events");
+const local = (options, callback) => {
+  if (options.hostname !== "127.0.0.1" || options.method === "POST") throw new Error("Unexpected remote registration request");
+  const req = new EventEmitter(); req.setTimeout = () => req;
+  req.end = () => {
+    const response = new EventEmitter();
+    const auth = options.headers?.authorization || options.headers?.["x-codey-workspace-assertion"];
+    response.statusCode = auth && !process.env.CODEY_TEST_AUTH_FAIL ? 200 : 401;
+    callback(response); process.nextTick(() => { response.emit("data", Buffer.from('{"data":[]}')); response.emit("end"); });
+  }; return req;
+};
+require("node:http").request = local; require("node:https").request = local;
+`);
+  const helper = path.join(root, "skills/config-new-codey-machine/scripts/windows-runtime.mjs");
+  const env = { ...process.env, NODE_OPTIONS: `--require=${preload}` };
+  await run(process.execPath, [helper, "registration", file], { env });
   const output = path.join(f.home, REGISTRATION_FILE);
   assert.equal((await verifyRegistrationFile(output, f.setup)).nodeId, f.identity.nodeId);
+  const original = await readFile(output);
+  await assert.rejects(run(process.execPath, [helper, "registration", file], { env: { ...env, CODEY_TEST_AUTH_FAIL: "1" } }));
+  assert.deepEqual(await readFile(output), original, "Failed auth must not overwrite the existing registration");
 });

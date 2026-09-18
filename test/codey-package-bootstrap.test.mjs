@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { installedSetup, runSetup, setupOptions, validateSetupConfig } from "../packages/codey/lib/setup.mjs";
+import { installedSetup, runInstall, installOptions, validateSetupConfig } from "../packages/codey/lib/install.mjs";
 
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -35,7 +35,10 @@ async function fixture(t) {
   const entry = "// Only a setup-check fixture; never start a real service.\n";
   for (const name of [
     "dist-server/server/index.js", "gateway/main.js",
-    "onboarding/scripts/install.sh", "onboarding/scripts/registration.mjs",
+    "onboarding/scripts/install-machine.mjs", "onboarding/scripts/machine-common.mjs", "onboarding/scripts/machine-package.mjs",
+    "onboarding/scripts/machine-resources.mjs", "onboarding/scripts/platform-linux.mjs", "onboarding/scripts/platform-macos.mjs",
+    "onboarding/scripts/platform-windows.mjs", "onboarding/scripts/platform-unix.mjs", "onboarding/scripts/macos-service.mjs",
+    "onboarding/dependencies.json", "onboarding/scripts/registration.mjs",
     "onboarding/templates/a100-models.json", "onboarding/templates/codex-config.toml",
     "onboarding/scripts/install-devtunnel-health.sh", "onboarding/scripts/linux-devtunnel-health.mjs",
     "onboarding/scripts/linux-preflight.sh", "onboarding/scripts/windows-runtime.mjs",
@@ -54,12 +57,12 @@ async function fixture(t) {
   return { directory, pkg, home, build };
 }
 
-test("setup options and configuration allow public deployment metadata only", () => {
-  assert.deepEqual(setupOptions(["--check"]), { check: true });
-  assert.deepEqual(setupOptions(["--expected-computer", "my-linux", "--replace-existing"]),
+test("private installation options and configuration allow public deployment metadata only", () => {
+  assert.deepEqual(installOptions(["--check"]), { check: true });
+  assert.deepEqual(installOptions(["--expected-computer", "my-linux", "--replace-existing"]),
     { expectedComputer: "my-linux", replaceExisting: true });
   for (const args of [["--port", "4141"], ["--config"], ["--check", "--check"], ["--config", "a", "--config", "b"]]) {
-    assert.throws(() => setupOptions(args));
+    assert.throws(() => installOptions(args));
   }
   assert.deepEqual(validateSetupConfig(config), config);
   assert.deepEqual(validateSetupConfig({ ...config, updater: { protocol: 1, releasePublicKey: publicKey } }), config,
@@ -109,27 +112,47 @@ test("missing baked setup can use an explicit public config; missing or changed 
   await assert.rejects(installedSetup(f.pkg, explicit), /locked Codey/);
 });
 
-test("setup passes temporary metadata and the exact npm root to Bash, then removes metadata", {
+test("the private npm bridge calls the common Node workflow with the installed root and no temporary metadata or Bash", {
   skip: process.platform !== "linux",
 }, async t => {
   const f = await fixture(t);
   let captured;
-  const previousExitCode = process.exitCode;
-  t.after(() => { process.exitCode = previousExitCode; });
-  await runSetup(f.pkg, ["--expected-computer", os.hostname(), "--replace-existing"], { home: f.home, spawnProcess(command, args, options) {
-    captured = { command, args, options };
-    const child = new EventEmitter();
-    child.kill = () => true;
-    setImmediate(() => child.emit("exit", 0));
-    return child;
-  } });
-  assert.equal(captured.command, "bash");
-  assert.deepEqual(captured.args, [path.join(f.pkg, "onboarding/scripts/install.sh"),
-    "--expected-computer", os.hostname(), "--replace-existing"]);
-  assert.equal(captured.options.env.CODEY_INSTALLED_PACKAGE, f.pkg);
-  assert.equal(captured.options.env.CODEY_SETUP_NODE, process.execPath);
-  await assert.rejects(stat(captured.options.env.CODEY_SETUP_ASSETS), { code: "ENOENT" });
-  assert.equal(process.exitCode, 0);
+  const createInstaller = async (skill, context) => ({ apply: async options => { captured = { skill, context, options }; } });
+  await runInstall(f.pkg, ["--expected-computer", os.hostname(), "--replace-existing"], { home: f.home, createInstaller });
+  assert.equal(captured.skill, path.join(f.pkg, "onboarding"));
+  assert.equal(captured.context.prepared.root, f.pkg);
+  assert.deepEqual(captured.options, { check: false, apply: true, "network-approved": true,
+    "expected-computer": os.hostname(), "replace-existing": true });
+  await runInstall(f.pkg, ["--check"], { home: f.home, createInstaller });
+  assert.equal(captured.options.check, true);
+  assert.equal(captured.options.apply, false);
+});
+
+test("the bootstrap's private module runs from another cwd and never requires a public setup command", {
+  skip: process.platform !== "linux",
+}, async t => {
+  const f = await fixture(t);
+  await writeFile(path.join(f.pkg, "onboarding/scripts/install-machine.mjs"), `
+export class Installer {
+  constructor(skill, context) { this.skill = skill; this.context = context; }
+  apply(options) { console.log(JSON.stringify({skill:this.skill,root:this.context.prepared.root,options})); }
+}
+`);
+  for (const args of [["--check"], ["--expected-computer", os.hostname(), "--replace-existing"]]) {
+    const result = await exec(process.execPath, [path.join(f.pkg, "lib/install.mjs"), ...args],
+      { cwd: f.directory, env: { ...process.env, HOME: f.home } });
+    const value = JSON.parse(result.stdout);
+    assert.equal(value.root, f.pkg);
+    assert.equal(value.skill, path.join(f.pkg, "onboarding"));
+    assert.equal(value.options.check, args.includes("--check"));
+    assert.equal(value.options.apply, !args.includes("--check"));
+  }
+  await assert.rejects(exec(process.execPath, [path.join(f.pkg, "lib/install.mjs")], {
+    cwd: f.directory, env: { ...process.env, HOME: f.home },
+  }), error => error.code === 1 && /expected-computer/.test(error.stderr));
+  await assert.rejects(exec(process.execPath, [path.join(f.pkg, "bin/codey.mjs"), "setup", "--check"], {
+    cwd: f.directory, env: { ...process.env, HOME: f.home },
+  }), error => error.code === 1 && /Unknown command: setup/.test(error.stderr));
 });
 
 test("Linux setup requires the exact approved computer before creating metadata or launching deployment", {
@@ -137,8 +160,8 @@ test("Linux setup requires the exact approved computer before creating metadata 
 }, async t => {
   const f = await fixture(t);
   for (const args of [[], ["--expected-computer", "not-this-machine"]]) {
-    await assert.rejects(runSetup(f.pkg, args, { home: f.home,
-      spawnProcess() { assert.fail("No deployment before host confirmation"); },
+    await assert.rejects(runInstall(f.pkg, args, { home: f.home,
+      createInstaller() { assert.fail("No deployment before host confirmation"); },
     }), /expected-computer/);
   }
 });
@@ -147,17 +170,17 @@ test("setup refuses an unmanaged prefix before launching the deployment script",
   skip: process.platform !== "linux",
 }, async t => {
   const f = await fixture(t);
-  await assert.rejects(runSetup(f.pkg, [], {
+  await assert.rejects(runInstall(f.pkg, [], {
     home: f.directory,
-    spawnProcess() { throw new Error("Must not reach deployment"); },
+    createInstaller() { throw new Error("Must not reach deployment"); },
   }), /supported HOME npm prefix/);
 });
 
 test("unsupported platforms reject Linux setup before launching any process", {
   skip: process.platform === "linux",
 }, async () => {
-  await assert.rejects(runSetup(root, ["--check"], {
-    spawnProcess() { assert.fail("Must not launch a deployment on this platform"); },
+  await assert.rejects(runInstall(root, ["--check"], {
+    createInstaller() { assert.fail("Must not launch a deployment on this platform"); },
   }), /Managed service setup supports Linux x64 only/);
 });
 
@@ -198,17 +221,17 @@ test("the npm one-click installer supports a local tarball and HTTPS URL without
     const result = await exec("bash", [path.join(root, "scripts/linux/install-codey.sh"),
       "--package", spec, "--node-dir", path.dirname(path.dirname(process.execPath)),
       "--prefix", prefix, "--check"], { env, timeout: 60000, maxBuffer: 2 * 1024 * 1024 });
-    assert.match(result.stdout, /"serviceChanges":false/);
-    const installed = path.join(prefix, "lib/node_modules/codey");
-    assert.equal((await installedSetup(installed)).setup.portalOrigin, config.portalOrigin);
+    assert.match(result.stdout, /Read-only check/);
+    await assert.rejects(stat(prefix), { code: "ENOENT" });
     await assert.rejects(stat(path.join(f.home, ".config/codey-machine")), { code: "ENOENT" });
     await assert.rejects(stat(path.join(f.home, ".codex")), { code: "ENOENT" });
     for (const name of [".profile", ".bashrc", ".bash_profile", ".bash_login"]) {
       await assert.rejects(stat(path.join(f.home, name)), { code: "ENOENT" });
     }
+    await mkdir(prefix, { recursive: true });
     await assert.rejects(exec("bash", [path.join(root, "scripts/linux/install-codey.sh"),
       "--package", spec, "--node-dir", path.dirname(path.dirname(process.execPath)),
       "--prefix", prefix, "--check"], { env }), /Refusing to overwrite/);
   }
-  assert.ok(requests > 0, "npm must fetch the HTTPS artifact itself");
+  assert.equal(requests, 0, "Read-only checks must never contact the HTTPS artifact server");
 });

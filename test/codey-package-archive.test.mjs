@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { inspectPackageArchive } from "../packages/codey/lib/package-archive.mjs";
@@ -13,12 +13,23 @@ test("archive inspection validates the local shared package without extracting o
   assert.equal(artifact.pkg.version, "2.0.0");
   assert.equal(artifact.sha256, await fileHash(f.archive));
   assert.ok(artifact.files.has("lib/package-archive.mjs"));
+  assert.ok(artifact.files.has("lib/workspace.mjs"));
   assert.equal(artifact.files.has("lib/update.mjs"), false);
   assert.deepEqual([...await treeFiles(f.home)].map(([name]) => name), before);
   await assert.rejects(inspectPackageArchive(f.archive, "f".repeat(64)), /SHA-256 mismatch/);
   await writeFile(path.join(f.next, "gateway/main.js"), "tampered");
   await packFixture(f.next, f.archive);
   await assert.rejects(inspectPackageArchive(f.archive), /fingerprints/);
+});
+
+test("missing private CloudCLI/installation entrypoints are rejected before installation or update", async t => {
+  for (const name of ["lib/workspace.mjs", "lib/install.mjs"]) {
+    const f = await updateFixture(t);
+    await rm(path.join(f.next, name));
+    await fingerprint(f.next);
+    await packFixture(f.next, f.archive);
+    await assert.rejects(inspectPackageArchive(f.archive), error => error.message.includes(`missing ${name}`));
+  }
 });
 
 test("unsafe tar entries, duplicate names, embedded runtimes and traversal are rejected before npm", async t => {
@@ -64,7 +75,7 @@ test("unexpected global CLI aliases and application install hooks are refused be
   for (const change of [
     { bin: { ...original.bin, codex: "bin/codex.mjs" } },
     { scripts: { install: "node onboarding/install-tools.mjs" } },
-    { scripts: { postinstall: "codey setup" } },
+    { scripts: { postinstall: "codey guard" } },
   ]) {
     await jsonFile(file, { ...original, ...change });
     await fingerprint(f.next);

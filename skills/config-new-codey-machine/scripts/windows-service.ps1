@@ -20,6 +20,7 @@ $helpers = @($PSCommandPath, (Join-Path $PSScriptRoot 'windows-common.ps1'),
     (Join-Path $PSScriptRoot 'windows-process.cs'), $config.helperPath)
 if ($config.PSObject.Properties['taskHostExe']) { $helpers += $config.taskHostExe }
 if ($config.helperHashes.PSObject.Properties['registration.mjs']) { $helpers += (Join-Path $PSScriptRoot 'registration.mjs') }
+if ($config.helperHashes.PSObject.Properties['machine-common.mjs']) { $helpers += (Join-Path $PSScriptRoot 'machine-common.mjs') }
 foreach ($file in $helpers) {
     $null = Assert-CodeyPath $file $config.runtimeRoot
     $expected = $config.helperHashes.PSObject.Properties[[IO.Path]::GetFileName($file)]

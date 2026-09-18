@@ -202,7 +202,7 @@ export class MachineSetup {
         ...(runtimeInstaller ? { sharedSkillBytes: packageInfo.size,
           runtimePlatforms: manifest.runtimePlatforms ?? ["linux-x64", "windows-x64"],
           managedInstallPlatforms: manifest.managedInstallPlatforms ?? ["linux-x64"] } : {}),
-        ...(npmPackage ? { npmFile: npmPackage.file, entrypoint: "codey setup" } : {}),
+        ...(npmPackage ? { npmFile: npmPackage.file, entrypoint: installer ? `bash ${installer.file}` : definition.entrypoint } : {}),
         node: manifest.node, cloudcli: manifest.cloudcli.version, copilotApi: manifest.copilotApi.version,
         ...(manifest.codey ? { codey: manifest.codey.version } : {}),
       };

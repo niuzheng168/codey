@@ -70,25 +70,22 @@ test("the identical shared artifact installs, validates native modules and start
     reuseArgs.push("--reuse-from", donor);
   }
   const install = await exec(process.execPath, [installer, "--package", file, "--sha256", hash,
-    "--prefix", prefix, "--check", ...reuseArgs], {
+    "--prefix", prefix, "--no-launcher", ...reuseArgs], {
     env, timeout: reuseArgs.length ? 600000 : 240000, maxBuffer: 8 * 1024 * 1024,
   });
   assert.match(install.stdout, /"pathChanged":false,"serviceChanges":false/);
   if (reuseArgs.length) assert.match(install.stdout, /"dependencyMode":"reuse-installed-offline"/);
   const root = npmPackageRoot(prefix);
   const cli = path.join(root, "bin/codey.mjs");
-  const info = JSON.parse((await exec(process.execPath, [cli, "doctor", "--json"], { env, timeout: 20000 })).stdout);
+  const info = JSON.parse((await exec(process.execPath, [cli, "doctor", "--runtime-only", "--json"], { env, timeout: 20000 })).stdout);
   assert.equal(info.ok, true);
   assert.equal(info.platform, windows ? "windows-x64" : "linux-x64");
   assert.ok(knownRuntimePlatforms(info.runtimePlatforms));
   assert.ok(info.runtimePlatforms.includes(info.platform));
   assert.deepEqual(info.native, { sqlite: true, bcrypt: true, ripgrep: true, pty: true, codexSdk: true });
   assert.equal(info.lockSha256, createHash("sha256").update(await readFile(path.join(root, "npm-shrinkwrap.json"))).digest("hex"));
-  if (!windows) assert.equal((await stat(root)).mode & 0o022, 0, "The runtime must stay eligible for owner-only local updates");
-  const updateCheck = JSON.parse((await exec(process.execPath, [cli, "update", file, "--check", "--sha256", hash],
-    { env, timeout: 20000 })).stdout);
-  assert.equal(updateCheck.unchanged, true);
-  assert.equal(updateCheck.serviceChanges, false);
+  if (!windows) assert.equal((await stat(root)).mode & 0o022, 0, "The runtime must stay owner-private");
+  await assert.rejects(exec(process.execPath, [cli, "update"], { env, timeout: 20000 }), /Usage: codey update/);
   assert.deepEqual((await readdir(path.dirname(root))).filter(name => !name.startsWith(".")), ["codey"]);
   await assert.rejects(stat(path.join(home, ".local/bin")), { code: "ENOENT" });
   await assert.rejects(stat(path.join(home, ".codex")), { code: "ENOENT" });

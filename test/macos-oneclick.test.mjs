@@ -12,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Installer, installOptions, macPortPreflight, modelConfiguration, readPackage } from "../skills/config-new-codey-machine/scripts/install-macos.mjs";
 import { COMPONENTS, agentDefinition, checkedPath, command, digest, label, plist, readPrivate, runtime, supervise, writePrivate } from "../skills/config-new-codey-machine/scripts/macos-service.mjs";
 import { registrationDocument, writeRegistration } from "../skills/config-new-codey-machine/scripts/registration.mjs";
+import { machineFixture as fixture } from "./helpers/machine-installer-fixture.mjs";
 import { treeFiles } from "./codey-update-fixture.mjs";
 
 const execute = promisify(execFile);
@@ -21,120 +22,6 @@ const nativeTest = (name, fn) => test(name, { skip: process.platform === "win32"
 const jsonFile = async file => JSON.parse(await readFile(file, "utf8"));
 const target = "macos-arm64", computer = "fixture-mac";
 
-async function fixture(t) {
-  const temp = await realpath(await mkdtemp(path.join(os.tmpdir(), "codey-mac-node-")));
-  t.after(() => rm(temp, { recursive: true, force: true }));
-  const home = path.join(temp, "owner's home 中文"), skill = path.join(temp, "skill"), assets = path.join(skill, "assets");
-  await mkdir(home, { mode: 0o700 });
-  await cp(source, skill, { recursive: true });
-  await mkdir(assets, { recursive: true });
-  const pins = await jsonFile(path.join(skill, "dependencies.macos.json"));
-  const nodeArchive = Buffer.from("verified fixture Node archive"), tunnelBinary = Buffer.from("fixture native tunnel");
-  pins.platforms[target].node.sha256 = hash(nodeArchive);
-  pins.platforms[target].devTunnel.sha256 = hash(tunnelBinary);
-  await writePrivate(path.join(skill, "dependencies.macos.json"), pins);
-  const build = Buffer.from('{"name":"codey","version":"0.1.16"}\n'), lock = Buffer.from('{"name":"codey"}\n');
-  const tgz = Buffer.from("fixture shared application");
-  const setup = { schema: 1, portalOrigin: "https://codey.example.test", releaseId: "machine-" + "a".repeat(16),
-    platform: "linux-x64", network: { mode: "devtunnel" }, tunnelAuthProvider: "github" };
-  const manifest = { schema: 2, name: "codey", platform: "linux-x64", releaseId: setup.releaseId,
-    runtimePlatforms: ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"],
-    bundledRuntimes: ["cloudcli", "copilot-api"], dependencyMode: "npm-codey-package",
-    codey: { version: "0.1.16", entrySha256: hash(build), lockSha256: hash(lock) },
-    artifacts: [{ file: "codey-0.1.16.tgz", size: tgz.length, sha256: hash(tgz) }] };
-  await writePrivate(path.join(assets, "manifest.json"), manifest);
-  await writePrivate(path.join(assets, "setup.json"), setup);
-  await writeFile(path.join(assets, "codey-0.1.16.tgz"), tgz);
-  const refreshSums = async () => {
-    const rows = [];
-    for (const name of ["codey-0.1.16.tgz", "manifest.json", "setup.json"]) rows.push(`${await digest(path.join(assets, name))}  ${name}`);
-    await writeFile(path.join(assets, "SHA256SUMS"), rows.join("\n") + "\n");
-  };
-  await refreshSums();
-  const f = { temp, home, skill, assets, setup, manifest, pins, build, lock, refreshSums, calls: [], answer: "CODEY_CODEX_OK" };
-  const createFile = async (file, bytes) => {
-    await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-    await writeFile(file, bytes, { mode: 0o700 });
-  };
-  const runner = async (file, args, options = {}) => {
-    f.calls.push({ file, args, options });
-    const ok = stdout => ({ code: 0, stdout: stdout || "", stderr: "" });
-    if (file === "/usr/sbin/sysctl") return ok("0");
-    if (file === "/usr/bin/pgrep") return { ...ok(), code: 1 };
-    if (file === "/usr/bin/openssl") {
-      if (args[0] === "version") return ok("fixture");
-      const result = await execute(file, args);
-      return ok(result.stdout);
-    }
-    if (file === "/usr/bin/curl") {
-      const url = args.at(-1), destination = args[args.indexOf("--output") + 1];
-      await createFile(destination, url === pins.platforms[target].node.url ? nodeArchive :
-        url === pins.platforms[target].devTunnel.url ? tunnelBinary : Buffer.from("# fixture https://releases.openai.com/codex\n"));
-      return ok();
-    }
-    if (file === "/usr/bin/tar") {
-      await createFile(path.join(args[args.indexOf("-C") + 1], `node-v${pins.nodeVersion}-darwin-arm64/bin/node`), "fixture Node");
-      return ok();
-    }
-    if (file === "/usr/bin/plutil") {
-      const config = await readPrivate(f.installer.file);
-      const component = args.at(-1).split(".").at(-2);
-      assert.match(await readFile(args.at(-1), "utf8"), /<plist version="1.0">[\s\S]*<\/plist>/);
-      return ok(JSON.stringify(agentDefinition(config, f.installer.file, component)));
-    }
-    if (file === "/bin/launchctl") {
-      if (args[0] === "print-disabled") return ok("{}");
-      if (args[0] === "print" && args[1] !== f.installer.domain) {
-        return ok(`path = ${path.join(f.installer.agents, args[1].split("/").at(-1) + ".plist")}\npid = 1234\n`);
-      }
-      if (args[0] === "bootstrap" && f.failBootstrap && args.at(-1).endsWith("." + f.failBootstrap + ".plist")) {
-        throw new Error("fixture LaunchAgent failure");
-      }
-      return ok();
-    }
-    if (file === "/bin/bash") {
-      await createFile(path.join(options.env.CODEX_INSTALL_DIR, "codex"), "fixture Codex");
-      return ok();
-    }
-    if (args[0] === "--version") return ok(path.basename(file) === "codex" ? "codex-cli fixture\n" : `v${pins.nodeVersion}\n`);
-    if (args[0]?.endsWith("install-runtime.mjs")) {
-      const app = path.join(args[args.indexOf("--prefix") + 1], "lib/node_modules/codey");
-      await createFile(path.join(app, "codey-build.json"), build);
-      await createFile(path.join(app, "npm-shrinkwrap.json"), lock);
-      await createFile(path.join(app, "bin/codey.mjs"), "fixture Codey CLI");
-      return ok();
-    }
-    if (path.basename(file) === "devtunnel") {
-      if (args[0] === "user") return ok(JSON.stringify({ status: "Logged in", provider: "github" }));
-      const id = args[1].split(".")[0];
-      return ok(JSON.stringify({ tunnelId: id, clusterId: "jpe1",
-        ports: [3001, 8443].map(portNumber => ({ portNumber, protocol: "https" })) }));
-    }
-    if (args[0]?.endsWith("windows-runtime.mjs")) {
-      if (["verify", "registration"].includes(args[1]) && f.failVerify) throw new Error("fixture TLS/SSO failure");
-      if (args[1] === "registration") {
-        const config = await readPrivate(args[2]), identity = await readPrivate(config.identityFile);
-        const coordinates = { tunnelId: `codey-${config.nodeId}`, clusterId: "jpe1" };
-        const token = ["e30", Buffer.from(JSON.stringify({ ...coordinates, scp: "connect",
-          exp: Math.floor(Date.now() / 1000) + 72000 })).toString("base64url"), "c2ln"].join(".");
-        await writeRegistration(path.join(home, "codey-machine-registration.json"), registrationDocument(
-          { ...setup, platform: target }, identity, coordinates, token, await readFile(config.certificate, "utf8"), computer));
-      }
-      return ok();
-    }
-    if (args[0] === "exec") {
-      await writeFile(args[args.indexOf("--output-last-message") + 1], f.answer);
-      return ok();
-    }
-    if (args[1] === "auth") return ok();
-    assert.fail("Unexpected fixture command: " + path.basename(file));
-  };
-  f.installer = new Installer(skill, { home, platform: "darwin", arch: "arm64", computer, execute: runner,
-    portCheck: async port => ({ port, status: "free" }),
-    diskUsage: async () => ({ bavail: 16 * 1024 ** 3, bsize: 1 }), pause: async () => {} });
-  f.options = { apply: true, "network-approved": true, "expected-computer": computer, "codex-home": path.join(home, ".codex") };
-  return f;
-}
 
 test("Mac CLI distinguishes read-only checks, approved apply and invalid flags", () => {
   assert.deepEqual(installOptions([]), {});
@@ -168,31 +55,53 @@ test("Mac port preflight allows empty ports and exact owner Codey processes with
     });
     assert.deepEqual(free, { port, status: "free" });
     assert.equal(binds, 1);
-    const role = port === 3001 ? "workspace --host 127.0.0.1 --port 3001" :
-      "gateway start --headless --host 127.0.0.1 --port 4141";
-    const calls = [];
-    const owned = await macPortPreflight(port, previous, { uid: 501, bind: async () => assert.fail("Must not bind over Codey"),
-      execute: async (file, args, options) => {
-        calls.push({ file, args });
-        if (file.endsWith("/ps")) assert.equal(options.env.LC_ALL, "en_US.UTF-8");
-        const stdout = file.endsWith("lsof") ? `p123\nu501\nf20\nn127.0.0.1:${port}\nf21\nn[::1]:${port}\n` :
-          args.at(-1) === "uid=" ? "501\n" : args.at(-1) === "comm=" ? previous.nodeExe + "\n" :
-            `${previous.nodeExe} ${previous.codeyBin} ${role}\n`;
-        return { code: 0, stdout, stderr: "" };
-      } });
-    assert.deepEqual(owned, { port, status: "owned-codey", pids: [123] });
-    assert.deepEqual(calls.map(call => call.file), ["/usr/sbin/lsof", "/bin/ps", "/bin/ps", "/bin/ps"]);
+    const entries = port === 3001 ? [path.join(previous.codeyDirectory, "lib/workspace.mjs"),
+      `${previous.codeyBin} workspace --host 127.0.0.1 --port 3001`] :
+      [`${previous.codeyBin} copilot start --host 127.0.0.1 --port 4141`,
+        `${previous.codeyBin} gateway start --headless --host 127.0.0.1 --port 4141`];
+    for (const entry of entries) {
+      const calls = [];
+      const owned = await macPortPreflight(port, previous, { uid: 501, bind: async () => assert.fail("Must not bind over Codey"),
+        execute: async (file, args, options) => {
+          calls.push({ file, args });
+          if (file.endsWith("/ps")) assert.equal(options.env.LC_ALL, "en_US.UTF-8");
+          const stdout = file.endsWith("lsof") ? `p123\nu501\nf20\nn127.0.0.1:${port}\nf21\nn[::1]:${port}\n` :
+            args.at(-1) === "uid=" ? "501\n" : args.at(-1) === "comm=" ? previous.nodeExe + "\n" :
+              `${previous.nodeExe} ${entry}\n`;
+          return { code: 0, stdout, stderr: "" };
+        } });
+      assert.deepEqual(owned, { port, status: "owned-codey", pids: [123] });
+      assert.deepEqual(calls.map(call => call.file), ["/usr/sbin/lsof", "/bin/ps", "/bin/ps", "/bin/ps"]);
+    }
+  }
+});
+
+test("Mac preflight requires the exact private CloudCLI entry, without extra arguments or another script", async () => {
+  const previous = { ownerUid: 501, nodeExe: "/Users/owner/node", codeyDirectory: "/Users/owner/codey",
+    codeyBin: "/Users/owner/codey/bin/codey.mjs" };
+  const worker = path.join(previous.codeyDirectory, "lib/workspace.mjs");
+  for (const command of [
+    `${previous.nodeExe} ${worker} --host 127.0.0.1`,
+    `${previous.nodeExe} ${worker}.other`,
+    `${previous.nodeExe} ${previous.codeyBin} ${worker}`,
+    `${previous.nodeExe} -e '${worker}'`,
+  ]) {
+    await assert.rejects(macPortPreflight(3001, previous, {
+      uid: 501, execute: async (file, args) => ({ code: 0, stderr: "", stdout:
+        file.endsWith("lsof") ? "p123\nu501\nn127.0.0.1:3001\n" :
+          args.at(-1) === "uid=" ? "501" : args.at(-1) === "comm=" ? previous.nodeExe : command }),
+    }), /foreign or unverified/);
   }
 });
 
 test("Mac port preflight rejects unknown owners, wildcard/foreign addresses, spoofed paths and unreadable processes", async () => {
   const previous = { ownerUid: 501, nodeExe: "/Users/owner/node", codeyDirectory: "/Users/owner/codey",
     codeyBin: "/Users/owner/codey/bin/codey.mjs" };
-  const proper = `${previous.nodeExe} ${previous.codeyBin} gateway start --headless --host 127.0.0.1 --port 4141`;
+  const proper = `${previous.nodeExe} ${previous.codeyBin} copilot start --host 127.0.0.1 --port 4141`;
   for (const changed of [
     { previous: null }, { owner: 502 }, { owner: "" }, { address: "*:4141" }, { address: "192.168.1.2:4141" },
     { comm: "/Users/owner/other-node" }, { args: proper + " --eval malicious" },
-    { args: `${previous.nodeExe} /tmp/other.mjs "${previous.codeyBin}" gateway` }, { processCode: 1 },
+    { args: `${previous.nodeExe} /tmp/other.mjs "${previous.codeyBin}" copilot start` }, { processCode: 1 },
     { lsofCode: 2 }, { lsofStderr: "permission denied" },
   ]) {
     await assert.rejects(macPortPreflight(4141, Object.hasOwn(changed, "previous") ? changed.previous : previous, {
@@ -266,7 +175,7 @@ nativeTest("Mac rejects private setup metadata, wrong architecture, unapproved o
   for (const extra of [{ "network-approved": false }, { "expected-computer": "another-mac" }]) {
     await assert.rejects(f.installer.apply({ ...f.options, ...extra }), /Apply requires/);
   }
-  assert.throws(() => new Installer(f.skill, { platform: "linux" }), /native Mac/);
+  assert.throws(() => new Installer(f.skill, { platform: "darwin", arch: "ia32" }), /native platform/);
   await writePrivate(path.join(f.assets, "setup.json"), { ...f.setup, credential: "must-not-ship" });
   await f.refreshSums();
   await assert.rejects(readPackage(f.skill, target), /public setup metadata/);
@@ -320,7 +229,7 @@ nativeTest("same-release Mac rerun retains keys/certificate/session files and do
   assert.deepEqual(await readPrivate(config.identityFile), identity);
   assert.deepEqual(await readPrivate(session), { preserved: "fixture session" });
   assert.ok(!f.calls.some(call => call.file === "/usr/bin/curl" || call.args[0] === "exec" ||
-    call.args[1] === "sdk-probe" || call.args[1] === "auth" || call.args[0] === "bootstrap"));
+    call.args[1] === "sdk-probe" || call.args[1] === "copilot" && call.args[2] === "login" || call.args[0] === "bootstrap"));
   assert.deepEqual(f.calls.filter(call => call.args[0]?.endsWith("windows-runtime.mjs")).map(call => call.args[1]),
     ["registration"], "The export performs the live check; no duplicate standalone verification");
 });

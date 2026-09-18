@@ -51,7 +51,7 @@ test("PowerShell port preflight permits owned Codey and rejects foreign/spoofed 
     if (error.code === "ENOENT" && !process.env.CODEY_TEST_PWSH) { t.skip("PowerShell is not installed on this test host"); return; }
     throw error;
   }
-  assert.match(result.stdout, /WINDOWS_PORT_PREFLIGHT_OK checks=16/);
+  assert.match(result.stdout, /WINDOWS_PORT_PREFLIGHT_OK checks=22/);
 });
 
 test("Windows installer accepts only its exact private HTTPS tunnel", () => {
@@ -119,7 +119,7 @@ test("Windows implementation never invokes WSL, systemd or firewall commands", a
   }
   const installer = await readFile(
     new URL("../skills/config-new-codey-machine/scripts/install.ps1", import.meta.url), "utf8");
-  assert.match(installer, /npm-cli\.js[\s\S]*'install'[\s\S]*--global[\s\S]*--prefix/);
-  assert.match(installer, /npm-codey-package/);
+  assert.match(installer, /install-machine\.mjs/);
+  assert.doesNotMatch(installer, /New-CodeyIdentity|Read-CodeyWindowsPackage|sdk-probe|port.*,.*create/);
   assert.doesNotMatch(installer, /assets[\\/](?:cloudcli|copilot-api)\.zip|Expand-CodeyZip[^]*component\.zip/);
 });

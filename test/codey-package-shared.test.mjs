@@ -56,9 +56,10 @@ test("one runtime manifest and fingerprint are shared by Linux, Windows and both
   assert.equal(reports[0].entrySha256, reports[1].entrySha256);
   assert.equal(reports[0].lockSha256, reports[1].lockSha256);
   assert.equal(reports[1].platform, "windows-x64");
-  assert.equal(reports[1].managedSetupSupported, false, "Runtime portability must not falsely claim Windows systemd setup");
+  assert.ok(reports.every(report => !Object.hasOwn(report, "managedSetupSupported")),
+    "Runtime reports must not advertise the removed public setup command");
   assert.deepEqual(reports.slice(2).map(report => report.platform), ["macos-arm64", "macos-x64"]);
-  assert.ok(reports.slice(2).every(report => report.entrySha256 === reports[0].entrySha256 && !report.managedSetupSupported));
+  assert.ok(reports.slice(2).every(report => report.entrySha256 === reports[0].entrySha256));
   assert.equal(runtimePlatform("win32", "x64"), "windows-x64");
   assert.throws(() => runtimePlatform("win32", "arm64"));
   assert.throws(() => runtimePlatform("darwin", "ia32"));

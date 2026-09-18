@@ -23,13 +23,13 @@ cd codey
 从 `0.1.1` 起，Linux x64 与 Windows x64 消费同一份 npm `.tgz` 和 SHA-256；
 不分别发布 `codey-linux` / `codey-win`。构建固定使用公共 npm 锁文件，
 目标机安装自己的原生依赖。已有 Node/npm 时可运行随包提供的
-`node install-codey.mjs`，并用 `codey doctor` 自检。Linux 的完整
-systemd/DevTunnel 部署仍是独立的 `codey setup` 流程，不会套用到 Windows。
+`node install-codey.mjs`，并用 `codey doctor --runtime-only` 自检。
+完整节点的 DevTunnel、TLS 和原生守护由安装 Skill 的平台脚本配置，运行时 CLI 不包含安装命令。
 源码仍保留为 submodule，构建与安装产物统一为 Codey。
 
 现行共享包也支持 macOS arm64/x64。Codey 整包发行不再按操作系统分开：
 一次发布一份 `.tgz` 和 SHA-256，在目标机校验 Node、原生依赖和身份。
-当前源码已移除 Portal 更新代理与本地更新器；不再提供 `codey update/--update`。
+当前源码已移除 Portal 更新代理与常驻本地更新器；升级只用显式的 `codey update FILE.tgz`，不提供 `--update`。
 Mac 安装和 LaunchAgent worker 改为 Node，正常安装无 Python 前置依赖。
 旧节点需单独评审迁移，不以重跑安装替代升级或恢复；构建端 Python 不属于用户依赖。
 
@@ -37,7 +37,7 @@ Mac 安装和 LaunchAgent worker 改为 Node，正常安装无 Python 前置依�
 npm run codey:build -- --output artifacts/codey-npm
 npm install --global ./artifacts/codey-npm/codey-0.1.1.tgz
 codey --version
-codey start
+codey start --foreground
 ```
 
 **公共 npm 的 `codey` 名称已被其他项目占用**；当前使用本地 `.tgz` 或私有
@@ -55,13 +55,15 @@ Linux 的独立 npm 包和 `install-codey-linux.sh` 入口仍保留，不必解�
 bash scripts/linux/install-codey.sh --package ./codey-0.1.1.tgz --expected-computer "$(hostname)"
 ```
 
-一键脚本先用 npm 在新的私有 prefix 安装，再调用包内的 `codey setup`。
-已通过 npm 安装的机器可执行 `codey setup --check` / `codey setup --expected-computer "实际机名"`，
-不会再次安装或搬动应用目录。`machine:build` 会内置公开的 Portal 配置；
-普通 `codey:build` 还需要加 `--config <公开配置.json>` 指定配置。
+一键脚本先用 npm 在新的私有 prefix 安装，再由包内私有模块调用公共安装流程，不再经过 `codey setup`。
+安装检查使用匹配安装脚本的 `--check`；`machine:build` 会内置公开的 Portal 配置，
+普通 `codey:build` 产物安装时需给安装脚本加 `--config <公开配置.json>`。
 安装 npm 包本身不会启动服务或覆盖模型配置。
 端口空闲或确认来自本用户 Codey 时继续，其他/未知监听导致安装终止，不强杀进程。
 同版本已完成节点只重复验收和导出；新节点覆盖 Codex 配置需批准 `--replace-existing`，保留 auth/sessions。
+
+已安装节点用 `codey guard` 启用并启动全部后台守护；与后台 `codey start` 共用幂等流程。
+`codey restart/stop` 管理整节点，`codey devtunnel start/stop` 仅管理隧道及其守护。
 
 ## Portal 本地检查
 

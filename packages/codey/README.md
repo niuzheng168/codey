@@ -19,7 +19,8 @@ OS service supervision, tunnel-token renewal and private Portal registration:
   The shell only bootstraps Node when missing; installation and LaunchAgent
   workers run in Node, not Python. A GUI owner login is required.
 
-No Portal upgrade agent or local updater is included. Registration requires
+No Portal upgrade agent or persistent local updater is included. Installation only exports
+a private registration JSON; importing it is a separate user action. Registration requires
 only node access credentials, not an updater secret or release-signing key.
 Existing Python/updater-managed nodes need a separate reviewed migration;
 installation must not be used as an upgrade, rollback or recovery mechanism.
@@ -32,7 +33,8 @@ listener aborts installation; no process is killed to free a port. Same-release
 ready nodes retain their active application, identity, TLS, keys and configuration.
 New nodes need `--replace-existing` (Windows: `-ReplaceExisting`) to back up and
 replace existing Codex configuration; close unmanaged Codex processes yourself.
-Linux has one npm → `codey setup` path, without a second staging/switch installer.
+The complete Skill uses one Node workflow and native OS adapters. Linux standalone
+npm setup calls that same workflow directly, without a staging/switch installer.
 Windows `-RepairServices` is removed. All native installers render the same
 `templates/codex-config.toml`, substituting only the local model catalog path.
 
@@ -49,16 +51,17 @@ With Node.js 22.13+ and npm, use the release's adjacent installer and tarball:
 ```sh
 node install-codey.mjs
 codey --version
-codey doctor
-codey auth login --provider copilot
-codey start
+codey doctor --runtime-only
+codey copilot login
+codey start --foreground
 ```
 
 This installs the same checksummed `codey-<version>.tgz` on all four platforms,
 prepares native dependencies and adds a private CLI to the user's PATH. It does
 **not** configure services, DevTunnel, node TLS or Portal registration.
-`--check` still installs and verifies dependencies; it only suppresses CLI/PATH
-changes. Open a new terminal after PATH registration.
+`--check` is read-only: it verifies the archive digest and reports deferred checks
+without npm, downloads or filesystem changes. `--no-launcher` installs/verifies
+dependencies without changing CLI/PATH. Open a new terminal after PATH registration.
 
 Source use requires `--package FILE.tgz --sha256 HASH`. The public npm name
 `codey` belongs to another project: never run `npm install -g codey` against the
@@ -71,25 +74,21 @@ it is not an updater and never switches a running service.
 
 ## Commands
 
-- `codey --help`, `codey --version`: help and application version.
-- `codey doctor [--package-only] [--json]`: verify the application and local
-  native modules. It does not check login, model responses or tunnel access.
-- `codey start [--workspace-port PORT] [--gateway-port PORT]`: run Workspace
-  and the gateway in the foreground. Defaults: loopback ports 3001/4141.
-  Ctrl+C stops both; this does not start DevTunnel or register services.
-- `codey workspace --host 127.0.0.1 --port 3001`: Workspace only.
-- `codey gateway`: gateway only, loopback port 4141.
-- `codey auth login --provider copilot`: authenticate the model gateway.
-- `codey gateway debug --json`, `codey gateway --help`, `codey mcp --help`:
-  gateway diagnostics and command help. Redact diagnostic output before sharing.
-- `codey setup [--config FILE] --check`: check the Linux package/public config.
-- `codey setup [--config FILE] --expected-computer NAME [--replace-existing]`:
-  Linux x64 managed installation or same-release verification, never an update.
+The [CLI reference](../../skills/config-new-codey-machine/references/codey-cli.md)
+groups commands by `codey <command>`, with separate entries for each Copilot and
+DevTunnel subcommand. Each entry includes usage, parameter meanings, aliases,
+defaults, constraints and examples. It ships at `onboarding/references/codey-cli.md`
+in the npm package; parameter details are maintained there rather than duplicated here.
 
-`codey update`, `--update`, tool updates and update recovery are removed.
-There is no unified `codey uninstall` command yet. Stop/remove only resources
-owned by this installation, with explicit confirmation; keep user data,
-credentials, projects, shared tools and cloud resources by default.
+`codey guard` enables and starts all installed native supervisors: CloudCLI/Copilot API,
+DevTunnel host and token renewal, plus tunnel health monitoring on Linux.
+It shares background `codey start`'s idempotent operation, without another daemon.
+`codey start --foreground` runs only CloudCLI and Copilot API; `codey copilot start`
+runs only the API. CloudCLI has no separate public command.
+
+Installation and removal are described in the
+[machine Skill](../../skills/config-new-codey-machine/SKILL.md).
+There is no public `codey setup` or unified `codey uninstall` command.
 
 ## Runtime defaults
 

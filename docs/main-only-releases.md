@@ -73,8 +73,7 @@ python3 scripts/build-codey-package.py \
 
 python3 scripts/build-machine-bundle.py \
   --source-commit "$SHA" --output "artifacts/machine-$SHA" \
-  --portal-origin "$CODEY_PORTAL_ORIGIN" \
-  --updater-public-key-file "$CODEY_RELEASE_PUBLIC_KEY"
+  --portal-origin "$CODEY_PORTAL_ORIGIN"
 ```
 
 Use a new empty output directory. The Skill uses installer sources from the

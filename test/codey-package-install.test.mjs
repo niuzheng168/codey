@@ -9,7 +9,8 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { installedSetup } from "../packages/codey/lib/setup.mjs";
+import { installedSetup } from "../packages/codey/lib/install.mjs";
+import { checkCopilot } from "../packages/codey/scripts/check-copilot.mjs";
 
 const exec = promisify(execFile);
 const artifact = process.env.CODEY_PACKAGE_TGZ;
@@ -53,93 +54,31 @@ test("built npm package installs as Codey and starts both real servers without u
     network: { mode: "devtunnel" }, tunnelAuthProvider: "github",
     updater: { protocol: 1, releasePublicKey: generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }) },
   }));
-  await exec("bash", [fileURLToPath(new URL("../scripts/linux/install-codey.sh", import.meta.url)),
-    "--package", path.resolve(artifact), "--node-dir", path.dirname(path.dirname(process.execPath)),
-    "--prefix", prefix, "--config", publicConfig, "--check"],
-  { env, maxBuffer: 8 * 1024 * 1024, timeout: 240000 });
+  const runtimeInstaller = fileURLToPath(new URL("../scripts/install-codey-runtime.mjs", import.meta.url));
+  const sha = createHash("sha256").update(await readFile(artifact)).digest("hex");
+  const args = [runtimeInstaller, "--package", path.resolve(artifact), "--sha256", sha, "--prefix", prefix];
+  const beforeCheck = await readdir(home);
+  const plan = JSON.parse((await exec(process.execPath, [...args, "--check"], { env })).stdout);
+  assert.equal(plan.fileChanges, false);
+  assert.deepEqual(await readdir(home), beforeCheck);
+  await exec(process.execPath, args, { env, maxBuffer: 8 * 1024 * 1024, timeout: 240000 });
   const installed = path.join(prefix, "lib/node_modules/codey");
   assert.deepEqual((await readdir(path.join(prefix, "lib/node_modules"))).filter(name => !name.startsWith(".")), ["codey"]);
-  assert.deepEqual(await readdir(path.join(prefix, "bin")), ["codey"]);
   const pkg = JSON.parse(await readFile(path.join(installed, "package.json"), "utf8"));
   const build = JSON.parse(await readFile(path.join(installed, "codey-build.json"), "utf8"));
   assert.equal(createHash("sha256").update(await readFile(path.join(installed, "npm-shrinkwrap.json"))).digest("hex"),
     build.lockSha256, "npm must preserve the signed dependency lock after installation");
-  const bin = path.join(prefix, "bin/codey");
+  const bin = path.join(home, ".local/bin/codey");
   assert.equal((await exec(bin, ["--version"], { env })).stdout.trim(), `codey ${pkg.version}`);
-  const listing = JSON.parse((await exec(npm, ["ls", "--global", "--prefix", prefix, "--depth=0", "--json"], { env })).stdout);
-  assert.deepEqual(Object.keys(listing.dependencies), ["codey"]);
-  const setupCheck = JSON.parse((await exec(bin, ["setup", "--config", publicConfig, "--check"], { env })).stdout);
-  assert.equal(setupCheck.serviceChanges, false);
-  assert.equal(setupCheck.version, pkg.version);
-
-  // Exercise the actual npm-mode Bash preflight only. All service/process/network
-  // commands are blocked, and the script is cut before the first service action.
-  const preflightRoot = path.join(root, "preflight");
-  const preflightAssets = path.join(preflightRoot, "assets");
-  await mkdir(preflightAssets, { recursive: true });
-  await mkdir(path.join(preflightRoot, "scripts"));
-  await mkdir(path.join(preflightRoot, "templates"));
   const prepared = await installedSetup(installed, publicConfig);
-  const sums = [];
-  for (const [name, document] of [["manifest.json", prepared.manifest], ["setup.json", prepared.setup]]) {
-    const bytes = JSON.stringify(document) + "\n";
-    await writeFile(path.join(preflightAssets, name), bytes);
-    sums.push(`${createHash("sha256").update(bytes).digest("hex")}  ${name}`);
-  }
-  await writeFile(path.join(preflightAssets, "SHA256SUMS"), sums.join("\n") + "\n");
-  await writeFile(path.join(preflightRoot, "templates/a100-models.json"), "{}");
-  await writeFile(path.join(preflightRoot, "templates/codex-config.toml"),
-    await readFile(path.join(installed, "onboarding/templates/codex-config.toml")));
-  await writeFile(path.join(preflightRoot, "scripts/registration.mjs"),
-    await readFile(path.join(installed, "onboarding/scripts/registration.mjs")));
-  for (const name of ["install-devtunnel-health.sh", "linux-devtunnel-health.mjs", "linux-preflight.sh", "windows-runtime.mjs"]) {
-    await writeFile(path.join(preflightRoot, "scripts", name),
-      await readFile(path.join(installed, "onboarding/scripts", name)));
-  }
-  for (const name of ["systemctl", "loginctl", "curl", "sudo", "npm"]) {
-    const body = name === "sudo"
-      ? '#!/bin/sh\n[ "$*" = "-n true" ] || exit 88\n'
-      : '#!/bin/sh\necho "Unexpected external operation during preflight" >&2\nexit 88\n';
-    await writeFile(path.join(stubs, name), body);
-    await chmod(path.join(stubs, name), 0o700);
-  }
-  const setupScript = await readFile(path.join(installed, "onboarding/scripts/install.sh"), "utf8");
-  const stop = setupScript.indexOf('log 1 "Install and configure private GitHub DevTunnel"');
-  assert.ok(stop > 0);
-  const preflightFile = path.join(preflightRoot, "scripts/preflight.sh");
-  await writeFile(preflightFile, setupScript.slice(0, stop));
-  const entryBefore = await readFile(path.join(installed, "bin/codey.mjs"));
-  await exec("bash", [preflightFile, "--expected-computer", os.hostname()], { env: {
-    ...env, PATH: `${stubs}:${env.PATH}`, CODEY_INSTALLED_PACKAGE: installed,
-    CODEY_SETUP_ASSETS: preflightAssets, CODEY_SETUP_NODE: process.execPath,
-  }, timeout: 20000 });
-  assert.deepEqual(await readFile(path.join(installed, "bin/codey.mjs")), entryBefore);
-  assert.equal(JSON.parse(await readFile(path.join(installed, "package.json"), "utf8")).name, "codey");
-
-  // Exercise only the packaged CLI/PATH helpers in the temporary HOME, not deployment.
-  const helpersEnd = setupScript.indexOf('[[ "$(uname -s)"');
-  assert.ok(helpersEnd > 0);
-  await exec("bash", ["--noprofile", "--norc", "-c",
-    setupScript.slice(0, helpersEnd) + '\nwrite_codey_cli "$HOME" "$1" "$2"\n',
-    "fixture", process.execPath, installed], { env });
-  const newShell = await exec("bash", ["--noprofile", "-ic", "codey --version"], {
-    env: { HOME: home, PATH: "/usr/bin:/bin" },
-  });
+  assert.equal(prepared.manifest.codey.version, pkg.version);
+  // The common workflow's native check is exercised with an isolated HOME in
+  // machine-install-flow.test.mjs; this smoke test never creates real services.
+  const newShell = await exec("bash", ["--noprofile", "-ic", "codey --version"], { env: { HOME: home, PATH: "/usr/bin:/bin" } });
   assert.equal(newShell.stdout.trimEnd().split("\n").at(-1), `codey ${pkg.version}`);
-  assert.deepEqual(await readFile(path.join(installed, "bin/codey.mjs")), entryBefore);
 
-  // Defaults belong to Codey itself, not to the one-click installer's config writer.
-  const freshApiHome = path.join(home, "fresh-gateway");
-  await mkdir(freshApiHome);
-  const freshEnv = { ...env, COPILOT_API_HOME: freshApiHome, CODEY_MANAGED: "false" };
-  const configPath = path.join(freshApiHome, "config.json");
-  await exec(bin, ["gateway", "debug", "--json"], { env: freshEnv });
-  const defaults = JSON.parse(await readFile(configPath, "utf8"));
-  assert.equal(defaults.useResponsesApiWebSocket, false);
-  const custom = { ...defaults, useResponsesApiWebSocket: true };
-  await writeFile(configPath, JSON.stringify(custom));
-  await exec(bin, ["gateway", "debug", "--json"], { env: freshEnv });
-  assert.deepEqual(JSON.parse(await readFile(configPath, "utf8")), custom);
+  // Verify both API families and default preservation through the public Copilot entry.
+  assert.equal((await checkCopilot(installed)).modelRequests, false);
 
   // Exercise the actual inlined SDK using a local fake executable, never a paid model call.
   const fakeCodex = path.join(home, "codex-fixture");
@@ -198,14 +137,15 @@ console.log(result.finalResponse);
   assert.equal((await fetch(gateway + "/token-usage", { headers: { Authorization: `Bearer ${apiKey}` } })).status, 200);
   const pids = (await readFile(`/proc/${child.pid}/task/${child.pid}/children`, "utf8")).trim().split(/\s+/);
   assert.equal(pids.length, 2);
-  const commands = [];
+  const entries = [];
   for (const pid of pids) {
     const argv = (await readFile(`/proc/${pid}/cmdline`, "utf8")).split("\0");
-    assert.equal(argv[1], path.join(installed, "bin/codey.mjs"));
     assert.equal(await realpath(`/proc/${pid}/cwd`), installed);
-    commands.push(argv[2]);
+    entries.push(path.relative(installed, argv[1]));
+    if (argv[1] === path.join(installed, "bin/codey.mjs")) assert.equal(argv[2], "copilot");
+    else assert.equal(argv[2], "", "The private CloudCLI worker has no public subcommand or arguments");
   }
-  assert.deepEqual(commands.sort(), ["gateway", "workspace"]);
+  assert.deepEqual(entries.sort(), ["bin/codey.mjs", "lib/workspace.mjs"]);
   child.kill("SIGTERM");
   const [code] = await stopped;
   assert.equal(code, 143, output);

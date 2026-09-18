@@ -68,11 +68,18 @@ function New-CodeyDirectory {
 
 function Write-CodeyFile {
     param([string]$Path, [string]$Content, [switch]$Backup)
+    Write-CodeyBytes $Path ([Text.Encoding]::UTF8.GetBytes($Content)) -Backup:$Backup
+}
+
+function Write-CodeyBytes {
+    param([string]$Path, [byte[]]$Content, [switch]$Backup)
     $full = Assert-CodeyPath $Path
     $temporary = "$full.$([Guid]::NewGuid().ToString('N')).next"
-    [IO.File]::WriteAllText($temporary, $Content, [Text.UTF8Encoding]::new($false))
+    # Establish the private ACL before writing any secret or binary archive bytes.
+    [IO.File]::WriteAllBytes($temporary, [byte[]]@())
     Protect-CodeyPath $temporary
     try {
+        [IO.File]::WriteAllBytes($temporary, $Content)
         if (Test-Path -LiteralPath $full) {
             if ($Backup) {
                 $backupFile = "$full.$([Guid]::NewGuid().ToString('N')).bak"
@@ -94,32 +101,9 @@ function Read-CodeyJson {
     Get-Content -LiteralPath (Assert-CodeyPath $Path) -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
-function ConvertFrom-CodeyTunnelJson {
-    param([string]$Text)
-    # DevTunnel can prepend a welcome banner even when --json was requested.
-    # Never surface ConvertFrom-Json diagnostics containing a connect token.
-    try {
-        $text = $Text.TrimStart([char]0xFEFF)
-        $start = [regex]::Match($text, '(?m)^\s*\{')
-        if (-not $start.Success) { throw 'Missing JSON object' }
-        $value = $text.Substring($start.Index) | ConvertFrom-Json
-        if (-not ($value -is [pscustomobject])) { throw 'Expected an object' }
-        return $value
-    } catch { throw 'DevTunnel did not return a valid JSON object.' }
-}
-
 function Write-CodeyJson {
     param([string]$Path, $Value, [switch]$Backup)
     Write-CodeyFile $Path (($Value | ConvertTo-Json -Depth 30) + "`n") -Backup:$Backup
-}
-
-function New-CodeySecret {
-    param([int]$Bytes = 32, [switch]$Hex)
-    $buffer = New-Object byte[] $Bytes
-    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
-    try { $rng.GetBytes($buffer) } finally { $rng.Dispose() }
-    if ($Hex) { return -join ($buffer | ForEach-Object { $_.ToString('x2') }) }
-    return [Convert]::ToBase64String($buffer).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 }
 
 function Join-CodeyArguments {
@@ -140,7 +124,8 @@ function Initialize-CodeyJob {
 function Invoke-CodeyProcess {
     param([string]$Executable, [string[]]$Arguments = @(), [hashtable]$Environment = @{},
         [string]$WorkingDirectory = $PWD.Path, [int]$TimeoutSeconds = 300,
-        [string]$InputText = '', [switch]$Interactive, [switch]$AllowFailure, [string]$Activity = '')
+        [string]$InputText = '', [switch]$Interactive, [switch]$AllowFailure, [string]$Activity = '',
+        [switch]$ReplaceEnvironment)
     if (-not [IO.Path]::IsPathRooted($Executable) -or
         -not (Test-Path -LiteralPath $Executable -PathType Leaf)) { throw 'Missing absolute native executable.' }
     Initialize-CodeyJob
@@ -155,6 +140,7 @@ function Invoke-CodeyProcess {
     $info.RedirectStandardInput = -not $Interactive
     $info.RedirectStandardOutput = -not $Interactive
     $info.RedirectStandardError = -not $Interactive
+    if ($ReplaceEnvironment) { $info.EnvironmentVariables.Clear() }
     if (-not $Interactive) {
         # Node/Codex emit UTF-8 even when Windows PowerShell's console is OEM.
         $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
@@ -301,23 +287,11 @@ function Assert-CodeyExternalTerminal {
         $process = @($Processes | Where-Object { $_.ProcessId -eq $currentId })
         if (-not $process.Count) { break }
         if ($process[0].Name -match '^codex(\.exe)?$' -or
-            $process[0].CommandLine -match 'bin[\\/]codey\.mjs|dist-server[\\/]server[\\/]index\.js|copilot-api[\\/]dist[\\/]main\.js') {
+            $process[0].CommandLine -match 'bin[\\/]codey\.mjs"?\s+"?(workspace|gateway|start|copilot"?\s+"?start)(\s|"|$)|lib[\\/]workspace\.mjs(\s|"|$)|dist-server[\\/]server[\\/]index\.js|copilot-api[\\/]dist[\\/]main\.js') {
             throw 'Run installation from a separate Windows terminal, not Codex or a Codey Workspace terminal.'
         }
         $currentId = $process[0].ParentProcessId
     }
-}
-
-function Stop-CodeyProcessSnapshot {
-    param($Process, [string]$OwnerSid)
-    $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($Process.ProcessId)" -ErrorAction Stop
-    if (-not $current) { return }
-    $owner = Invoke-CimMethod -InputObject $current -MethodName GetOwnerSid -ErrorAction Stop
-    if ($owner.Sid -ne $OwnerSid -or $current.ExecutablePath -ne $Process.ExecutablePath -or
-        $current.CreationDate -ne $Process.CreationDate -or $current.ProcessId -eq $PID) {
-        throw 'Process identity changed; refusing to stop it.'
-    }
-    Stop-Process -Id $current.ProcessId -ErrorAction Stop
 }
 
 function Get-CodeyTaskArguments {
@@ -459,5 +433,52 @@ function Set-CodeyTaskState {
     foreach ($task in $tasks) {
         if ($Start) { $task.Enabled = $true; $null = $task.Run($null) }
         else { $task.Enabled = $false; $task.Stop(0) }
+    }
+}
+
+function Get-CodeyServiceState {
+    param($Config, [string]$ConfigPath)
+    $service = Get-CodeyTaskFolder
+    foreach ($component in @('codey', 'tunnel', 'renew')) {
+        $name = "Codey Machine $($Config.nodeId) $component"
+        $task = $service.Folder.GetTask($name)
+        Assert-CodeyTask $task $Config $ConfigPath $component
+        @{
+            name = $name; component = $(if ($component -eq 'codey') { 'codey' } else { 'tunnel' })
+            auxiliary = $false; enabled = [bool]$task.Enabled; running = $task.State -eq 4
+            state = $(if ($task.State -eq 4) { 'running' } elseif ($task.Enabled) { 'waiting' } else { 'stopped' })
+            pid = $null
+        }
+    }
+}
+
+function Set-CodeyServiceState {
+    param($Config, [string]$ConfigPath, $States)
+    $service = Get-CodeyTaskFolder
+    $tasks = @()
+    # Check every requested task before changing any of them.
+    foreach ($state in $States) {
+        $component = @('codey', 'tunnel', 'renew') | Where-Object { $state.name -ceq "Codey Machine $($Config.nodeId) $_" }
+        if (-not $component) { throw 'Unknown Codey task.' }
+        $task = $service.Folder.GetTask($state.name)
+        Assert-CodeyTask $task $Config $ConfigPath $component
+        $tasks += @{ task = $task; desired = $state }
+    }
+    foreach ($entry in @($tasks | Where-Object { -not $_.desired.running })) {
+        $entry.task.Enabled = $false
+        $entry.task.Stop(0)
+        $deadline = [DateTime]::UtcNow.AddSeconds(20)
+        while ($entry.task.State -eq 4) {
+            if ([DateTime]::UtcNow -ge $deadline) { throw 'Codey task did not stop in time.' }
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    foreach ($entry in $tasks) {
+        $entry.task.Enabled = [bool]$entry.desired.enabled
+        if ($entry.desired.running -and $entry.task.State -ne 4) {
+            $entry.task.Enabled = $true
+            $null = $entry.task.Run($null)
+            $entry.task.Enabled = [bool]$entry.desired.enabled
+        }
     }
 }

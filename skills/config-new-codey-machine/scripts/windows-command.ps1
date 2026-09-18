@@ -35,7 +35,7 @@ try {
     $child = [Diagnostics.Process]::new()
     $child.StartInfo.FileName = $node
     $child.StartInfo.Arguments = Join-CodeyArguments (@($entry) + $forwardArguments)
-    $child.StartInfo.WorkingDirectory = $directory
+    $child.StartInfo.WorkingDirectory = (Get-Location).Path
     $child.StartInfo.UseShellExecute = $false
     # Inherit the interactive console, but change environment only for the child.
     foreach ($name in @('PSModulePath', 'CODEX_THREAD_ID', 'CODEX_PARENT_THREAD_ID', 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE')) {

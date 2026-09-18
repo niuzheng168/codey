@@ -1,6 +1,7 @@
-/** Native installer probes/token renewal, shared by Windows and macOS. */
+/** Shared native installer probes, command environment and token renewal. */
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { readFile, writeFile, rename, unlink } from "node:fs/promises";
+import { readFile, realpath, writeFile, rename, unlink } from "node:fs/promises";
+import os from "node:os";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
@@ -8,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { nativePlatform, registrationDocument as nativeRegistrationDocument, verifyRegistrationFile, writeRegistration } from "./registration.mjs";
+import { checkedPath, digest, readPrivate, run } from "./machine-common.mjs";
 
 const exec = promisify(execFile);
 const read = async file => JSON.parse(await readFile(file, "utf8"));
@@ -22,6 +24,22 @@ export function parseTunnelJson(text) {
     requireValue(value && typeof value === "object" && !Array.isArray(value), "");
     return value;
   } catch { throw new Error("DevTunnel did not return a valid JSON object"); }
+}
+
+/** Shared by installation and `codey devtunnel login`; never switch an existing provider. */
+export async function loginTunnel(executable, environment, execute) {
+  const shown = await execute(executable, ["user", "show", "--json"], { env: environment, check: false });
+  let user = shown.code === 0 ? parseTunnelJson(shown.stdout) : {};
+  requireValue(user.status !== "Logged in" || user.provider === "github",
+    "DevTunnel is signed in with another provider; review that account rather than switching it automatically");
+  const existing = user.status === "Logged in";
+  if (!existing) {
+    await execute(executable, ["user", "login", "--github", "--use-device-code-auth"],
+      { env: environment, interactive: true, timeout: 900000 });
+    user = parseTunnelJson((await execute(executable, ["user", "show", "--json"], { env: environment })).stdout);
+  }
+  requireValue(user.status === "Logged in" && user.provider === "github", "GitHub DevTunnel login was not verified");
+  return { ok: true, provider: "github", loggedIn: true, existing };
 }
 
 export function validateTunnel(raw, expectedId, expectedCluster) {
@@ -140,10 +158,10 @@ export function registrationDocument(setup, identity, coordinates, token, certif
   return nativeRegistrationDocument(setup, identity, coordinates, token, certificate, computer);
 }
 
-async function tokenFor(config, coordinates) {
+export async function tokenFor(config, coordinates) {
   const result = await exec(config.devtunnelExe, [
     "token", `${coordinates.tunnelId}.${coordinates.clusterId}`, "--scope", "connect", "--json",
-  ], { windowsHide: true, timeout: 60000, maxBuffer: 32768 });
+  ], { windowsHide: true, timeout: 60000, maxBuffer: 32768, env: config.baseEnvironment ?? process.env });
   return validateConnectToken(parseTunnelJson(result.stdout), coordinates);
 }
 
@@ -188,9 +206,29 @@ async function main() {
   }
   const config = await read(file);
   const target = nativePlatform();
-  requireValue(config.kind === (target === "windows-x64" ? "codey-windows-oneclick" : "codey-macos-oneclick") &&
+  requireValue(config.kind === `codey-${target.split("-")[0]}-oneclick` &&
     (target === "windows-x64" || config.platform === target) && config.schema === 2 &&
     config.layout === "npm-codey-package", "Invalid runtime configuration");
+  if (command === "cli") {
+    const home = await realpath(os.userInfo().homedir);
+    await checkedPath(file, home);
+    const privateConfig = await readPrivate(file);
+    requireValue(privateConfig.ownerHome === home && privateConfig.ownerUid === process.getuid() &&
+      privateConfig.ready && privateConfig.codeyBin === path.join(privateConfig.codeyDirectory, "bin/codey.mjs"),
+    "The CLI requires this owner's ready runtime");
+    await checkedPath(privateConfig.codeyBin, home);
+    requireValue(await digest(path.join(privateConfig.codeyDirectory, "codey-build.json")) === privateConfig.codeyEntrySha256,
+      "Codey package fingerprint mismatch");
+    for (const [name, hash] of Object.entries(privateConfig.fileHashes ?? {})) {
+      requireValue(await digest(privateConfig[name]) === hash, "Native tool/worker fingerprint mismatch");
+    }
+    const result = await run(privateConfig.nodeExe, [privateConfig.codeyBin, ...process.argv.slice(4)], {
+      env: { ...process.env, ...(privateConfig.environment ?? privateConfig.services?.codey?.environment) },
+      cwd: process.cwd(), interactive: true, check: false, timeout: 2147483647,
+    });
+    process.exitCode = result.code;
+    return;
+  }
   if (command === "gateway") { await verifyGateway(config); return; }
   if (command === "verify") { console.log(JSON.stringify(await verifyLocal(config))); return; }
   if (command === "sdk-probe") { await sdkProbe(config); console.log("CODEY_CLOUDCLI_OK"); return; }
@@ -207,12 +245,14 @@ async function main() {
   const token = await tokenFor(config, coordinates);
   if (command === "renew") { await renew(config, identity, coordinates, token); return; }
   const setup = await read(config.setupFile);
-  requireValue(setup.platform === target, "Registration platform does not match this native host");
+  requireValue(setup.platform === target || target === "linux-x64" && setup.platform === "auto",
+    "Registration platform does not match this native host");
+  setup.platform = target;
   const document = nativeRegistrationDocument(
     setup, identity, coordinates, token,
     await readFile(config.certificate, "utf8"), config.computer,
   );
-  if (target.startsWith("macos-")) {
+  if (target !== "windows-x64") {
     await writeRegistration(path.join(config.ownerHome, "codey-machine-registration.json"), document);
     return;
   }

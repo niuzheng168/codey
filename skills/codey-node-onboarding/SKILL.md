@@ -13,7 +13,7 @@ metadata:
 ## 1. 分发 Linux npm 包
 
 - 同一 npm 包支持 Linux/Windows x64 和 macOS arm64/x64；完整 Skill 按原生平台选择入口。
-- 只有一个 `codey-<version>.tgz` 应用 npm 包，包含 Workspace、网关和 `codey setup`；
+- 只有一个 `codey-<version>.tgz` 应用 npm 包，包含 Workspace、网关和公共安装流程；
   不含更新器，不嵌套两个应用 npm 包。
 - `install-codey-linux.sh` 是单独的小型启动脚本，不内嵌 Base64 应用；允许 npm
   从明确的 HTTPS `.tgz` URL 安装。不自动安装公共 registry 的同名项目。
@@ -23,9 +23,9 @@ metadata:
 
 ## 2. 在目标 Linux 机器执行
 
-- 把 npm 包和一键脚本放在同一目录，确认机名后运行 `bash install-codey-linux.sh --expected-computer "实际机名"`；
-  已完成 npm 安装时运行 `codey setup --expected-computer "实际机名"`。
-- `codey setup --check` 只验证，不触发模型请求、停进程或服务变更。
+- 把 npm 包和匹配的一键脚本放在同一目录，先用 `bash install-codey-linux.sh --check` 只读预检，
+  确认后改用 `--expected-computer "实际机名"`；不再使用 `codey setup`。
+- 安装脚本负责全部配置；`codey guard` 仅启动已安装的后台守护，不替代安装、登录或验收。
 - 使用原用户 HOME 下的私有 npm prefix；不得在 Windows 或 macOS 回退执行 Linux 脚本。
 - 先检查 `3001/4141/8443`：空闲或通过系统 PID/用户/安装路径确认来自本用户 Codey 才继续；其他/未知监听立即停止，不强杀。
 - 同版本完成节点保留身份、证书、密钥和配置，继续验收/导出；未完成节点或旧升级器布局须单独评审。

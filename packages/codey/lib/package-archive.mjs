@@ -12,7 +12,7 @@ const MAX_ARCHIVE = 512 * 1024 * 1024;
 const MAX_EXPANDED = 4 * 1024 ** 3;
 const required = [
   "package.json", "npm-shrinkwrap.json", "codey-build.json", "bin/codey.mjs",
-  "lib/cli.mjs", "lib/doctor.mjs", "lib/package-info.mjs",
+  "lib/cli.mjs", "lib/workspace.mjs", "lib/install.mjs", "lib/doctor.mjs", "lib/package-info.mjs",
   "dist-server/server/index.js", "gateway/main.js", "dist/index.html", "pages/index.html",
 ];
 const captured = new Set(["package.json", "npm-shrinkwrap.json", "codey-build.json"]);

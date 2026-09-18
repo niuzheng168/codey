@@ -3,7 +3,7 @@ import { stat } from "node:fs/promises";
 for (const name of [
   "npm-shrinkwrap.json", "codey-build.json", "dist-server/server/index.js",
   "dist/index.html", "gateway/main.js", "pages/index.html", "lib/codex-sdk/index.js",
-  "lib/setup.mjs", "onboarding/scripts/install.sh",
+  "lib/install.mjs", "lib/workspace.mjs", "onboarding/scripts/install.sh",
   "onboarding/templates/a100-models.json", "onboarding/templates/codex-config.toml",
   "onboarding/scripts/linux-preflight.sh", "onboarding/scripts/windows-runtime.mjs",
   "onboarding/scripts/install-devtunnel-health.sh", "onboarding/scripts/linux-devtunnel-health.mjs",

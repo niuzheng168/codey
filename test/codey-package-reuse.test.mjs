@@ -59,7 +59,7 @@ test("the standalone installer bootstraps offline without changing PATH, service
   const output = await execute(process.execPath, [
     fileURLToPath(new URL("../scripts/install-codey-runtime.mjs", import.meta.url)),
     "--package", f.archive, "--sha256", await fileHash(f.archive), "--prefix", prefix,
-    "--reuse-from", f.old, "--check",
+    "--reuse-from", f.old, "--no-launcher",
   ], { env: { ...process.env, HOME: f.home, USERPROFILE: f.home }, timeout: 120000 });
   assert.match(output, /"dependencyMode":"reuse-installed-offline"/);
   assert.match(output, /"pathChanged":false/);
@@ -69,6 +69,19 @@ test("the standalone installer bootstraps offline without changing PATH, service
   const root = path.join(prefix, ...(process.platform === "win32" ? [] : ["lib"]), "node_modules/codey");
   assert.equal((await readJson(path.join(root, "package.json"))).version, "2.0.0");
   assert.equal((await readJson(path.join(root, "node_modules/fixture/package.json"))).version, "1.0.0");
+});
+
+test("runtime-only --check is genuinely read-only even when dependencies are not installed", async t => {
+  const f = await dependenciesFixture(t);
+  const before = await treeFiles(f.home);
+  const output = await execute(process.execPath, [
+    fileURLToPath(new URL("../scripts/install-codey-runtime.mjs", import.meta.url)),
+    "--package", f.archive, "--sha256", await fileHash(f.archive),
+    "--prefix", path.join(f.home, "must-not-exist"), "--check",
+  ], { env: { ...process.env, HOME: f.home, USERPROFILE: f.home, npm_config_offline: "true" } });
+  assert.equal(JSON.parse(output).fileChanges, false);
+  assert.equal(JSON.parse(output).downloads, false);
+  assert.deepEqual(await treeFiles(f.home), before);
 });
 
 test("copying rejects a changed lock and optional absent packages remain optional", async t => {

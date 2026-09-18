@@ -8,14 +8,20 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { treeFiles } from "./codey-update-fixture.mjs";
+import { Installer } from "../skills/config-new-codey-machine/scripts/install-machine.mjs";
+import { linuxAdapter } from "../skills/config-new-codey-machine/scripts/platform-linux.mjs";
+import { installUnixCommand } from "../skills/config-new-codey-machine/scripts/platform-unix.mjs";
+import { directory, writePrivate } from "../skills/config-new-codey-machine/scripts/machine-common.mjs";
+import { modelConfiguration } from "../skills/config-new-codey-machine/scripts/machine-package.mjs";
+import { registrationDocument, writeRegistration } from "../skills/config-new-codey-machine/scripts/registration.mjs";
+import { packageFixture, packFixture, fingerprint, treeFiles } from "./codey-update-fixture.mjs";
 
 const run = promisify(execFile);
 const installer = await readFile(
   new URL("../skills/config-new-codey-machine/scripts/install.sh", import.meta.url),
   "utf8",
 );
-const functions = installer.slice(0, installer.indexOf('[[ "$(uname -s)"'));
+const common = await readFile(new URL("../skills/config-new-codey-machine/scripts/install-machine.mjs", import.meta.url), "utf8");
 const helper = await readFile(new URL("../skills/config-new-codey-machine/scripts/linux-preflight.sh", import.meta.url), "utf8");
 const skill = fileURLToPath(new URL("../skills/config-new-codey-machine", import.meta.url));
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -25,7 +31,7 @@ async function executable(file, body) {
   await chmod(file, 0o700);
 }
 
-async function preflightFixture(t, { installed = true } = {}) {
+async function preflightFixture(t, { installed = true, legacy = false } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "codey-linux-preflight-"));
   const home = path.join(root, "home"), bin = path.join(root, "stubs");
   const pkg = path.join(home, ".local/share/codey-machine/releases/fixture/lib/node_modules/codey");
@@ -63,17 +69,20 @@ esac`);
   for (const name of ["sudo", "pkill", "fuser", "curl"]) await executable(path.join(bin, name), 'echo forbidden-operation >&2; exit 88');
   await executable(path.join(bin, "pgrep"), 'exit 1');
   if (installed) {
-    await mkdir(path.join(pkg, "bin"), { recursive: true, mode: 0o700 });
     await mkdir(units, { recursive: true, mode: 0o700 });
-    await writeFile(path.join(pkg, "bin/codey.mjs"), 'process.send("ready");setInterval(()=>{},1000);\n', { mode: 0o600 });
+    for (const entry of ["bin/codey.mjs", "lib/workspace.mjs"]) {
+      await mkdir(path.dirname(path.join(pkg, entry)), { recursive: true, mode: 0o700 });
+      await writeFile(path.join(pkg, entry), 'process.send("ready");setInterval(()=>{},1000);\n', { mode: 0o600 });
+    }
     await writeFile(path.join(pkg, "codey-build.json"), "{}");
-    for (const role of ["workspace", "gateway"]) {
-      const args = [path.join(pkg, "bin/codey.mjs"), role,
-        ...(role === "gateway" ? ["start", "--headless", "--host", "127.0.0.1", "--port", "4141"] : [])];
+    for (const role of ["workspace", "copilot"]) {
+      const args = role === "workspace" && !legacy ? [path.join(pkg, "lib/workspace.mjs")] :
+        [path.join(pkg, "bin/codey.mjs"), legacy && role === "copilot" ? "gateway" : role,
+        ...(role === "copilot" ? ["start", ...(legacy ? ["--headless"] : []), "--host", "127.0.0.1", "--port", "4141"] : [])];
       const child = spawn(process.execPath, args, { stdio: ["ignore", "ignore", "ignore", "ipc"] });
       children.push(child);
       await once(child, "message");
-      env[`CODEY_TEST_${role.toUpperCase()}_PID`] = String(child.pid);
+      env[`CODEY_TEST_${role === "copilot" ? "GATEWAY" : "WORKSPACE"}_PID`] = String(child.pid);
       const unit = role === "workspace" ? "codey-cloudcli.service" : "codey-copilot-api.service";
       await writeFile(path.join(units, unit),
         `[Service]\nWorkingDirectory=${pkg}\nExecStart=${process.execPath} ${args.join(" ")}\n`, { mode: 0o600 });
@@ -105,6 +114,16 @@ linuxTest("Linux preflight permits free ports or exact owner-managed Codey liste
   assert.doesNotMatch(await readFile(f.calls, "utf8"), /stop|kill|disable|restart/);
 });
 
+linuxTest("read-only preflight still recognizes exact old running Codey argv without reintroducing CLI aliases", async t => {
+  const f = await preflightFixture(t, { legacy: true });
+  await writeFile(f.listeners, [
+    `LISTEN 0 511 127.0.0.1:3001 0.0.0.0:* users:(("node",pid=${f.env.CODEY_TEST_WORKSPACE_PID},fd=20))`,
+    `LISTEN 0 511 127.0.0.1:4141 0.0.0.0:* users:(("node",pid=${f.env.CODEY_TEST_GATEWAY_PID},fd=20))`,
+  ].join("\n"));
+  await f.check();
+  assert.doesNotMatch(await readFile(f.calls, "utf8"), /stop|kill|disable|restart/);
+});
+
 linuxTest("Linux rejects foreign/hidden listeners, wildcard binds, wrong roles, overridden units and spoofed argv", async t => {
   const f = await preflightFixture(t), pid = f.env.CODEY_TEST_GATEWAY_PID;
   for (const line of [
@@ -124,15 +143,19 @@ linuxTest("Linux does not trust an overridden service or a PID with another comm
   const f = await preflightFixture(t);
   await assert.rejects(f.check("codey_linux_preflight", { CODEY_TEST_DROP_IN: "/unreviewed/override.conf" }),
     error => /overridden/.test(error.stderr));
-  const child = spawn(process.execPath, [path.join(f.pkg, "bin/codey.mjs"), "gateway",
-    "--eval", "codey gateway start --headless --host 127.0.0.1 --port 4141"], {
-    stdio: ["ignore", "ignore", "ignore", "ipc"],
-  });
-  f.children.push(child);
-  await once(child, "message");
-  await writeFile(f.listeners, `LISTEN 0 511 127.0.0.1:4141 0.0.0.0:* users:(("node",pid=${child.pid},fd=20))`);
-  await assert.rejects(f.check("codey_linux_preflight", { CODEY_TEST_GATEWAY_PID: String(child.pid) }),
-    error => /foreign or unverified/.test(error.stderr));
+  for (const [port, name, args] of [
+    [4141, "GATEWAY", [path.join(f.pkg, "bin/codey.mjs"), "gateway",
+      "--eval", "codey gateway start --headless --host 127.0.0.1 --port 4141"]],
+    [3001, "WORKSPACE", [path.join(f.pkg, "lib/workspace.mjs"), "--eval", "unrecognized arguments"]],
+    [3001, "WORKSPACE", [path.join(f.pkg, "bin/codey.mjs"), path.join(f.pkg, "lib/workspace.mjs")]],
+  ]) {
+    const child = spawn(process.execPath, args, { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    f.children.push(child);
+    await once(child, "message");
+    await writeFile(f.listeners, `LISTEN 0 511 127.0.0.1:${port} 0.0.0.0:* users:(("node",pid=${child.pid},fd=20))`);
+    await assert.rejects(f.check("codey_linux_preflight", { [`CODEY_TEST_${name}_PID`]: String(child.pid) }),
+      error => /foreign or unverified/.test(error.stderr));
+  }
 });
 
 linuxTest("a foreign Linux listener aborts the standalone installer before Node/npm downloads or file changes", async t => {
@@ -143,6 +166,34 @@ linuxTest("a foreign Linux listener aborts the standalone installer before Node/
     "--package", path.join(f.root, "unused.tgz"), "--expected-computer", os.hostname()], { env: f.env }),
   error => /Port 8443.*foreign or unverified/.test(error.stderr) && !/forbidden-operation/.test(error.stderr));
   assert.deepEqual(await treeFiles(f.home), before);
+});
+
+linuxTest("standalone Linux reruns compare the actual requested tarball before npm/Node preparation", async t => {
+  const f = await preflightFixture(t);
+  await packageFixture(f.pkg, "1.0.0");
+  // The two existing fixture PIDs retain their original loop; the private installer
+  // exercises the bootstrap's acceptance-only delegation, without real services.
+  await writeFile(path.join(f.pkg, "lib/install.mjs"),
+    'console.log("EXISTING_VERIFY_ONLY");\n', { mode: 0o600 });
+  await fingerprint(f.pkg);
+  const archive = await packFixture(f.pkg, path.join(f.root, "codey-1.0.0.tgz"));
+  const before = await treeFiles(f.home);
+  const entry = fileURLToPath(new URL("../scripts/linux/install-codey.sh", import.meta.url));
+  for (const args of [["--expected-computer", os.hostname()], ["--check"],
+    ["--check", "--prefix", path.resolve(f.pkg, "../../.."), "--node-dir", path.dirname(path.dirname(process.execPath))]]) {
+    assert.match((await run("bash", [entry, "--package", archive, ...args], { env: f.env })).stdout, /EXISTING_VERIFY_ONLY/);
+    assert.deepEqual(await treeFiles(f.home), before);
+  }
+  const different = await packageFixture(path.join(f.root, "other-release"), "2.0.0");
+  const other = await packFixture(different, path.join(f.root, "codey-2.0.0.tgz"));
+  await assert.rejects(run("bash", [entry, "--package", other, "--expected-computer", os.hostname()], { env: f.env }),
+    error => /Requested release differs/.test(error.stderr));
+  await assert.rejects(run("bash", [entry, "--package", "https://example.invalid/codey.tgz", "--check"], { env: f.env }),
+    error => /local release .tgz/.test(error.stderr));
+  await assert.rejects(run("bash", [entry, "--package", archive, "--node-dir", "/missing-node", "--check"], { env: f.env }),
+    error => /setup is not a tool updater/.test(error.stderr));
+  assert.deepEqual(await treeFiles(f.home), before);
+  assert.doesNotMatch(await readFile(f.calls, "utf8"), /restart|enable --now|disable/);
 });
 
 linuxTest("the Skill's Linux entry delegates to the one npm installer instead of staging or switching an application", async t => {
@@ -171,35 +222,18 @@ linuxTest("the Skill's Linux entry delegates to the one npm installer instead of
   assert.doesNotMatch(installer, /\bSTAGE_PACKAGE\b|\bRELEASE_PACKAGE\b|RELEASE\.next|nodejs\.org\/dist|npm" install|systemctl --user restart/);
 });
 
-linuxTest("the Linux installer renders the shared model template instead of maintaining a second TOML configuration", async t => {
+linuxTest("Linux uses the common model template and checks unmanaged Codex without killing it", async t => {
   const f = await preflightFixture(t, { installed: false });
-  const home = path.join(f.home, "owner's $& home 中文");
-  await mkdir(path.join(home, ".codex"), { recursive: true });
-  const start = installer.indexOf('"$NODE" - "$MODEL_CONFIG"');
-  const end = installer.indexOf("\nNODE\n", start) + "\nNODE\n".length;
-  assert.ok(start >= 0 && end > start);
-  const templateFile = path.join(skill, "templates/codex-config.toml");
-  await run("bash", ["-euc", installer.slice(start, end)], {
-    env: { ...f.env, NODE: process.execPath, MODEL_CONFIG: templateFile, HOME_DIR: home },
-  });
-  const actual = await readFile(path.join(home, ".codex/config.toml"), "utf8");
-  const template = await readFile(templateFile, "utf8");
-  assert.equal(actual, template.replace("__CODEY_MODEL_CATALOG__", () => JSON.stringify(path.join(home, ".codex/models.json"))));
-});
-
-linuxTest("Linux asks the owner to close unmanaged Codex instead of killing it", async t => {
-  const f = await preflightFixture(t, { installed: false });
-  await executable(path.join(f.bin, "pgrep"), 'exit 0');
-  await assert.rejects(run("bash", ["-c", functions + "\nrequire_closed_codex"], { env: f.env }),
-    error => /Close Codex\/Desktop yourself/.test(error.stderr) && !/forbidden-operation/.test(error.stderr));
-});
-
-test("Linux installation does not probe Python, install an updater, or erase its old state", () => {
-  assert.doesNotMatch(installer, /PYTHON|python3|updaterCredential|UPDATER_SOURCE/);
-  assert.doesNotMatch(installer, /rm -rf .*codey-updater/);
+  const models = path.join(f.home, "owner's $& home 中文/models.json");
+  const rendered = await modelConfiguration(models);
+  assert.equal(JSON.parse(/^model_catalog_json = (.+)$/m.exec(rendered)[1]), models);
+  const adapter = linuxAdapter({ home: f.home, skill, run: async file => {
+    assert.equal(file, "/usr/bin/pgrep");
+    return { code: 0, stdout: "123", stderr: "" };
+  } });
+  await assert.rejects(adapter.available(), /Close Codex\/Desktop yourself/);
+  assert.doesNotMatch(installer, /python3|updaterCredential|\bpkill\b|\bfuser\b/);
   assert.match(helper, /This node still has a retired updater/);
-  assert.ok(installer.indexOf("codey_linux_preflight") < installer.indexOf('mkdir -p "$TOOLS"'));
-  assert.doesNotMatch(installer, /\bpkill\b|\bfuser\b|stop_system_unit|kill_matches/);
 });
 
 linuxTest("Linux still rejects incomplete nodes and retired updater state without touching them", async t => {
@@ -229,7 +263,8 @@ linuxTest("same-release Linux rerun verifies and exports without reinstalling, r
     await mkdir(path.dirname(path.join(f.pkg, file)), { recursive: true, mode: 0o700 });
     await writeFile(path.join(f.pkg, file), entry);
   }
-  const build = JSON.stringify({ gatewayEntrySha256: hash(entry), workspaceEntrySha256: hash(entry) });
+  const build = JSON.stringify({ schema: 1, name: "codey", version: "0.1.16", gatewayEntrySha256: hash(entry), workspaceEntrySha256: hash(entry) });
+  await writeFile(path.join(f.pkg, "package.json"), JSON.stringify({ name: "codey", version: "0.1.16", bin: { codey: "bin/codey.mjs" } }));
   await writeFile(path.join(f.pkg, "codey-build.json"), build);
   await writeFile(path.join(f.pkg, "npm-shrinkwrap.json"), lock);
   const manifest = { schema: 2, name: "codey", platform: "linux-x64", releaseId: "machine-" + hash(build).slice(0, 16),
@@ -263,7 +298,8 @@ linuxTest("same-release Linux rerun verifies and exports without reinstalling, r
   for (const [file, content] of [
     ["tunnel.json", JSON.stringify({ ...coordinates, ports: [3001, 8443].map(portNumber => ({ portNumber, protocol: "https" })) })],
     ["copilot.env", `COPILOT_API_CODEY_ALLOWED_ORIGIN=${setup.portalOrigin}\nCOPILOT_API_CODEY_NODE_ID=${identity.nodeId}\n`],
-    ["cloudcli.env", "preserve workspace environment\n"],
+    ["provider.env", "CODEY_MODEL_API_KEY=preserve-model-key\n"],
+    ["cloudcli.env", `CODEX_HOME=${f.home}/.codex\nCODEY_CODEX_EXECUTABLE=/usr/bin/codex\n`],
   ]) await writeFile(path.join(config, file), content, { mode: 0o600 });
   await writeFile(path.join(copilot, "config.json"), JSON.stringify({ auth: { apiKeys: [secret()] } }), { mode: 0o600 });
   const tunnel = path.join(f.home, ".local/share/codey-tools/devtunnel/devtunnel");
@@ -273,27 +309,43 @@ linuxTest("same-release Linux rerun verifies and exports without reinstalling, r
   await executable(tunnel, `printf '%s\\n' '{"token":"${token}"}'`);
   await writeFile(f.listeners, [3001, 4141, 8443].map(port =>
     `LISTEN 0 511 127.0.0.1:${port} 0.0.0.0:* users:(("node",pid=${port === 3001 ? f.env.CODEY_TEST_WORKSPACE_PID : f.env.CODEY_TEST_GATEWAY_PID},fd=20))`).join("\n"));
-  const before = await treeFiles(f.home);
-  const args = [path.join(localSkill, "scripts/install.sh"), "--expected-computer", os.hostname()];
-  const env = { ...f.env, CODEY_INSTALLED_PACKAGE: f.pkg, CODEY_SETUP_NODE: process.execPath, CODEY_SETUP_ASSETS: assets };
-  const result = await run("bash", args, { env, timeout: 20000 });
-  assert.match(result.stdout, /already installed and verified; no reinstall/);
+  await writeFile(path.join(f.units, "codey-devtunnel.service"),
+    `[Service]\nExecStart=${tunnel} host ${coordinates.tunnelId}.${coordinates.clusterId} --host-header unchanged --origin-header unchanged\n`, { mode: 0o600 });
+  const watched = [identityFile, cert, key, path.join(copilot, "config.json"),
+    ...["provider.env", "copilot.env", "cloudcli.env"].map(name => path.join(config, name))];
+  const before = await Promise.all(watched.map(file => readFile(file)));
+  const prepared = { root: f.pkg, manifest, setup };
+  const node = new Installer(skill, { home: f.home, prepared, execute: async (file, args) => {
+    if (["/usr/bin/systemctl", "/usr/bin/loginctl"].includes(file)) file = path.join(f.bin, path.basename(file));
+    const result = await run(file, args, { env: f.env, timeout: 20000 });
+    return { code: 0, ...result };
+  } });
   const output = path.join(f.home, "codey-machine-registration.json");
+  node.probe = async (saved, operation) => {
+    assert.equal(operation, "registration", "No repeated model requests or independent acceptance probes");
+    await writeRegistration(output, registrationDocument(setup, identity, coordinates, token, await readFile(cert, "utf8"), os.hostname()));
+  };
+  const options = { apply: true, "network-approved": true, "expected-computer": os.hostname(), "codex-home": path.join(f.home, ".codex") };
+  await node.apply(options);
   assert.equal(JSON.parse(await readFile(output, "utf8")).machine.nodeId, identity.nodeId);
-  await rm(output);
-  assert.deepEqual(await treeFiles(f.home), before);
+  await node.apply(options);
+  assert.deepEqual(await Promise.all(watched.map(file => readFile(file))), before);
   assert.doesNotMatch(await readFile(f.calls, "utf8"), /stop|restart|enable --now|disable/);
+  const inventory = JSON.parse(await readFile(path.join(config, "resources.json"), "utf8"));
+  assert.equal(inventory.programs[0].path, path.resolve(f.pkg, "../../.."));
+  assert.ok(inventory.preserve.some(item => item.path === f.home + "/.codex"));
+  assert.ok(!JSON.stringify(inventory).includes(identity.workspaceSsoKey));
+  await rm(output);
   await writeFile(path.join(f.pkg, "gateway/main.js"), "modified application");
-  await assert.rejects(run("bash", args, { env, timeout: 20000 }),
-    error => /differs from this release/.test(error.stderr));
+  await assert.rejects(node.apply(options), /fingerprint mismatch/);
   await assert.rejects(lstat(output), { code: "ENOENT" });
+
 });
 
-test("Codex validation closes stdin and has a hard timeout", () => {
-  assert.match(
-    installer,
-    /timeout --kill-after=5s 300s "\$CODEX" exec[\s\S]*?CODEY_CODEX_OK" <\/dev\/null/,
-  );
+test("all platforms use bounded real-response Codex acceptance, not a prompt echo", () => {
+  assert.match(common, /--output-last-message/);
+  assert.match(common, /timeout: 330000/);
+  assert.match(common, /trim\(\) === "CODEY_CODEX_OK"/);
 });
 
 test("writing the stable Codey launcher replaces npm's bin symlink without corrupting its JavaScript target", {
@@ -302,14 +354,16 @@ test("writing the stable Codey launcher replaces npm's bin symlink without corru
   const home = await mkdtemp(path.join(os.tmpdir(), "codey-npm-bin-"));
   t.after(() => rm(home, { recursive: true, force: true }));
   const bin = path.join(home, ".local/bin");
-  await mkdir(bin, { recursive: true });
+  await mkdir(bin, { recursive: true, mode: 0o700 });
   const target = path.join(home, "original-codey.mjs");
-  await writeFile(target, "// npm-managed JavaScript must remain intact\n");
+  await writeFile(target, "// npm-managed JavaScript must remain intact\n", { mode: 0o600 });
   await symlink(target, path.join(bin, "codey"));
-  await run("bash", ["-c", `${functions}\nwrite_codey_cli "$1" "$2" "$3"`, "fixture", home, process.execPath, "/example/codey"]);
+  const i = { home, target: "linux-x64", file: path.join(home, "runtime.json"), directory: file => directory(file, home) };
+  await installUnixCommand(i, { nodeExe: process.execPath, codeyBin: target, helperPath: target });
   assert.equal(await readFile(target, "utf8"), "// npm-managed JavaScript must remain intact\n");
   assert.equal((await lstat(path.join(bin, "codey"))).isSymbolicLink(), false);
-  assert.match(await readFile(path.join(bin, "codey"), "utf8"), /\/example\/codey\/bin\/codey\.mjs/);
+  assert.ok((await readFile(path.join(bin, "codey"), "utf8")).includes(target));
+
 });
 
 async function cliPathFixture(t) {
@@ -317,16 +371,16 @@ async function cliPathFixture(t) {
   t.after(() => rm(home, { recursive: true, force: true }));
   const bin = path.join(home, ".local/bin");
   const pkg = path.join(home, "package");
-  await mkdir(bin, { recursive: true });
-  await mkdir(path.join(pkg, "bin"), { recursive: true });
+  await mkdir(bin, { recursive: true, mode: 0o700 });
+  await mkdir(path.join(pkg, "bin"), { recursive: true, mode: 0o700 });
   await writeFile(path.join(pkg, "bin/codey.mjs"), 'console.log("codey path-fixture");\n');
   const env = { HOME: home, PATH: "/usr/bin:/bin" };
   const expected = `${bin}/codey\ncodey path-fixture\n`;
-  const install = () => run("/bin/bash", ["--noprofile", "--norc", "-c", `${functions}
-write_codey_cli "$HOME" "$1" "$2"
-command -v codey
-codey --version
-`, "fixture", process.execPath, pkg], { env });
+  const install = async () => {
+    await installUnixCommand({ home, target: "linux-x64", file: path.join(home, "runtime.json"), directory: file => directory(file, home) },
+      { nodeExe: process.execPath, codeyBin: path.join(pkg, "bin/codey.mjs"), helperPath: path.join(pkg, "bin/codey.mjs") });
+    return run("/bin/bash", ["--noprofile", "--norc", "-c", '. "$HOME/.profile"; command -v codey; codey --version'], { env });
+  };
   return { home, bin, env, expected, install };
 }
 
@@ -398,7 +452,7 @@ test("Codey PATH setup also updates existing Bash login overrides without replac
       const f = await cliPathFixture(t);
       for (const name of names) {
         await writeFile(path.join(f.home, name),
-          `export CODEY_TEST_LOGIN=${name}\nexport PATH=/usr/bin:/bin\n`);
+          `export CODEY_TEST_LOGIN=${name}\nexport PATH=/usr/bin:/bin\n`, { mode: 0o600 });
       }
       await f.install();
       await f.install();

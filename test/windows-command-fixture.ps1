@@ -83,7 +83,7 @@ function Run-Codey([string[]]$Values) {
 $version = Run-Codey @('--version')
 Check ($version.ExitCode -eq 0 -and $version.Stdout.Trim() -eq 'codey fixture-one') ("fresh PowerShell invokes codey without global Node or a profile: " + $version.Stdout + $version.Stderr)
 $env:CODEY_COMMAND_FIXTURE = 'parent-fixture'
-$values = @('gateway', 'start', '--port', '4141', 'a"b', '', "space's & value", 'C:\trailing\',
+$values = @('copilot', 'start', '--port', '4141', 'a"b', '', "space's & value", 'C:\trailing\',
     ('unicode-' + [char]0x4e2d + [char]0x6587))
 $result = Run-Codey $values
 Check ($result.ExitCode -eq 0) 'native launcher succeeds'

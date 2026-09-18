@@ -21,13 +21,21 @@ _source_spec = importlib.util.spec_from_file_location(
 release_source = importlib.util.module_from_spec(_source_spec)
 _source_spec.loader.exec_module(release_source)
 RUNTIME_PLATFORMS = ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]
-MACHINE_SKILL_FILES = [
-    "SKILL.md", "agents/openai.yaml", "dependencies.json", "dependencies.windows.json", "dependencies.macos.json",
-    "scripts/install.sh", "scripts/install.ps1", "scripts/install-macos.sh", "scripts/install-macos.mjs", "scripts/macos-service.mjs",
+NPM_ONBOARDING_FILES = [
+    "dependencies.json", "dependencies.windows.json", "dependencies.macos.json", "references/codey-cli.md",
+    "scripts/install.sh", "scripts/macos-service.mjs",
     "scripts/install-devtunnel-health.sh", "scripts/linux-devtunnel-health.mjs", "scripts/linux-preflight.sh",
-    "scripts/registration.mjs", "scripts/windows-common.ps1", "scripts/windows-process.cs",
-    "scripts/windows-service.ps1", "scripts/windows-runtime.mjs", "scripts/windows-command.ps1",
+    "scripts/registration.mjs", "scripts/windows-runtime.mjs",
+    "scripts/install-machine.mjs", "scripts/machine-common.mjs", "scripts/machine-package.mjs", "scripts/machine-resources.mjs",
+    "scripts/platform-linux.mjs", "scripts/platform-macos.mjs", "scripts/platform-windows.mjs", "scripts/platform-unix.mjs",
+    "scripts/windows-native.ps1", "scripts/windows-common.ps1", "scripts/windows-process.cs",
+    "scripts/windows-service.ps1", "scripts/windows-command.ps1",
     "templates/a100-models.json", "templates/codex-config.toml",
+]
+MACHINE_SKILL_FILES = [
+    "SKILL.md", "agents/openai.yaml",
+    *NPM_ONBOARDING_FILES,
+    "scripts/install.ps1", "scripts/install-macos.sh", "scripts/install-macos.mjs",
 ]
 MAX_PACKAGE_BYTES = 8 * 1024 * 1024
 TEXT_SUFFIXES = {".js", ".mjs", ".cjs", ".json", ".map", ".md", ".html", ".css", ".svg", ".txt", ".toml", ".sh", ".ps1"}
@@ -134,6 +142,14 @@ def copy_required(source_root, destination, names):
             shutil.copy2(file, target)
 
 
+def copy_onboarding(source_root, runtime):
+    """Ship the CLI reference and every module imported by the shared setup entry."""
+    copy_required(
+        source_root / "skills/config-new-codey-machine", runtime / "onboarding",
+        NPM_ONBOARDING_FILES,
+    )
+
+
 def official_node(work, version):
     filename = f"node-v{version}-linux-x64.tar.xz"
     url = f"https://nodejs.org/dist/v{version}/{filename}"
@@ -224,7 +240,7 @@ def inspect_npm_package(file):
     required = {
         "package/package.json", "package/npm-shrinkwrap.json", "package/bin/codey.mjs",
         "package/lib/cli.mjs", "package/codey-build.json", "package/dist-server/server/index.js",
-        "package/lib/doctor.mjs", "package/lib/package-info.mjs",
+        "package/lib/workspace.mjs", "package/lib/install.mjs", "package/lib/doctor.mjs", "package/lib/package-info.mjs",
         "package/lib/codex-sdk/index.js",
         "package/dist/index.html", "package/gateway/main.js", "package/pages/index.html",
         "package/lib/package-files.mjs", "package/lib/package-archive.mjs", "package/lib/package-dependencies.mjs",
@@ -362,11 +378,7 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
         release_source.verify_source_files(ROOT, frozen, work / "source")
         for name, directory in [("cloudcli", cloud), ("copilot-api", copilot)]:
             release_source.verify_source_tree(ROOT / name, frozen["submodules"][name], directory, frozen, name)
-    copy_required(source_root / "skills/config-new-codey-machine", runtime / "onboarding", [
-        "scripts/install.sh", "scripts/registration.mjs", "templates/a100-models.json", "templates/codex-config.toml", "dependencies.json",
-        "scripts/install-devtunnel-health.sh", "scripts/linux-devtunnel-health.mjs",
-        "scripts/linux-preflight.sh", "scripts/windows-runtime.mjs",
-    ])
+    copy_onboarding(source_root, runtime)
     if setup_config is not None:
         (runtime / "onboarding/setup.json").write_text(json.dumps(setup_config, indent=2) + "\n")
     shutil.copy2(cloud / "LICENSE", runtime / "LICENSE")
@@ -400,20 +412,16 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     home = work / "smoke-home"
     home.mkdir()
     smoke_env = {**env, "HOME": str(home), "COPILOT_API_HOME": str(home / "copilot-api")}
-    for args in (["--version"], ["--help"], ["gateway", "--help"], ["workspace", "--help"],
-                 ["setup", "--help"], ["doctor", "--json"]):
+    for args in (["--version"], ["--help"], ["copilot", "login", "--help"], ["copilot", "start", "--help"],
+                 ["start", "--help"], ["guard", "--help"], ["doctor", "--runtime-only", "--json"]):
         run([node / "bin/node", runtime / "bin/codey.mjs", *args], cwd=runtime, env=smoke_env)
     if setup_config is not None:
         # A build tree is deliberately not an installed HOME prefix. Validate
-        # embedded configuration here; the real npm-install test checks the CLI.
+        # embedded configuration here; the npm-install test checks the private bridge.
         run([node / "bin/node", "--input-type=module", "-e",
-             "import {installedSetup} from './lib/setup.mjs'; await installedSetup(process.cwd());"],
+             "import {installedSetup} from './lib/install.mjs'; await installedSetup(process.cwd());"],
             cwd=runtime, env=smoke_env)
-    run([node / "bin/node", runtime / "bin/codey.mjs", "gateway", "debug", "--json"],
-        cwd=runtime, env=smoke_env)
-    gateway_defaults = json.loads((home / "copilot-api/config.json").read_text())
-    if gateway_defaults.get("useResponsesApiWebSocket") is not False:
-        raise RuntimeError("Codey gateway must default useResponsesApiWebSocket to false")
+    run([node / "bin/node", runtime / "scripts/check-copilot.mjs", runtime], cwd=runtime, env=smoke_env)
     run([node / "bin/node", "-e",
          "require('better-sqlite3')(':memory:').close();"
          "const p=require('node-pty').spawn('/bin/sh',['-c','exit 0'],{env:process.env});"

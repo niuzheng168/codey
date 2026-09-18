@@ -1,76 +1,27 @@
-# Cross-platform PowerShell execution of metadata resolution and export control flow.
-# Native ACLs, COM tasks and processes remain covered by windows-oneclick-fixture.ps1.
-param([Parameter(Mandatory = $true)][string]$Root)
+# The package/configuration workflow is now Node, not a duplicate PowerShell parser.
+param([string]$Root, [string]$Node)
 $ErrorActionPreference = 'Stop'
-foreach ($file in Get-ChildItem -LiteralPath (Join-Path $Root 'package/scripts') -Filter '*.ps1') {
-    $tokens = $null; $errors = $null
-    $null = [Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
-    if ($errors.Count) { throw "PowerShell syntax error in $($file.Name): $($errors[0].Message)" }
-}
 . (Join-Path $Root 'package/scripts/install.ps1')
-# Portable I/O adapters only; production absolute Windows path/ACL code is unchanged.
-function Assert-CodeyPath { param($Path, $Root, [switch]$AllowRoot); return [IO.Path]::GetFullPath($Path) }
-function Write-CodeyFile { param($Path, $Content); [IO.File]::WriteAllText($Path, $Content) }
-function Check { param([bool]$Condition, [string]$Message); if (-not $Condition) { throw $Message } }
-
-$packageRoot = Join-Path $Root 'package'
-$manifestFile = Join-Path $packageRoot 'assets/manifest.json'
-$before = [IO.File]::ReadAllText($manifestFile)
-$package = Read-CodeyWindowsPackage $packageRoot
-Check ($package.Setup.platform -eq 'windows-x64') 'Setup must resolve to the native Windows platform'
-Check ($package.Manifest.platform -eq 'windows-x64') 'Windows runtime must not consume Linux service metadata'
-Check ($package.Manifest.nodeDistribution.url -like '*-win-x64.zip') 'Windows must use its own official Node distribution'
-Check ([IO.File]::ReadAllText($manifestFile) -ceq $before) 'Resolving the platform must not rewrite the shared artifact'
-Check (-not $package.Setup.PSObject.Properties['updater']) 'Public setup must not require updater metadata'
-Check ((@($package.Manifest.bundledRuntimes) -join ',') -eq 'cloudcli,copilot-api') 'Only the two application runtimes are bundled'
-
-# Exercise the real installed-package identity/platform check too, with only the
-# native addon and CLI subprocesses stubbed. A shared build has no .platform field.
-function Invoke-CodeyProcess {
-    param($Executable, $Arguments, $WorkingDirectory, $TimeoutSeconds)
-    if ($Arguments[0] -eq '-e') { return [pscustomobject]@{ Stdout = '' } }
-    if ($Arguments[1] -eq '--version') { return [pscustomobject]@{ Stdout = 'codey 0.1.0' } }
-    throw 'Unexpected command in installed-package fixture'
-}
-Assert-CodeyInstalledPackage (Join-Path $Root 'installed-codey') $package 'fixture-node'
-
-$script:Operations = [Collections.Generic.List[string]]::new()
-$owner = Join-Path $Root 'owner'
-[IO.Directory]::CreateDirectory($owner) | Out-Null
-$staging = Join-Path $owner 'registration.private.json'
-$config = [pscustomobject]@{
-    ownerHome = $owner; nodeExe = 'fixture-node'; helperPath = 'unused-old-helper'
-    registrationStaging = $staging
-}
-function Invoke-CodeyProcess {
-    param($Executable, $Arguments, $TimeoutSeconds)
-    $script:Operations.Add($Arguments[1])
-    if ($Arguments[1] -eq 'registration') {
-        [IO.File]::WriteAllText($staging, '{"schema":2,"fixture":"private-existing-identity"}')
-    } elseif ($Arguments[1] -eq 'check-registration') {
-        Check (Test-Path -LiteralPath $Arguments[3]) 'Export must be present before success validation'
-    } else { throw 'Unexpected process operation in export-only fixture' }
-}
-$configPath = Join-Path $owner 'runtime.json'
-$output = Export-CodeyRegistration $config $configPath
-Check ($output -eq (Join-Path $owner 'codey-machine-registration.json')) 'Export belongs in the original owner home'
-Check (Test-Path -LiteralPath $output) 'Registration export must exist'
-Check (-not (Test-Path -LiteralPath $staging)) 'Remove the private staging copy'
-[IO.File]::Delete($output)
-$null = Export-CodeyRegistration $config $configPath
-Check (Test-Path -LiteralPath $output) 'Re-export a missing JSON without reinstalling'
-Check (($script:Operations -join ',') -eq 'registration,check-registration,registration,check-registration') 'No service, auth or install operations'
-
-$banner = "Welcome to dev tunnels!`n`n" + '{"token":"private-fixture"}'
-Check ((ConvertFrom-CodeyTunnelJson $banner).token -ceq 'private-fixture') 'Handle DevTunnel banners'
-$rejected = $false
-try { ConvertFrom-CodeyTunnelJson '{"token":"private-fixture"} trailer' | Out-Null }
-catch {
-    $rejected = $true
-    Check (-not $_.Exception.Message.Contains('private-fixture')) 'Do not print token-bearing parser errors'
-}
-Check $rejected 'Reject malformed DevTunnel JSON'
-
-Check (-not (Get-Command Install-CodeyAutomaticUpdater -ErrorAction SilentlyContinue)) 'No automatic updater entrypoint is installed'
-Check (-not (Test-Path -LiteralPath (Join-Path $packageRoot 'scripts/updater-bootstrap.mjs'))) 'No updater bootstrap is shipped'
+$script = @'
+const fs = require("node:fs"), path = require("node:path"), {pathToFileURL} = require("node:url");
+(async () => {
+  const root = process.argv[1], skill = path.join(root, "package");
+  const {readPackage, assertInstalled} = await import(pathToFileURL(path.join(skill, "scripts/machine-package.mjs")));
+  const manifest = JSON.parse(fs.readFileSync(path.join(skill, "assets/manifest.json")));
+  const original = fs.readFileSync(path.join(skill, "assets/manifest.json"));
+  if (!manifest.runtimePlatforms) {
+    await require("node:assert/strict").rejects(readPackage(skill, "windows-x64"));
+    return;
+  }
+  const prepared = await readPackage(skill, "windows-x64");
+  require("node:assert/strict").equal(prepared.setup.platform, "windows-x64");
+  require("node:assert/strict").ok(prepared.pins.node.url.endsWith("-win-x64.zip"));
+  await assertInstalled(path.join(root, "installed-codey"), prepared.manifest);
+  require("node:assert/strict").deepEqual(fs.readFileSync(path.join(skill, "assets/manifest.json")), original);
+})().catch(e => {console.error(e.message);process.exitCode=1});
+'@
+& $Node -e $script $Root
+if ($LASTEXITCODE -ne 0) { throw 'Shared Node package verification failed' }
+if (Get-Command Read-CodeyWindowsPackage -ErrorAction SilentlyContinue) { throw 'A second package workflow survived' }
+if (Get-Command Install-CodeyAutomaticUpdater -ErrorAction SilentlyContinue) { throw 'An updater survived' }
 Write-Output 'WINDOWS_REGISTRATION_FIXTURE_OK'

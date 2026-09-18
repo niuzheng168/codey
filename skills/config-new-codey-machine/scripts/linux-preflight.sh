@@ -23,15 +23,24 @@ codey_unit_runtime() {
   [[ "$(grep -c '^ExecStart=' "$file")" == 1 ]] || return 1
   line="$(grep '^ExecStart=' "$file")"
   read -r node entry rest <<<"${line#ExecStart=}"
-  [[ "$node" == /* && "$entry" == "$HOME/"*/bin/codey.mjs && -x "$node" ]] || return 1
-  package="${entry%/bin/codey.mjs}"
-  codey_owned_path "$entry" && [[ -f "$entry" && -f "$package/codey-build.json" ]] || return 1
-  grep -Fqx "WorkingDirectory=$package" "$file" || return 1
+  [[ "$node" == /* && -x "$node" ]] || return 1
+  # Recognize old running nodes only for read-only ownership checks, not as CLI aliases.
   case "$role" in
-    workspace) [[ "$rest" == workspace ]] || return 1 ;;
-    gateway) [[ "$rest" == 'gateway start --headless --host 127.0.0.1 --port 4141' ]] || return 1 ;;
+    workspace)
+      if [[ "$entry" == "$HOME/"*/lib/workspace.mjs && -z "$rest" ]]; then
+        package="${entry%/lib/workspace.mjs}"
+      elif [[ "$entry" == "$HOME/"*/bin/codey.mjs && "$rest" == workspace ]]; then
+        package="${entry%/bin/codey.mjs}"
+      else return 1; fi ;;
+    copilot)
+      [[ "$entry" == "$HOME/"*/bin/codey.mjs ]] || return 1
+      package="${entry%/bin/codey.mjs}"
+      [[ "$rest" == 'copilot start --host 127.0.0.1 --port 4141' ||
+                 "$rest" == 'gateway start --headless --host 127.0.0.1 --port 4141' ]] || return 1 ;;
     *) return 1 ;;
   esac
+  codey_owned_path "$entry" && [[ -f "$entry" && -f "$package/codey-build.json" ]] || return 1
+  grep -Fqx "WorkingDirectory=$package" "$file" || return 1
   printf '%s\n%s\n' "$node" "$package"
 }
 
@@ -40,7 +49,7 @@ codey_listener_owned() {
   local -a saved argv expected
   [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
   if [[ "$port" == 3001 ]]; then unit=codey-cloudcli.service; role=workspace
-  else unit=codey-copilot-api.service; role=gateway; fi
+  else unit=codey-copilot-api.service; role=copilot; fi
   before="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
   [[ "$(stat -c '%u' "/proc/$pid")" == "$(id -u)" &&
      "$(systemctl --user show "$unit" -p MainPID --value)" == "$pid" ]] || return 1
@@ -50,7 +59,12 @@ codey_listener_owned() {
   [[ "$(readlink -f "/proc/$pid/exe")" == "$(readlink -f "$node")" ]] || return 1
   mapfile -d '' -t argv <"/proc/$pid/cmdline" || return 1
   expected=("$node" "$package/bin/codey.mjs" "$role")
-  [[ "$role" != gateway ]] || expected+=(start --headless --host 127.0.0.1 --port 4141)
+  [[ "$role" != copilot ]] || expected+=(start --host 127.0.0.1 --port 4141)
+  if [[ "$role" == workspace && "${argv[1]:-}" == "$package/lib/workspace.mjs" ]]; then
+    expected=("$node" "$package/lib/workspace.mjs")
+  elif [[ "$role" == copilot && "${argv[2]:-}" == gateway ]]; then
+    expected=("$node" "$package/bin/codey.mjs" gateway start --headless --host 127.0.0.1 --port 4141)
+  fi
   [[ "${#argv[@]}" == "${#expected[@]}" ]] || return 1
   for i in "${!expected[@]}"; do [[ "${argv[i]}" == "${expected[i]}" ]] || return 1; done
   after="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
@@ -103,7 +117,7 @@ codey_linux_preflight() {
     { echo 'This node still has a retired updater. Explicit migration is required.' >&2; return 1; }
   printf '[preflight] Owner: %s (uid %s); native Linux x64; computer: %s\n' "$(id -un)" "$(id -u)" "$(hostname)"
   CODEY_EXISTING_PACKAGE="" CODEY_EXISTING_NODE=""
-  for role in gateway workspace; do
+  for role in copilot workspace; do
     unit=codey-copilot-api.service
     [[ "$role" != workspace ]] || unit=codey-cloudcli.service
     [[ ! -e "$HOME/.config/systemd/user/$unit" && ! -L "$HOME/.config/systemd/user/$unit" ]] && continue

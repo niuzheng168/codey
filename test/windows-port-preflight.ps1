@@ -8,13 +8,7 @@ foreach ($file in @($Installer, (Join-Path $PSScriptRoot 'windows-oneclick-fixtu
     if ($errors.Count) { throw ($errors | Out-String) }
 }
 . $Installer
-# Exercise template rendering and removed-option binding before replacing path
-# handling for the native Windows command-line classifier below.
-$models = 'C:\Users\owner''s $& home\models.json'
-$rendered = Get-CodeyCodexConfiguration $models
-$catalog = [regex]::Match($rendered, '(?m)^model_catalog_json = (.+)$').Groups[1].Value | ConvertFrom-Json
-if ($catalog -cne $models -or $rendered -notmatch 'http://127\.0\.0\.1:4141' -or
-    $rendered.Contains('__CODEY_MODEL_CATALOG__')) { throw 'Shared model configuration rendering failed' }
+# Removed workflow flags still fail before native installation.
 $rejected = $false
 try { Invoke-CodeyWindowsInstall -Repair $true } catch { $rejected = $_.FullyQualifiedErrorId -like 'NamedParameterNotFound*' }
 if (-not $rejected) { throw 'Removed repair option must fail before native installation can run' }
@@ -25,13 +19,14 @@ $previous = [pscustomobject]@{
     codeyDirectory = 'C:\Users\owner name\Codey\app\node_modules\codey'
 }
 $entry = Join-Path $previous.codeyDirectory 'bin\codey.mjs'
+$worker = Join-Path $previous.codeyDirectory 'lib\workspace.mjs'
 $workspace = [pscustomobject]@{
     ProcessId = 11; ExecutablePath = $previous.nodeExe
-    CommandLine = Join-CodeyArguments @($previous.nodeExe, $entry, 'workspace', '--host', '127.0.0.1', '--port', '3001')
+    CommandLine = Join-CodeyArguments @($previous.nodeExe, $worker)
 }
 $gateway = [pscustomobject]@{
     ProcessId = 12; ExecutablePath = $previous.nodeExe
-    CommandLine = Join-CodeyArguments @($previous.nodeExe, $entry, 'gateway', 'start', '--headless', '--host', '127.0.0.1', '--port', '4141')
+    CommandLine = Join-CodeyArguments @($previous.nodeExe, $entry, 'copilot', 'start', '--host', '127.0.0.1', '--port', '4141')
 }
 $script:Processes = @($workspace, $gateway)
 $script:Listeners = @(
@@ -51,12 +46,29 @@ Assert-CodeyPortOwnership 'owner' $previous
 Check (@(Get-CodeyForeignListeners $script:Listeners $script:Processes $null).Count -eq 3)
 Check (@(Get-CodeyForeignListeners $script:Listeners @() $previous).Count -eq 3)
 
+$goodWorker = $workspace.CommandLine
+$workspace.CommandLine = Join-CodeyArguments @($previous.nodeExe, $entry, 'workspace', '--host', '127.0.0.1', '--port', '3001')
+Check (@(Get-CodeyForeignListeners $script:Listeners $script:Processes $previous).Count -eq 0)
+foreach ($bad in @(
+    ($goodWorker + ' --host 127.0.0.1'),
+    (Join-CodeyArguments @($previous.nodeExe, '-e', $worker)),
+    (Join-CodeyArguments @($previous.nodeExe, ($worker + '.other'))),
+    (Join-CodeyArguments @($previous.nodeExe, $entry, $worker))
+)) {
+    $workspace.CommandLine = $bad
+    Check (@(Get-CodeyForeignListeners $script:Listeners $script:Processes $previous).Count -eq 1)
+}
+$workspace.CommandLine = $goodWorker
+
 $good = $gateway.CommandLine
+$gateway.CommandLine = Join-CodeyArguments @($previous.nodeExe, $entry, 'gateway', 'start', '--headless', '--host', '127.0.0.1', '--port', '4141')
+Check (@(Get-CodeyForeignListeners $script:Listeners $script:Processes $previous).Count -eq 0)
+$gateway.CommandLine = $good
 foreach ($bad in @(
     ($good + ' --eval other'),
     (Join-CodeyArguments @($previous.nodeExe, '-e', "echo $entry gateway")),
     (Join-CodeyArguments @($previous.nodeExe, ($entry + '.other'), 'gateway', 'start', '--headless', '--host', '127.0.0.1', '--port', '4141')),
-    (Join-CodeyArguments @($previous.nodeExe, $entry, 'workspace', '--host', '127.0.0.1', '--port', '3001'))
+    (Join-CodeyArguments @($previous.nodeExe, $worker))
 )) {
     $gateway.CommandLine = $bad
     Check (@(Get-CodeyForeignListeners $script:Listeners $script:Processes $previous).Count -eq 2)

@@ -33,6 +33,27 @@ if command -v node >/dev/null 2>&1 &&
    node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||a===22&&b>=13?0:1)' >/dev/null 2>&1; then
   exec node "$HERE/install-macos.mjs" "$@"
 fi
+# A managed node already has Node even when the owner has no global Node/PATH.
+# Reuse only its private, checksummed executable; never download on a rerun.
+runtime="$HOME/.config/codey-machine-macos/runtime.json"
+if [[ -f "$runtime" ]]; then
+  [[ ! -L "$runtime" && "$(/usr/bin/stat -f '%u:%Lp' "$runtime")" == "$(id -u):600" ]] ||
+    die "Existing runtime ownership/permissions require review."
+  node="$(/usr/bin/plutil -extract nodeExe raw -o - "$runtime")"
+  checksum="$(/usr/bin/plutil -extract fileHashes.nodeExe raw -o - "$runtime")"
+  [[ "$node" == "$HOME/.local/share/codey-machine-macos/releases/"* && "$checksum" =~ ^[a-f0-9]{64}$ ]] ||
+    die "Existing runtime requires explicit migration."
+  cursor="$node"
+  while [[ "$cursor" != "$HOME" ]]; do
+    [[ ! -L "$cursor" && "$(/usr/bin/stat -f '%u' "$cursor")" == "$(id -u)" ]] ||
+      die "Existing Node path is linked or belongs to another owner."
+    mode="$(/usr/bin/stat -f '%Lp' "$cursor")"
+    (( (8#$mode & 022) == 0 )) || die "Existing Node path is writable by others."
+    cursor="$(dirname -- "$cursor")"
+  done
+  [[ "$(/usr/bin/shasum -a 256 "$node" | awk '{print $1}')" == "$checksum" ]] || die "Existing Node fingerprint mismatch."
+  exec "$node" "$HERE/install-macos.mjs" "$@"
+fi
 if [[ "$apply" != true ]]; then
   printf '%s\n' 'Node 22.13+ with npm is not installed. Apply will prepare the pinned official Node, then run the complete preflight.' \
     "Computer: $(hostname)" 'No downloads, files, services or model requests were made. Full package preflight requires Node.'

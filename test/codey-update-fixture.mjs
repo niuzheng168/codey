@@ -1,4 +1,4 @@
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -83,10 +83,19 @@ export async function packageFixture(root, version) {
   }
   // The real CLI/router/installer run; only native-module probes are synthetic in this dependency-free fixture.
   await writeFile(path.join(root, "lib/doctor.mjs"),
-    `import { readPackageInfo } from "./package-info.mjs";\nexport async function runDoctor(root) {
-      const info = await readPackageInfo(root); console.log(JSON.stringify({ok:true,version:info.pkg.version,fixture:true}));
-    }\n`);
+    (await readFile(new URL("lib/doctor.mjs", source), "utf8"))
+      .replace("nativeCheck = checkNativeModules", "nativeCheck = async () => ({ fixture: true })"));
   await fingerprint(root);
+  // Match npm's private installation umask, not the source checkout's possibly
+  // group-writable directory modes copied by fs.cp.
+  const privateModes = async directory => {
+    for (const item of await readdir(directory, { withFileTypes: true })) {
+      const file = path.join(directory, item.name);
+      await chmod(file, (await lstat(file)).mode & 0o755);
+      if (item.isDirectory()) await privateModes(file);
+    }
+  };
+  await privateModes(root);
   return root;
 }
 
