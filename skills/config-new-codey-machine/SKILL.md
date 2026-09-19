@@ -22,7 +22,7 @@ description: "跨平台安装和管理 Codey：复用 gh 的 Copilot/DevTunnel �
 | 后台守护 | `codey guard [--json] [--timeout SECONDS]` | 启用并启动已安装的应用/隧道保活、token 续期和 Linux 隧道健康监测；与后台 start 共用幂等流程，不新增常驻层 |
 | 6. 组件检查 | `codey doctor [--json]` | 包/原生模块、工具、服务、端口、凭据存在、隧道连接、证书和本地 TLS/SSO/鉴权；`--model` 才调用真实模型 |
 | 7. 压缩备份/恢复 | `codey export FILE.gz` / `codey import FILE.gz` | 备份文件型 key/token/设置与节点证书；恢复先 `--check`，确认覆盖后加 `--replace-existing` |
-| 8. 从包更新 | `codey update FILE.tgz` | 一次性校验、准备新版本、切换服务；先 `--check`，离线用 `--offline`，可用 `--sha256 HASH` 核对发行摘要 |
+| 8. 从包更新 | `codey update FILE.tgz` | 先 `--check`；Linux 支持 `--background`，在 Codex/Workspace 内自动交给独立一次性任务，短暂断连后重连；用 `update --status` 确认完成 |
 
 各命令的用途、长短参数、默认值、约束和示例见 **[Codey 命令行参考](references/codey-cli.md)**：按 `codey <命令>` 分组，Copilot/DevTunnel 的子命令分别说明；回答 CLI 问题或拼接命令时只读对应项，不猜参数。
 安装只走下方安装脚本；公开 `setup/workspace/gateway/auth/mcp` 入口均已删除。`guard` 不安装或重建服务，未完成安装时停止。
@@ -31,7 +31,9 @@ CloudCLI 统一由 `codey start` 启动，没有独立子命令。`copilot start
 备份含秘密且**未加密**，只能保存在用户 Home 内的私有文件，不上传聊天；不备份程序/依赖、数据库/项目/会话或系统凭据库。恢复后用 `devtunnel login`、`doctor` 验证。
 完整恢复限同一节点/用户/平台；跨节点用 `import --settings-only`，只迁移网关/Codex 文件设置与凭据，保留目标节点身份。节点密钥或证书变化需重新接入/固定 Portal 凭据。
 更新保留配置、身份、工具、证书和原版本；捕获到失败时回退，不增加 Python、Portal 更新代理或常驻更新器。中断留下 `install.lock` 时先核对状态，不强删锁重试。
-不要使用 `copilot login --show-token` 做普通诊断。停止/重启、恢复和更新在原用户的外部终端运行。
+不要使用 `copilot login --show-token` 做普通诊断。停止/重启、恢复，以及 Windows/macOS 更新仍在原用户的外部终端运行。
+Linux 后台更新无须退出客户端，不等于零中断：进行中的请求、工作区终端命令可能被中断，不自动重放。先保存工作，长任务结束后再切换。
+提交成功只表示已排队，不表示已升级；以 `codey update --status` 的 `completed` 及 `codey doctor` 为准。独立任务接管同一操作锁，断连后不能重复提交、强删锁；失败或未知状态先核对私有报告。旧版 CLI 不具备此行为，第一次升级仍需外部原用户终端或经授权的一次性原生任务。
 
 ## GitHub 认证复用
 
