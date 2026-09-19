@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,13 +9,20 @@ import { promisify } from "node:util";
 import { runDoctor, doctorOptions } from "../packages/codey/lib/doctor.mjs";
 import { RUNTIME_PLATFORMS, readPackageInfo, runtimePlatform, validateRuntimeLock } from "../packages/codey/lib/package-info.mjs";
 import { readInstalledPackageInfo } from "../packages/codey/lib/package-files.mjs";
-import { installerPlatform, installLauncher, installOptions, launcherContents, npmCandidates, npmPackageRoot, WINDOWS_PATH_SCRIPT } from "../scripts/install-codey-runtime.mjs";
+import { installerPlatform, installLauncher, installOptions, launcherContents, npmCandidates, npmPackageRoot, npmRegistry, WINDOWS_PATH_SCRIPT } from "../scripts/install-codey-runtime.mjs";
 
 const exec = promisify(execFile);
 const digest = bytes => createHash("sha256").update(bytes).digest("hex");
 
+test("per-install npm mirrors require HTTPS and never take inline credentials", () => {
+  assert.equal(npmRegistry("https://mirrors.cloud.tencent.com/npm/"), "https://mirrors.cloud.tencent.com/npm");
+  assert.equal(npmRegistry("https://registry.npmjs.org"), "https://registry.npmjs.org");
+  for (const value of ["http://registry.npmjs.org", "https://user:pass@example.test", "https://example.test/?token=x",
+    "https://example.test/#x", "not a URL"]) assert.throws(() => npmRegistry(value));
+});
+
 async function fixture(t) {
-  const home = await mkdtemp(path.join(os.tmpdir(), "codey-shared-runtime-"));
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), "codey-shared-runtime-")));
   t.after(() => rm(home, { recursive: true, force: true }));
   const root = path.join(home, "package with spaces");
   await mkdir(root);

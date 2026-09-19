@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { assertLinuxCodexAvailable } from "../skills/config-new-codey-machine/scripts/platform-linux.mjs";
 
 async function fixture(t) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "codey-codex-processes-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "codey-codex-processes-")));
   t.after(() => rm(root, { recursive: true, force: true }));
   const procRoot = path.join(root, "proc"), target = path.join(root, "codey-codex");
   await mkdir(procRoot);

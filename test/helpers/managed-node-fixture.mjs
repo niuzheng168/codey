@@ -1,5 +1,5 @@
 // Real private files/package/certificate, replace only native OS services and network.
-import { chmod, cp, mkdir, readFile, readdir } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, readdir, realpath } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { Machine, machinePaths } from "../../packages/codey/lib/machine.mjs";
@@ -7,6 +7,7 @@ import { readPackageInfo } from "../../packages/codey/lib/package-info.mjs";
 import { checkedPath, digest, directory, readPrivate, writePrivate } from "../../skills/config-new-codey-machine/scripts/machine-common.mjs";
 import { packageFixture, fingerprint, packFixture } from "../codey-update-fixture.mjs";
 import { registrationFixture } from "./registration-fixture.mjs";
+import { Installer } from "../../skills/config-new-codey-machine/scripts/install-machine.mjs";
 
 export async function addOnboarding(root) {
   await cp(new URL("../../skills/config-new-codey-machine/", import.meta.url), path.join(root, "onboarding"),
@@ -25,6 +26,7 @@ export async function addOnboarding(root) {
 
 export async function managedFixture(t, target = "linux-x64") {
   const f = await registrationFixture(t, target);
+  f.home = await realpath(f.home);
   const platform = target.startsWith("macos") ? "darwin" : target.startsWith("windows") ? "win32" : "linux";
   const locations = machinePaths(f.home, platform), state = path.join(locations.root, "state");
   const app = await packageFixture(path.join(locations.root, "releases/old/app"), "1.0.0");
@@ -87,6 +89,7 @@ export async function managedFixture(t, target = "linux-x64") {
     ownerSid: config.ownerSid, setup: await readPrivate(config.setupFile), commandRegistered: false,
     checked: file => checkedPath(file, f.home), directory: file => directory(file, f.home),
     read: readPrivate, write: writePrivate, pause: ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 2))),
+    sameComputer: config => Installer.prototype.sameComputer.call(i, config),
     async run(file, args, options) {
       f.calls.push({ file, args, options });
       if (args[0] === "--version") return { code: 0, stdout: "fixture version", stderr: "" };
@@ -108,7 +111,7 @@ export async function managedFixture(t, target = "linux-x64") {
     },
     async configure(c) { await writePrivate(path.join(i.configRoot, "provider.env"), Buffer.from("CODEY_MODEL_API_KEY=" + c.modelKey + "\n")); },
     async switchPackage() { f.calls.push("switch"); if (f.failSwitch) { f.failSwitch = false; throw new Error("fixture switch failure"); } },
-    async ready() {}, async inspect() {}, async external() { f.calls.push("external"); },
+    async ready() {}, async inspect() {}, async machineIdentity() {}, async external() { f.calls.push("external"); },
     resources: c => f.states.map(item => ({ kind: "fixture-service", name: item.name, path: path.join(i.root, item.name) })),
   };
   Object.assign(f, { app, config, i, identity, modelKey, platform, m: new Machine(i, config, info) });

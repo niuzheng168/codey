@@ -58,7 +58,7 @@ export async function writeResources(i, config) {
     ...(i.target === "linux-x64" ? [path.join(i.root, "linux-devtunnel-health.mjs")] : [])].filter(Boolean))]) {
     if (inside(i.root, candidate) && await exists(candidate)) document.supportFiles.push({ path: candidate, sha256: await digest(candidate) });
   }
-  if (i.target === "linux-x64") document.modified.push(...[".profile", ".bashrc"].map(name => ({
+  if (!windows) document.modified.push(...unixProfiles(i.target).map(name => ({
     path: path.join(i.home, name), kind: "shell-block", marker: "# >>> Codey model API >>>",
   })));
   if (!windows) {

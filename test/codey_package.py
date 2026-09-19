@@ -66,7 +66,21 @@ class MemoryStore:
     def rmdir(self, name): self.directories.remove(name)
 
 
-@unittest.skipUnless(sys.platform == "linux", "Linux package builder")
+class BuildHostTests(unittest.TestCase):
+    def test_mac_experiments_cannot_become_production_builds(self):
+        for system, machine in (("Darwin", "arm64"), ("Darwin", "x86_64")):
+            with patch.object(package.platform, "system", return_value=system), \
+                    patch.object(package.platform, "machine", return_value=machine):
+                for reviewed, node in ((False, None), (False, "/node"), (True, None)):
+                    with self.assertRaisesRegex(RuntimeError, "Release builds require Linux"):
+                        package.validate_build_host(reviewed, node)
+                package.validate_build_host(True, "/node")
+        with patch.object(package.platform, "system", return_value="Linux"), \
+                patch.object(package.platform, "machine", return_value="x86_64"):
+            package.validate_build_host(False, None)
+
+
+@unittest.skipUnless(sys.platform in ("linux", "darwin"), "Unix package contract")
 class CodeyPackageTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="codey-npm-package-")
@@ -246,6 +260,8 @@ class CodeyPackageTests(unittest.TestCase):
             ("public/addon.node", b"native payload"),
             ("public/program", b"\x7fELFnative payload"),
             ("public/program.js", b"MZnative payload"),
+            *((f"public/mach-{magic}", bytes.fromhex(magic) + b"native payload") for magic in
+              ("feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca")),
         ):
             with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, "platform-native"):
                 package.inspect_npm_package(self.rewritten(
@@ -331,6 +347,8 @@ class CodeyPackageTests(unittest.TestCase):
                 "The Skill must ship its current guidance and metadata unchanged",
             )
         self.assertEqual(len(list((skill / "assets").glob("*.tgz"))), 1)
+        if sys.platform != "linux":
+            return  # Package contents are universal; this legacy shell entry is Linux-only.
         home = self.root / "skill-home"
         home.mkdir()
         stubs = self.root / "preflight-stubs"

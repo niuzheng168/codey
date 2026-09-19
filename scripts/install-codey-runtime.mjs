@@ -12,6 +12,13 @@ const DEFAULT_PACKAGE_FILE = "";
 const DEFAULT_PACKAGE_SHA256 = "";
 const MARKER = "CODEY_SHARED_NPM_LAUNCHER";
 const PUBLIC_REGISTRY = "https://registry.npmjs.org";
+export function npmRegistry(value = process.env.CODEY_NPM_REGISTRY || PUBLIC_REGISTRY) {
+  const url = new URL(value);
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+    throw new Error("CODEY_NPM_REGISTRY must be an HTTPS registry without credentials, query or fragment.");
+  }
+  return url.href.replace(/\/$/, "");
+}
 const HELP = `Usage: node install-codey.mjs [--package FILE.tgz] [--sha256 HASH] [--prefix DIR] [--check | --no-launcher]
                               [--reuse-from EXISTING_CODEY_DIRECTORY]
 
@@ -26,6 +33,8 @@ plan without downloads, npm, files or PATH changes. Native dependencies are defe
 --reuse-from copies identical, already installed dependencies instead of downloading
 or rebuilding them. This offline path requires the same dependency lock and a
 compatible existing Node/native ABI; it never falls back to the registry.
+CODEY_NPM_REGISTRY selects an HTTPS mirror for this install only; npm's global
+configuration, locked versions, integrity hashes and TLS verification stay intact.
 
 No services, DevTunnel, credentials or Codex settings are modified, and no Portal
 registration JSON is generated. For a complete node use the installation Skill's
@@ -209,6 +218,7 @@ export async function installLauncher(home, node, root, { execute = command, pla
 export async function installRuntime(args) {
   const options = installOptions(args);
   if (options.help) return console.log(HELP);
+  const registry = npmRegistry();
   const platform = process.platform;
   const target = installerPlatform();
   if (process.getuid?.() === 0 || os.userInfo().username.toUpperCase() === "SYSTEM") throw new Error("Run as the target OS user, not root or SYSTEM.");
@@ -252,7 +262,7 @@ export async function installRuntime(args) {
   }
   await chmod(prefix, 0o700);
   const env = { ...process.env, PATH: path.dirname(node) + path.delimiter + (process.env.PATH ?? "") };
-  const npmFlags = ["--omit=dev", "--no-audit", "--no-fund", "--umask=0077", "--strict-ssl=true", `--registry=${PUBLIC_REGISTRY}`];
+  const npmFlags = ["--omit=dev", "--no-audit", "--no-fund", "--prefer-offline", "--umask=0077", "--strict-ssl=true", `--registry=${registry}`];
   const npmArgs = platform === "win32" ? [npm] : [
     "--input-type=commonjs", "-e", "process.umask(0o077); require(process.argv[1]);", npm,
   ];

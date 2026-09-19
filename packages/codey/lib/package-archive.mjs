@@ -164,7 +164,7 @@ export async function inspectPackageArchive(filename, expectedSha256) {
         if (first) {
           const magic = chunk.subarray(0, 4).toString("hex");
           if (magic === "7f454c46" || magic.startsWith("4d5a") ||
-              ["feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe", "bebafeca"].includes(magic)) {
+              ["feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca"].includes(magic)) {
             fail("bundled native executable");
           }
           first = false;

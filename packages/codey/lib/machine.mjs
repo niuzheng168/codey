@@ -84,6 +84,7 @@ export async function openMachine(root, { createInstaller, ...context } = {}) {
   const i = createInstaller ? await createInstaller(skill, { ...context, home }) :
     new (await import(pathToFileURL(path.join(skill, "scripts/install-machine.mjs")).href)).Installer(skill, { ...context, home });
   if (platform === "win32") await i.adapter.inspect(); // Obtains/verifies the original non-elevated owner SID.
+  if (platform === "darwin") await i.adapter.machineIdentity();
   await i.checked(i.file);
   let config;
   try { config = await i.read(i.file); } catch { fail("Cannot read this owner's private runtime.json"); }
@@ -91,7 +92,7 @@ export async function openMachine(root, { createInstaller, ...context } = {}) {
   if (config.schema !== 2 || config.kind !== `codey-${target.split("-")[0]}-oneclick` ||
       config.layout !== "npm-codey-package" || config.platform !== target || config.ownerHome !== home ||
       (i.ownerSid ? config.ownerSid !== i.ownerSid : config.ownerUid !== process.getuid()) ||
-      config.computer !== i.computer || config.runtimeRoot !== locations.root || config.configRoot !== locations.configRoot ||
+      !i.sameComputer(config) || config.runtimeRoot !== locations.root || config.configRoot !== locations.configRoot ||
       !/^n-[a-f0-9]{24}$/.test(config.nodeId) || config.pythonExe || config.updater) {
     fail("Node configuration belongs to another owner/machine or needs an explicit legacy migration");
   }

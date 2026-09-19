@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { npmPackageRoot } from "../scripts/install-codey-runtime.mjs";
+import { installerPlatform, npmPackageRoot } from "../scripts/install-codey-runtime.mjs";
 import { knownRuntimePlatforms } from "../packages/codey/lib/package-info.mjs";
 
 const exec = promisify(execFile);
@@ -25,10 +25,10 @@ async function port() {
 }
 
 test("the identical shared artifact installs, validates native modules and starts both servers on the target OS", {
-  skip: !artifact || !["linux", "win32"].includes(process.platform),
+  skip: !artifact || !["linux", "win32", "darwin"].includes(process.platform),
   timeout: process.env.CODEY_PACKAGE_REUSE_FROM ? 900000 : 300000,
 }, async t => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codey-shared-install-"));
+  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "codey-shared-install-")));
   let stopServer;
   t.after(async () => {
     if (stopServer) await stopServer();
@@ -50,8 +50,9 @@ test("the identical shared artifact installs, validates native modules and start
     COPILOT_API_HOME: apiHome, CODEX_HOME: path.join(home, ".codex"),
     DATABASE_PATH: path.join(home, "workspace.db"), CODEY_PORTAL_SSO: "false",
     NODE_ENV: "production", CI: "true", ELECTRON_SKIP_BINARY_DOWNLOAD: "1",
-    npm_config_cache: path.join(os.homedir(), ".npm"),
+    npm_config_cache: process.env.CODEY_COLD_INSTALL ? path.join(directory, "empty-npm-cache") : path.join(os.homedir(), ".npm"),
     npm_config_userconfig: path.join(home, "npmrc"),
+    ...(process.env.CODEY_NPM_REGISTRY ? { CODEY_NPM_REGISTRY: process.env.CODEY_NPM_REGISTRY } : {}),
     ...Object.fromEntries(["SystemRoot", "ComSpec", "TEMP", "TMP", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
       "NODE_EXTRA_CA_CERTS", "NODE_USE_SYSTEM_CA"].filter(name => process.env[name]).map(name => [name, process.env[name]])),
   };
@@ -69,6 +70,7 @@ test("the identical shared artifact installs, validates native modules and start
     await cp(process.env.CODEY_PACKAGE_REUSE_FROM, donor, { recursive: true, verbatimSymlinks: true });
     reuseArgs.push("--reuse-from", donor);
   }
+  const startedAt = performance.now();
   const install = await exec(process.execPath, [installer, "--package", file, "--sha256", hash,
     "--prefix", prefix, "--no-launcher", ...reuseArgs], {
     env, timeout: reuseArgs.length ? 600000 : 240000, maxBuffer: 8 * 1024 * 1024,
@@ -80,7 +82,7 @@ test("the identical shared artifact installs, validates native modules and start
   const info = JSON.parse((await exec(process.execPath, [cli, "doctor", "--runtime-only", "--json"], { env, timeout: 20000 })).stdout);
   const build = JSON.parse(await readFile(path.join(root, "codey-build.json"), "utf8"));
   assert.equal(info.ok, true);
-  assert.equal(info.platform, windows ? "windows-x64" : "linux-x64");
+  assert.equal(info.platform, installerPlatform());
   assert.ok(knownRuntimePlatforms(info.runtimePlatforms));
   assert.ok(info.runtimePlatforms.includes(info.platform));
   assert.deepEqual(info.native, { sqlite: true, bcrypt: true, ripgrep: true, pty: true, codexSdk: true });
@@ -152,5 +154,10 @@ test("the identical shared artifact installs, validates native modules and start
   assert.ok(ready, output);
   assert.equal((await fetch(gateway + "/token-usage")).status, 401);
   assert.equal((await fetch(gateway + "/token-usage", { headers: { Authorization: `Bearer ${key}` } })).status, 200);
+  const elapsed = (performance.now() - startedAt) / 1000;
+  t.diagnostic(`Fresh package install, native modules, both servers and data authentication: ${elapsed.toFixed(1)}s (${process.env.CODEY_COLD_INSTALL ? "empty" : "existing"} npm cache)`);
+  if (process.env.CODEY_INSTALL_BUDGET_SECONDS) {
+    assert.ok(elapsed < Number(process.env.CODEY_INSTALL_BUDGET_SECONDS), "Runtime installation exceeded the requested time budget");
+  }
   await stop();
 });
