@@ -365,19 +365,27 @@ codey doctor
 用本地 Codey npm 包一次性更新应用，保留配置、身份、证书、工具和原启停状态。
 
 ```text
-codey update FILE.tgz [--sha256 HASH] [--check] [--offline] [--json]
+codey update FILE.tgz [--sha256 HASH] [--check] [--offline] [--background] [--json]
+codey update --status [--json]
 ```
 
 | 参数 / 别名 | 取值与默认值 | 含义 |
 | --- | --- | --- |
-| `FILE.tgz` | 必填；本地可信 Codey npm 包 | 更新来源；不是 URL、npm 名称、旧升级包或设置备份，须兼容当前平台/Node |
+| `FILE.tgz` | 必填；查询 `--status` 时不接受文件 | 本地可信 Codey npm 包；不是 URL、npm 名称、旧升级包或设置备份，须兼容当前平台/Node |
 | `--sha256 HASH` | 64 位十六进制；未指定 | 与独立获得的发行 SHA-256 核对；不匹配时不改动任何内容 |
 | `--check` | 布尔；`false` | 只读检查包、兼容性、服务归属和依赖计划；不下载、不写入、不停服务 |
 | `--offline` | 布尔；`false` | 禁止依赖下载，要求依赖锁与当前安装一致；复制并验证已有依赖 |
+| `--background` | 布尔；`false`；仅 Linux | 交给独立 systemd 用户一次性任务；无需退出客户端。Linux 的 Codex/Workspace 进程树内自动采用此模式 |
+| `--status` | 布尔；`false` | 只读查询最近一次后台更新的阶段/结果；只可与 `--json` 组合，不触发下载、重试或服务变更 |
 | `--json` | 布尔；`false` | 输出版本、摘要、依赖模式、备份路径等非敏感结果 |
 
 - 相同依赖锁优先复用；锁变化时通过 npm 下载依赖并准备原生模块。相同且完全匹配的包不重复安装。
-- 实际更新在原用户外部终端执行：先准备/校验新版本，再保存 `before-update-*.gz`、停止守护、切换应用并恢复原启停状态。失败时回退；旧版本目录保留。
+- 先准备/校验新版本，再保存 `before-update-*.gz`、切换应用并恢复原启停状态；失败时回退，旧版本目录保留。Linux 原生隧道服务定义未变化时不重启隧道；gh host 的包装程序路径变化时仍连同其守护切换。
+- Linux 后台任务继承同一独占操作锁，不依附聊天/终端，不开机自启，不因失败而自动重试。准备好后留出 5 秒再切换；这不是等待空闲或不中断迁移。连接短暂断开后客户端可重连，进行中的模型请求及 Workspace 终端命令可能中断，不能自动重放有副作用的任务；会话文件保留，不承诺恢复内存中的所有进程状态。
+- 切换前重新核对托管配置、工具、端口和原启停状态；准备期间被其他操作修改时拒绝切换，不覆盖这些改动。此时以及切换前的进度写入失败都不会触发停服回退。开始切换后失败才回退，且旧服务也须通过健康检查。
+- 返回 `queued: true` / `changed: false` 只表示接受任务；`codey update --status` 依次显示 `queued/preparing/ready/switching/verifying/completed`。`failed` 或 `needs-review` 不是升级成功；结合 `codey doctor` 和私有报告验收后才能清理旧版本。
+- 状态查询会在检查原生任务后重读报告，避免任务完成并被回收时误报失败；原生任务查询失败、且报告仍未结束时返回 `needs-review` 和非零退出码。核对结果中的 `jobId` 与提交结果一致，不把其他任务的结果当作本次成功。
+- 外部 Linux 终端不加 `--background` 时仍同步执行。Windows/macOS 暂不支持后台模式，仍使用原用户外部终端。旧 CLI 第一次升级到本实现也需外部原用户上下文；不能原地修改已安装脚本或删除安全检查来引导更新。
 - 不升级 Node/Codex/DevTunnel，不自动注册 Portal，不增加 Python 或常驻更新器。中断或回退失败留下的操作锁需人工核对，不用重跑安装恢复。
 
 **示例**
@@ -385,4 +393,6 @@ codey update FILE.tgz [--sha256 HASH] [--check] [--offline] [--json]
 ```sh
 codey update "$HOME/Downloads/codey.tgz" --check --json
 codey update "$HOME/Downloads/codey.tgz" --offline
+codey update "$HOME/Downloads/codey.tgz" --background
+codey update --status --json
 ```

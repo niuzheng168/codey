@@ -244,6 +244,42 @@ export function linuxAdapter(i) {
         if (item.running && !old.running) await systemctl(["start", item.name]);
       }
     },
+    updateServices(before, after, states) {
+      const old = linuxUnitFiles(before), next = linuxUnitFiles(after);
+      // A native DevTunnel host need not drop its connection for an app-only update.
+      // gh-backed hosts whose wrapper path changes still restart with their watchdogs.
+      const tunnelChanged = Object.keys(next).some(name =>
+        name.startsWith("codey-devtunnel") && next[name] !== old[name]);
+      return tunnelChanged ? states : states.filter(item => item.component === "codey");
+    },
+    async startUpdateJob(config, jobId) {
+      requireValue(/^[a-f0-9]{32}$/.test(jobId), "Invalid update job");
+      const unit = `codey-update-${jobId}.service`;
+      const shown = await i.run("/usr/bin/systemctl", ["--user", "show", unit, "--property=LoadState", "--value"], { check: false });
+      requireValue(shown.stdout.trim() === "not-found", "Update service name is already in use");
+      const uid = process.getuid(), home = safe(config.ownerHome), node = safe(config.nodeExe);
+      await i.run("/usr/bin/systemd-run", ["--user", "--quiet", "--collect", "--unit=" + unit,
+        "--property=Type=exec", "--property=Restart=no", "--property=UMask=0077",
+        "--property=RuntimeMaxSec=1h", "--property=TimeoutStopSec=30s", "--property=NoNewPrivileges=yes",
+        "--property=StandardOutput=null", "--property=StandardError=null", "--working-directory=" + home,
+        "--", "/usr/bin/env", "-i", "HOME=" + home, "USER=" + osUsername(), "LOGNAME=" + osUsername(),
+        "PATH=" + path.dirname(node) + ":/usr/bin:/bin:/usr/sbin:/sbin", "NODE_ENV=production", "NODE_USE_SYSTEM_CA=1",
+        `XDG_RUNTIME_DIR=/run/user/${uid}`, `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus`,
+        node, safe(path.join(config.codeyDirectory, "lib/machine-update-job.mjs")), "--run", jobId]);
+    },
+    async verifyUpdateJob(config, jobId) {
+      requireValue(/^[a-f0-9]{32}$/.test(jobId), "Invalid update job");
+      const shown = await systemctl(["show", `codey-update-${jobId}.service`, "--property=MainPID,Transient"]);
+      const values = Object.fromEntries(shown.stdout.trim().split("\n").map(line => line.split("=")));
+      requireValue(values.Transient === "yes" && Number(values.MainPID) === process.pid,
+        "Update must run as the main process of its independent systemd user job");
+    },
+    async updateJobState(config, jobId) {
+      requireValue(/^[a-f0-9]{32}$/.test(jobId), "Invalid update job");
+      const shown = await i.run("/usr/bin/systemctl", ["--user", "show", `codey-update-${jobId}.service`,
+        "--property=ActiveState", "--value"], { check: false });
+      return ["active", "activating", "reloading", "failed", "inactive"].includes(shown.stdout.trim()) ? shown.stdout.trim() : "unknown";
+    },
     async switchPackage(before, after) {
       await adapter.status(before);
       const files = linuxUnitFiles(after);

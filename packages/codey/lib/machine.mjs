@@ -1,5 +1,5 @@
 /** One-shot node operations. Native service details remain in the installation adapters. */
-import { lstat, mkdir, readFile, realpath, rmdir } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rmdir, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -18,7 +18,7 @@ export const MACHINE_USAGE = {
   "devtunnel stop": "codey devtunnel stop [--json] [--timeout SECONDS]",
   export: "codey export FILE.gz [--json]",
   import: "codey import FILE.gz [--check] [--replace-existing] [--settings-only] [--json]",
-  update: "codey update FILE.tgz [--sha256 HASH] [--check] [--offline] [--json]",
+  update: "codey update FILE.tgz [--sha256 HASH] [--check] [--offline] [--background] [--json]\n       codey update --status [--json]",
 };
 const GUARD_HELP = `Usage: ${MACHINE_USAGE.guard}
 Enable and start this owner's installed native supervisors:
@@ -35,11 +35,28 @@ Foreign/unknown resources are never adopted.
 --timeout SECONDS: 1–600, default 60, per service/local verification wait.
 --help/-h displays this help. Foreground/port options and subcommands are not supported.
 `;
+const UPDATE_HELP = `Usage: ${MACHINE_USAGE.update}
+Update only this owner's installed Codey package; Node/Codex/DevTunnel tools stay unchanged.
+FILE.tgz must be a trusted local package. --sha256 checks its expected archive digest.
+--check is read-only. --offline requires the same installed dependency lock;
+otherwise npm downloads and native dependency preparation may be needed.
+Linux --background submits an independent, single-use systemd user job. This mode
+is automatic inside Codex/Workspace; the submitting CLI can exit or disconnect.
+The old services keep running during preparation. Switching briefly disconnects clients;
+in-flight requests and Workspace terminal tasks may be interrupted, not automatically replayed.
+queued is NOT completion. Use --status (optionally --json), match the jobId and
+wait for completed, then run codey doctor. Failed/unconfirmed status exits nonzero.
+Configuration/service changes during preparation abort before stopping anything.
+Failed activation rolls back and checks the old services. Interrupted/failed rollback
+keeps install.lock for review: do not delete the lock or automatically retry.
+Windows/macOS currently require an external owner terminal and do not support --background.
+No resident updater, Portal agent, login, automatic tool upgrade or old-release cleanup.
+`;
 const fail = message => { throw new Error(message); };
 export function machineOptions(command, args) {
   if (!Object.hasOwn(MACHINE_USAGE, command)) fail("Unknown node operation");
   if (args.length === 1 && ["--help", "-h"].includes(args[0])) return { help: true };
-  const flags = command === "update" ? ["--check", "--offline", "--json"] :
+  const flags = command === "update" ? ["--check", "--offline", "--background", "--status", "--json"] :
     command === "import" ? ["--check", "--replace-existing", "--settings-only", "--json"] :
       command === "devtunnel login" ? [] : ["--json"];
   const values = command === "update" ? ["--sha256"] :
@@ -57,6 +74,10 @@ export function machineOptions(command, args) {
     if (flags.includes(arg)) result[arg.slice(2)] = true;
     else if (values.includes(arg) && args[index + 1]?.trim() && !args[index + 1].startsWith("-")) result[arg.slice(2)] = args[++index];
     else fail(`Invalid option for ${command}; use --help`);
+  }
+  if (command === "update" && result.status) {
+    if (Object.keys(result).some(name => !["status", "json"].includes(name))) fail("--status only accepts --json");
+    return result;
   }
   if (positional && !result.file) fail(`Usage: ${MACHINE_USAGE[command]}`);
   if (result.sha256 && !/^[a-f0-9]{64}$/i.test(result.sha256)) fail("--sha256 requires 64 hexadecimal characters");
@@ -149,22 +170,38 @@ export class Machine {
         pid = Number(match[1]); command = match[2];
       }
       if (/(?:^|\/)codex(?:\.js|\.exe)?(?:\s|$)|bin\/codey\.mjs\s+(?:workspace|gateway|start|copilot\s+start)(?:\s|$)|lib\/workspace\.mjs(?:\s|$)|dist-server\/server\/index\.js/.test(command)) {
-        fail("Use an external owner terminal, not a Codey Workspace or Codex process tree");
+        throw Object.assign(new Error("Use an external owner terminal, not a Codey Workspace or Codex process tree"),
+          { code: "CODEY_INTERNAL_TERMINAL" });
       }
     }
   }
-  async lock(action) {
+  async lock(action, { updateJob } = {}) {
     if (!this.config.ready || this.config.state !== "ready") fail("Finish or inspect the incomplete installation first");
     const lock = await this.i.checked(path.join(this.i.configRoot, "install.lock"));
-    try { await mkdir(lock, { mode: 0o700 }); }
-    catch (error) {
-      if (error.code === "EEXIST") fail("Another node operation is running, or was interrupted; inspect install.lock before retrying");
-      throw error;
+    const lease = path.join(lock, "update.json"), claim = path.join(lock, "claimed");
+    if (updateJob) {
+      if (!/^[a-f0-9]{32}$/.test(updateJob)) fail("Invalid update job");
+      const owner = await this.i.read(await this.privateFile(lease));
+      if (!isDeepStrictEqual(owner, { schema: 1, jobId: updateJob, nodeId: this.config.nodeId,
+        entrySha256: this.config.codeyEntrySha256 })) fail("Update lock belongs to another operation");
+      // Atomic, once-only handoff. Never delete/recreate a live or interrupted lock.
+      await mkdir(claim, { mode: 0o700 });
+    } else {
+      try { await mkdir(lock, { mode: 0o700 }); }
+      catch (error) {
+        if (error.code === "EEXIST") fail("Another node operation is running, or was interrupted; inspect install.lock before retrying");
+        throw error;
+      }
     }
     try {
       if (!isDeepStrictEqual(await this.i.read(this.i.file), this.config)) fail("Node configuration changed concurrently; retry");
       return await action();
-    } finally { if (!this.keepLock) await rmdir(lock); }
+    } finally {
+      if (!this.keepLock) {
+        if (updateJob) { await rmdir(claim); await unlink(lease); }
+        await rmdir(lock);
+      }
+    }
   }
   services() { return this.i.adapter.status(this.config); }
   async status() {
@@ -280,7 +317,13 @@ export class Machine {
 
 export function printMachine(result, json = false, log = console.log) {
   if (json) return log(JSON.stringify(result));
-  if (result.services) {
+  if (result.jobId) {
+    log(`Update ${result.jobId}: ${result.state}`);
+    if (result.warning) log(result.warning);
+    if (result.backup) log(`Previous settings backup: ${result.backup}`);
+    log("Progress: codey update --status");
+    if (result.statusFile) log(`Private report: ${result.statusFile}`);
+  } else if (result.services) {
     log(`Codey ${result.version} · ${result.platform} · ${result.computer}`);
     for (const service of result.services) log(`${service.name}: ${service.state} (${service.enabled ? "enabled" : "disabled"}${service.pid ? `, pid ${service.pid}` : ""})`);
   } else if (result.file) {
@@ -293,6 +336,7 @@ export function printMachine(result, json = false, log = console.log) {
 export async function runMachine(root, command, args, dependencies = {}) {
   const options = machineOptions(command, args);
   if (options.help && command === "guard") return console.log(GUARD_HELP);
+  if (options.help && command === "update") return console.log(UPDATE_HELP);
   if (options.help) return console.log(`Usage: ${MACHINE_USAGE[command]}\nOwner-managed node only. Secrets are never included in status output.\nLifecycle timeout: 60 seconds; stop disables watchdogs until start.\nSee onboarding/references/codey-cli.md for complete parameter details.`);
   const machine = await (dependencies.open ?? openMachine)(root, dependencies);
   if (!machine) {
@@ -309,5 +353,6 @@ export async function runMachine(root, command, args, dependencies = {}) {
   else result = await machine.lifecycle(command === "guard" ? "start" : command.split(" ").at(-1),
     { tunnelOnly: command.startsWith("devtunnel "), timeout: Number(options.timeout ?? 60) });
   printMachine(result, options.json);
+  if (command === "update" && options.status && result.ok === false) process.exitCode = 1;
   return result;
 }
