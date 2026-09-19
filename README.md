@@ -45,7 +45,8 @@ registry，不要从公共源安装同名包。构建不会自动发布或部署
 完整安装流程与命令行用法见 [安装 Skill](./skills/config-new-codey-machine/SKILL.md)。
 当前源码支持自动复用 `gh auth login`：没有自身凭据时，Copilot API 与 DevTunnel
 使用选定的 gh 账号，无需再次授权；保留已有独立账号，不复制 GitHub token。
-`codey copilot login --force` 才明确重新设备码登录。此改动尚未发布，平台验收见 Skill。
+`codey copilot login --force` 才明确重新设备码登录。Linux x64、Windows x64、
+macOS arm64/x64 均已完成平台验收，使用同一份跨平台发行包；安装与安全边界见 Skill。
 
 “账号与节点 → 添加节点”只保留一个 Codey 安装 Skill 下载入口，不再让用户选择系统。
 Skill 内是同一份 Linux x64、Windows x64、macOS arm64/x64 npm 包；原生安装支持范围随发行包明确列出。

@@ -1,6 +1,7 @@
 # Codey 命令行参考
 
-对应当前源码，尚未发布。后台节点操作要求已完成本机安装；安装流程见 [Skill](../SKILL.md)。
+适用于 Linux x64、Windows x64、macOS arm64/x64 的统一跨平台发行。
+后台节点操作要求已完成本机安装；安装流程见 [Skill](../SKILL.md)。
 
 ## `codey copilot`
 

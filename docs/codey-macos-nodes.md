@@ -2,7 +2,8 @@
 
 完整命令、依赖与安装步骤见 [安装 Skill](../skills/config-new-codey-machine/SKILL.md)。
 macOS arm64/x64 与 Linux、Windows 共用一个 npm 包和 Node 安装流程；不依赖 Python，
-不安装 Portal 更新代理或常驻本地更新器。当前改动尚未发布，原生 Mac 验收需单独完成。
+不安装 Portal 更新代理或常驻本地更新器。macOS arm64/x64 原生平台验收已完成，
+与 Linux x64、Windows x64 一同作为统一跨平台发行支持。
 
 ## 入口与系统适配
 
@@ -122,7 +123,8 @@ Mac 实验强制标记为 dirty，不得作为正式发布包。`CODEY_NPM_REGIS
 在当前支持的平台用独立 HOME/临时端口安装并启动 Workspace/网关。
 可加 `CODEY_INSTALL_BUDGET_SECONDS=180` 验证包安装、原生依赖和服务启动的预算；
 它不创建正式节点，不执行人工登录、DevTunnel/Portal 接入，不改当前节点。
-Linux/Windows 与 Intel Mac 的运行验收仍需在对应平台执行。
+本节以下实验仅记录 macOS arm64 的实测范围，不替代其他平台的独立验收记录；
+当前全平台支持状态见本文开头。
 
 2026-09-19 的 macOS arm64 开发实验使用 Node 24.20.0/npm 11.19.0、腾讯 HTTPS npm 镜像，
 以及包含 `cf3d4bb` 依赖精简的新包（7,330,084 字节）。在独立 HOME/临时端口下：
@@ -135,7 +137,8 @@ Linux/Windows 与 Intel Mac 的运行验收仍需在对应平台执行。
 
 以上不是完整新节点从零接入的计时：Node 已准备、应用包已在本地，
 不包含人工登录、真实模型请求、LaunchAgent/DevTunnel 配置与 Portal 导入。
-没有替换正在运行的节点，也没有发布此开发包；正式发布仍需 Linux 构建及对应平台验收。
+没有替换正在运行的节点，也没有发布此开发包；正式发行仍使用 Linux 构建，
+并保留 main 来源与发行包完整性检查。
 
 ### 合入 gh 认证后的独立完整安装
 

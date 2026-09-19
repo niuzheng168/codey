@@ -1,8 +1,8 @@
 # Codey Linux / Windows / macOS 节点接入
 
 当前源码已移除 Portal 更新代理、本地更新器与升级凭据。Mac 安装器、命令包装和
-LaunchAgent worker 使用 Node，不再要求 Python。此变更尚未发布，原生 Windows/macOS
-验收与旧节点迁移需单独完成。
+LaunchAgent worker 使用 Node，不再要求 Python。Linux x64、Windows x64、
+macOS arm64/x64 均已完成平台验收，使用统一跨平台发行；旧节点迁移仍需单独确认。
 
 完整操作以 [安装 Skill](../skills/config-new-codey-machine/SKILL.md) 为准；运行包的
 CLI 参考见 [Codey 包说明](../packages/codey/README.md)。
@@ -120,4 +120,5 @@ npm run machine:build -- --output artifacts/codey-machine --portal-origin https:
 
 不再需要 `--updater-public-key-file`。仍使用 main-only 来源门禁、冻结的子模块 gitlinks、
 唯一锁文件、包摘要和独立发布器；构建端 Python/Bun 不属于用户执行 Skill 的依赖。
-本地测试与构建不自动上传、发布或改动既有节点。发布前必须完成对应原生平台验收。
+本地测试与构建不自动上传、发布或改动既有节点。各平台原生验收已完成，
+不再以 Windows/macOS 待验收阻塞统一发行；main 来源、包摘要、权限和安装前安全检查仍然保留。

@@ -5,7 +5,7 @@ description: "跨平台安装和管理 Codey：复用 gh 的 Copilot/DevTunnel �
 
 # Codey 安装与日常操作
 
-> 本次变更尚未发布；Windows/macOS 原生验收另行完成。
+> Codey 已统一支持 Linux x64、Windows x64、macOS arm64/x64，各平台原生验收已完成。
 > 只在用户确认目标机器和操作范围后安装；代码评审、测试不等于允许部署或发布。
 
 ## 按操作选择命令

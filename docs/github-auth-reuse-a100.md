@@ -2,7 +2,8 @@
 
 > 本文记录最初的隔离调研。认证复用实现已随后纳入源码提交，包括 CLI、
 > 安装 Skill 和固定的 Copilot API 子模块提交；原先的文档提交 `93159af` 不含实现。
-> **源码提交不等于安装包发布；Windows 开发包原生验收见文末，macOS 原生验收仍待完成。**
+> **源码提交不等于安装包发布；当前 Linux、Windows、macOS 平台验收均已完成，统一跨平台发行。**
+> 下文保留各次隔离调研与开发包实验的实际范围，不将历史实验冒充本轮重新执行的验收。
 > 基础安装与命令入口见 [安装 Skill](../skills/config-new-codey-machine/SKILL.md) 和
 > [CLI 参考](../skills/config-new-codey-machine/references/codey-cli.md)；
 > gh 复用的行为以本报告和下述开发包实测范围为准。
