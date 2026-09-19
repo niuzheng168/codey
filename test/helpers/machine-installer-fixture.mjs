@@ -153,7 +153,7 @@ export async function machineFixture(t, target = "macos-arm64") {
     resources: config => [{ kind: "fixture-service", name: "codey-" + config.nodeId, path: path.join(i.root, "supervisor/service") }],
   });
   f.installer = new Installer(skill, { home, platform: mac ? "darwin" : windows ? "win32" : "linux", arch, computer, execute: runner,
-    ...(mac ? {} : { adapter: fakeNative }),
+    ...(mac ? {} : { adapter: fakeNative }), auth: { github: async () => null },
     portCheck: async port => { if (f.blockPort === port) throw new Error("foreign or unverified listener"); return { port, status: "free" }; },
     diskUsage: async () => ({ bavail: 16 * 1024 ** 3, bsize: 1 }), pause: async () => {} });
   f.options = { apply: true, "network-approved": true, "expected-computer": computer, "codex-home": path.join(home, ".codex") };

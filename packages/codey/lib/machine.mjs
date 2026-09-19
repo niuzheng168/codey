@@ -207,6 +207,10 @@ export class Machine {
       const stopped = before.map(item => ({ ...item, enabled: false, running: false }));
       if (operation !== "start") { await this.setStates(stopped); await this.waitFor(stopped, timeout); }
       if (operation !== "stop") {
+        if (!this.config.tunnelAuth && !(await this.services()).some(item =>
+          item.component === "tunnel" && !item.auxiliary && item.running)) {
+          await this.ensureTunnelAuth(false);
+        }
         await this.i.checkPorts(this.config);
         const started = before.filter(item => !item.auxiliary).map(item => ({ ...item, enabled: true, running: true }));
         await this.setStates(started);
@@ -219,9 +223,27 @@ export class Machine {
   async loginTunnel() {
     return this.lock(async () => {
       await this.tools();
-      const { loginTunnel } = await import(pathToFileURL(path.join(this.i.skill, "scripts/windows-runtime.mjs")).href);
-      return loginTunnel(this.config.devtunnelExe, this.config.baseEnvironment, this.i.run);
+      return this.ensureTunnelAuth(true);
     });
+  }
+  async ensureTunnelAuth(interactive) {
+    const helpers = await import(pathToFileURL(path.join(this.i.skill, "scripts/windows-runtime.mjs")).href);
+    const result = await helpers.loginTunnel(this.config.devtunnelExe, this.config.baseEnvironment, this.i.run, {
+      ...this.i.auth, binding: this.config.tunnelAuth,
+      githubEnvironment: this.i.githubEnvironment?.(this.config.baseEnvironment) ?? this.config.baseEnvironment, interactive,
+    });
+    if (result.source === "gh" && !this.config.tunnelAuth) {
+      const { getGhTunnel, tunnelCoordinates } = await import(pathToFileURL(path.join(this.i.skill, "scripts/github-tunnel.mjs")).href);
+      const expected = tunnelCoordinates(this.config.qualifiedTunnel);
+      const shown = await (this.i.auth?.getTunnel ?? getGhTunnel)(result.credential, expected);
+      helpers.validateTunnel(shown, `codey-${this.config.nodeId}`, expected.clusterId);
+      if ((await this.services()).some(item => item.component === "tunnel" && item.running)) {
+        fail("Stop the tunnel with codey devtunnel stop before changing its authentication; no settings were changed");
+      }
+      await this.save({ ...structuredClone(this.config), tunnelAuth: result.binding });
+    }
+    const { binding, ...status } = result; // The non-enumerable credential is never returned to the CLI.
+    return { ...status, ...(binding ? { username: binding.login } : {}) };
   }
   async save(next) {
     const before = this.config;
@@ -229,6 +251,13 @@ export class Machine {
       next.services.codey = { ...next.services.codey, executable: next.nodeExe,
         arguments: [next.codeyBin, "start", "--foreground", "--host", "127.0.0.1", "--workspace-port", "3001", "--gateway-port", "4141"],
         workingDirectory: next.codeyDirectory, environment: next.environment };
+      if (next.tunnelAuth?.source === "gh") {
+        for (const [component, operation] of [["tunnel", "host"], ["renew", "renew"]]) {
+          next.services[component] = { ...next.services[component], executable: next.nodeExe,
+            arguments: [path.join(next.codeyDirectory, "lib/tunnel.mjs"), operation, this.i.file],
+            workingDirectory: next.releaseDirectory, environment: next.baseEnvironment };
+        }
+      }
     }
     await this.i.adapter.switchPackage(before, next);
     try {

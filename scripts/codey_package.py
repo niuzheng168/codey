@@ -26,6 +26,7 @@ NPM_ONBOARDING_FILES = [
     "scripts/install.sh", "scripts/macos-service.mjs",
     "scripts/install-devtunnel-health.sh", "scripts/linux-devtunnel-health.mjs", "scripts/linux-preflight.sh",
     "scripts/registration.mjs", "scripts/windows-runtime.mjs",
+    "scripts/github-auth.mjs", "scripts/github-tunnel.mjs",
     "scripts/install-machine.mjs", "scripts/machine-common.mjs", "scripts/machine-package.mjs", "scripts/machine-resources.mjs",
     "scripts/platform-linux.mjs", "scripts/platform-macos.mjs", "scripts/platform-windows.mjs", "scripts/platform-unix.mjs",
     "scripts/windows-native.ps1", "scripts/windows-common.ps1", "scripts/windows-process.cs",

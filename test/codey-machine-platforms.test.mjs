@@ -24,6 +24,10 @@ test("real Linux adapter validates every unit and disables timers before stoppin
       enabled: !name.endsWith("renew.service") && !name.endsWith("health.service") });
   }
   f.i.run = async (file, args) => {
+    if (file === f.config.devtunnelExe) {
+      assert.deepEqual(args, ["user", "show", "--json"]);
+      return { code: 0, stdout: '{"status":"Logged in","provider":"github"}' };
+    }
     assert.equal(file, "/usr/bin/systemctl");
     assert.equal(args[0], "--user");
     const [operation, name] = args.slice(1);

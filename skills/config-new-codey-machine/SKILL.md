@@ -1,6 +1,6 @@
 ---
 name: config-new-codey-machine
-description: "跨平台安装和管理 Codey：Copilot/DevTunnel 登录、后台守护与节点启停、状态诊断、压缩备份恢复、本地包更新。安装保留 TLS/SSO，仅导出私有注册 JSON，不自动注册 Portal。"
+description: "跨平台安装和管理 Codey：复用 gh 的 Copilot/DevTunnel 认证、后台守护与节点启停、状态诊断、备份恢复和本地包更新。保留已有账号与 TLS/SSO，仅导出私有注册 JSON，不自动注册 Portal。"
 ---
 
 # Codey 安装与日常操作
@@ -14,8 +14,8 @@ description: "跨平台安装和管理 Codey：Copilot/DevTunnel 登录、后台
 
 | 操作 | 命令 | 作用 |
 | --- | --- | --- |
-| 1. Copilot 登录/单独启动 | `codey copilot login` / `codey copilot start` | 登录保存凭据；start 前台运行 Responses＋用量 API，保留已配置的 `8443` HTTPS 只读入口 |
-| 2. DevTunnel 登录 | `codey devtunnel login` | 检查现有 GitHub 账号，必要时设备码登录；与 Copilot 登录分开，不自动切换其他 provider |
+| 1. Copilot 登录/单独启动 | `codey copilot login` / `codey copilot start` | 保留已有凭据，否则自动复用 gh；确需重新设备码登录用 `login --force`。start 保留 Responses＋用量和已配置的 `8443` HTTPS 入口 |
+| 2. DevTunnel 登录 | `codey devtunnel login` | 保留已有 GitHub 登录，否则自动复用 gh，均不可用时才设备码登录；不自动切换其他 provider |
 | 3. 隧道启停 | `codey devtunnel start` / `stop` | 单独管理本节点 host、续期及健康守护，不启停 Workspace/网关，不删除云端隧道 |
 | 4. 节点状态 | `codey status [--json]` | 版本、节点与各原生服务状态；只读，不输出密钥 |
 | 5. 节点启停 | `codey start` / `restart` / `stop` | 管理 Copilot API＋CloudCLI（Workspace）＋DevTunnel 整个后台节点；停止时禁用守护，直到再次 start |
@@ -33,12 +33,30 @@ CloudCLI 统一由 `codey start` 启动，没有独立子命令。`copilot start
 更新保留配置、身份、工具、证书和原版本；捕获到失败时回退，不增加 Python、Portal 更新代理或常驻更新器。中断留下 `install.lock` 时先核对状态，不强删锁重试。
 不要使用 `copilot login --show-token` 做普通诊断。停止/重启、恢复和更新在原用户的外部终端运行。
 
+## GitHub 认证复用
+
+- 已有 `gh auth login` 时，无自身凭据的 Copilot/DevTunnel 自动复用该账号；
+  不需要再次授权两个应用。`gh` 是可选依赖，不自动安装、登录或增加 scopes。
+  没有可用 gh 时，显式 login/安装仍可走原设备码流程；start/guard/doctor 不弹登录。
+- 已有独立凭据优先，不能因为 gh active account 不同就切换现有模型配额/隧道所有者。
+  首次复用记录账号 ID、用户名、gh 可执行文件与配置目录；不复制 gh token，不随
+  `gh auth switch` 自动换号。失效的 pinned 账号停止并报告，不尝试另一个账号。
+- 普通 `GH_TOKEN`/`GITHUB_TOKEN` 不替代 gh 的登录缓存；显式
+  `COPILOT_API_GITHUB_TOKEN`、OAuth app、Enterprise 设置仍优先。
+  gh 模式下原始 `devtunnel user show` 可以仍显示未登录，用 `codey doctor` 检查。
+- 既有节点切换到 gh 隧道认证前，验证该账号能访问原 tunnel ID；不重建 404 的隧道。
+  隧道正在运行时先由用户 `codey devtunnel stop`，再 login/start，不借登录重启其他服务。
+  备份不含 gh 登录缓存；settings-only 导入也不覆盖目标机器的 gh 账号绑定。
+
 ## 用户执行时的依赖
 
 - **Linux x64**：Bash、curl、tar/xz、OpenSSL、`ss`（iproute2）等基础工具、systemd 用户服务；开启 linger 等操作需 sudo。
 - **Windows x64**：PowerShell 5.1、.NET Framework 4.7.2+、任务计划程序；使用原用户的非管理员终端。
 - **macOS arm64/x64**：原生终端与 GUI 登录会话；使用系统 Bash、curl、tar、OpenSSL、plutil、shasum、launchctl、lsof/ps。
 - 脚本准备 Node/npm、官方 Codex CLI、Microsoft DevTunnel CLI 和 Codey 应用依赖；需联网并能完成 GitHub/Copilot 登录。
+- 可选的 GitHub CLI：若已安装且已登录，自动复用；后台用已记录的绝对路径读取原账号，
+  不依赖 LaunchAgent/systemd 的交互式 PATH。OS 安全存储须对原用户可用且已解锁；
+  Linux keyring 使用运行时的 D-Bus/XDG 会话，不把会话地址或秘密复制进账号绑定。
 - **正常流程不要求预装 Python 或 Bun。** 若 npm 回退源码编译并索要 Python，停止报告具体模块，不擅自加装工具链。
 
 ## 完整安装入口
@@ -53,6 +71,8 @@ CloudCLI 统一由 `codey start` 启动，没有独立子命令。`copilot start
 
 三平台共用 `scripts/install-machine.mjs` 的 Node 安装流程，入口只做原生预检和必要的 Node 引导；不再维护三套安装编排。
 已有 Node 时也可直接运行 `node scripts/install-machine.mjs --check`，确认后改用 `--apply --network-approved --expected-computer "实际机名"`。
+Linux 与其他 Codex 服务共存时，可用 `CODEX_HOME="$HOME/.local/share/codey-machine/codex-home"` 调用上述完整 Skill 入口；
+只检查该目录的使用冲突和安装器进程祖先，不停止其他独立 `CODEX_HOME` 的服务，也不覆盖共享 `~/.codex`。
 首次配置节点需覆盖已有 Codex 配置（Linux 也包括网关配置）时，另行确认并加 `--replace-existing`（Linux/Mac）或 `-ReplaceExisting`（Windows）；先备份，保留 auth/sessions。
 **安装预检均只读**：不下载、不运行 npm、不写配置、不登录、不启动服务或调用模型。缺少 Node 等导致不能检查的项目明确标为待检查，不当作已通过。
 已完成的同版本、同配置节点允许继续验收和导出；复用现有程序、身份、证书、密钥，不覆盖运行版本、不重启服务，不把重跑安装当更新。
@@ -66,18 +86,24 @@ CloudCLI 统一由 `codey start` 启动，没有独立子命令。`copilot start
    旧 Python/升级代理节点须单独迁移；不要把重跑安装当作更新、卸载或事务恢复。
 2. **准备本机状态和应用**：在原用户私有目录创建节点 ID、SSO/数据访问/隧道续期密钥；准备经校验的官方 Node/npm。
    将唯一 Codey npm 包装入新的私有目录，按锁文件准备依赖并检查 SQLite/PTY 等原生模块；同版本重跑先核对包文件，直接复用，不先装一遍 npm。
-3. **DevTunnel**：使用与 `codey devtunnel login` 相同的登录逻辑，检查本人 GitHub 登录，必要时设备码登录；不切换其他账号。
+3. **DevTunnel**：与 `codey devtunnel login` 共用认证选择；已有缓存优先，否则尝试 gh，
+   只有两者都不存在时才设备码登录。gh 模式用管理 API 创建/检查隧道并签发限 scope token，
+   官方 host CLI 只通过 stdin 接收 host-only token，不接收高权限 GitHub token。
    三平台均只从指定微软 HTTPS 地址下载 DevTunnel，不固定滚动文件的旧 SHA-256；Windows 额外校验微软 Authenticode 签名。Node/Codey 版本包和已安装文件的完整性校验仍保留。
    创建或复用私有 `codey-<nodeId>` 隧道，记录实际 tunnel/cluster ID；仅转发 HTTPS `3001/8443`，禁止匿名访问，不转发 `4141`。
 4. **证书与配置**：生成本机模型 key，保留已有身份、证书与密钥，不生成升级凭据。
    本机生成自签名非 CA 服务端证书，SAN 为 `<nodeId>.nodes.codey.internal`；私钥只留私有目录，不购买域名、不导入系统根证书库。
    已接入节点不可静默换证书；续期或轮换须同步 Portal 的证书指纹。
 5. **服务与模型**：安装官方 Codex CLI。`4141` 为带 API key 的本地模型网关；`3001` 为 HTTPS Workspace + Portal SSO；`8443` 为鉴权只读用量/历史接口。
-   三者只监听 `127.0.0.1`，两项 HTTPS 共用节点证书。按需执行 `codey copilot login`，配置 Codex 并保留 auth/sessions。
+   三者只监听 `127.0.0.1`，两项 HTTPS 共用节点证书。按需执行 `codey copilot login`；
+   有 gh 时验证 Copilot 账号和模型目录、保存无 token 的账号绑定，网关采用 direct OAuth，
+   不把 gh token 送入默认的 VS Code token-exchange 路径。配置 Codex 并保留 auth/sessions。
    模型配置统一来自 `templates/codex-config.toml`，平台脚本只填入本机模型目录路径。
    `8443` 是同一网关的第二个监听，不是更新器。当前 `4141` 为 HTTP 且含模型/管理接口，不能直接当作 HTTPS 只读入口；合并需另改 TLS 与鉴权，本流程暂保留隔离。
 6. **启动与守护**：配置稳定的 `codey` 命令和用户 PATH，启动 Codey、DevTunnel host 与 connect token 定时续期。
    Linux 使用 systemd 用户服务与 linger，并保留隧道健康监测；Windows 使用计划任务；Mac 使用 Node worker + LaunchAgents。后两者依赖原用户登录。
+   gh host 的 Node 凭据传递进程属于同一个原生服务；提前 5 分钟结束 host，由已有守护重启、
+   重读 pinned gh 并签发新 host token。connect-only 令牌继续走独立续期，不新增守护服务。
    此后用 `codey guard` 启用/启动全部已有守护；也可沿用后台 `codey start`，二者不会重复拉起。用 `codey restart/stop` 重启或停止整节点。
 7. **本机验收**：检查服务守护、隧道私有配置、TLS、SSO、数据鉴权和匿名拒绝；经授权执行有超时的 Codex CLI/SDK 短请求并核对真实响应，不接受提示词回显。
    日常以 `codey status`、`codey doctor` 检查，经授权再用 `codey doctor --model`；本机检查不能替代导入后从 Portal 完成的真实访问验收。

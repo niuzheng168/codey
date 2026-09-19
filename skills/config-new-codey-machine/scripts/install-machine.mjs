@@ -17,6 +17,7 @@ import { windowsAdapter } from "./platform-windows.mjs";
 import { loginTunnel, parseTunnelJson, validateTunnel } from "./windows-runtime.mjs";
 import { PLATFORMS, verifyRegistrationFile } from "./registration.mjs";
 import { writeResources } from "./machine-resources.mjs";
+import { ensureGhTunnel } from "./github-tunnel.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const nonce = () => randomBytes(12).toString("hex");
@@ -51,7 +52,7 @@ export function installOptions(args) {
 export class Installer {
   constructor(skill, { home = os.homedir(), platform = process.platform, arch = process.arch,
     computer = os.hostname(), execute = run, portCheck, diskUsage = statfs, prepared,
-    adapter, pause = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+    adapter, auth = {}, pause = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
     this.target = `${platform === "darwin" ? "macos" : platform === "win32" ? "windows" : platform}-${arch}`;
     requireValue(PLATFORMS.includes(this.target) && process.getuid?.() !== 0,
       "Run as the original owner on a supported native platform, not root");
@@ -65,6 +66,7 @@ export class Installer {
     this.pause = pause;
     this.diskUsage = diskUsage;
     this.prepared = prepared;
+    this.auth = auth;
     const suffix = platform === "linux" ? "" : platform === "win32" ? "-windows" : "-macos";
     this.root = path.join(this.home, ".local/share/codey-machine" + suffix);
     this.configRoot = path.join(this.home, ".config/codey-machine" + suffix);
@@ -166,7 +168,7 @@ export class Installer {
     if (!options.apply || previous?.ready) return { plan, previous, saved, codexHome };
     requireValue(!(previous || unfinished) || options["retry-failed"], "Inspect the failed attempt, then use --retry-failed");
     requireValue(!overwrites.length || options["replace-existing"], "Existing Codex/gateway configuration requires --replace-existing");
-    await this.adapter.available();
+    await this.adapter.available(codexHome);
     const disk = await this.diskUsage(this.home);
     requireValue(disk.bavail * disk.bsize >= 8 * 1024 ** 3, "At least 8 GiB of free space is required");
     return { plan, previous, saved, codexHome };
@@ -267,9 +269,23 @@ export class Installer {
       PATH: `${path.dirname(node)}:/usr/bin:/bin:/usr/sbin:/sbin`, NODE_ENV: "production",
       NODE_USE_SYSTEM_CA: "1", TMPDIR: process.env.TMPDIR || "/tmp" };
   }
+  githubEnvironment(base) {
+    // Discovery runs in the owner's terminal; pinned executable/config paths also
+    // work later in systemd/launchd's deliberately smaller environment.
+    return { ...base, ...Object.fromEntries(Object.entries(process.env)
+      .filter(([name]) => /^(?:PATH|GH_CONFIG_DIR|XDG_CONFIG_HOME|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR)$/i.test(name))) };
+  }
   async tunnel(devtunnel, identity, base) {
-    await loginTunnel(devtunnel, base, this.run);
+    const authentication = await loginTunnel(devtunnel, base, this.run,
+      { ...this.auth, githubEnvironment: this.githubEnvironment(base) });
     const tunnelId = "codey-" + identity.nodeId;
+    if (authentication.source === "gh") {
+      const actual = await (this.auth.ensureTunnel ?? ensureGhTunnel)(authentication.credential, tunnelId);
+      const { clusterId } = validateTunnel(actual, tunnelId);
+      const tunnelFile = path.join(this.configRoot, "tunnel.json");
+      await this.write(tunnelFile, actual);
+      return { tunnelFile, qualified: `${tunnelId}.${clusterId}`, tunnelAuth: authentication.binding };
+    }
     let shown = await this.run(devtunnel, ["show", tunnelId, "--json"], { env: base, check: false });
     if (shown.code) shown = await this.run(devtunnel, ["create", tunnelId, "--description", "Codey " + identity.nodeId, "--json"], { env: base });
     const raw = parseTunnelJson(shown.stdout), tunnel = raw.tunnel || raw, parts = (tunnel.tunnelId || "").split(".");
@@ -321,7 +337,7 @@ export class Installer {
     await this.download(this.pins.devTunnel, devtunnel);
     if (this.adapter.verifyTunnelBinary) await this.adapter.verifyTunnelBinary(devtunnel);
     console.log("[2/4] Configure private GitHub DevTunnel and node TLS");
-    const { tunnelFile, qualified } = await this.tunnel(devtunnel, identity, base);
+    const { tunnelFile, qualified, tunnelAuth } = await this.tunnel(devtunnel, identity, base);
     const { cert, key, serverName } = await this.certificate(identity);
     const signing = path.join(this.configRoot, "client-signing.key");
     await this.write(signing, Buffer.from(identity.clientSigningKey + "\n"));
@@ -347,7 +363,7 @@ export class Installer {
       CODEY_PORTAL_USERNAME: identity.workspaceUsername, CODEY_PORTAL_PRINCIPAL_ID: identity.workspaceSubject,
       CODEY_PORTAL_SSO_KEY: identity.workspaceSsoKey, CODEY_PORTAL_TLS_CERT: cert, CODEY_PORTAL_TLS_KEY: key };
     const supervisor = await this.directory(path.join(this.root, "supervisor"));
-    for (const name of ["windows-runtime.mjs", "registration.mjs", "machine-common.mjs", ...this.adapter.helpers]) {
+    for (const name of ["windows-runtime.mjs", "registration.mjs", "machine-common.mjs", "github-auth.mjs", "github-tunnel.mjs", ...this.adapter.helpers]) {
       await this.write(path.join(supervisor, name), await readFile(path.join(this.skill, "scripts", name)));
     }
     const config = { ...this.attemptIdentity(), schema: 2, layout: "npm-codey-package", computer: this.computer,
@@ -355,12 +371,14 @@ export class Installer {
       configRoot: this.configRoot, stateRoot: this.state, nodeExe: node, devtunnelExe: devtunnel,
       helperPath: path.join(supervisor, "windows-runtime.mjs"), registrationHelper: path.join(supervisor, "registration.mjs"),
       commonPath: path.join(supervisor, "machine-common.mjs"),
+      authHelperPath: path.join(supervisor, "github-auth.mjs"), tunnelAuthHelperPath: path.join(supervisor, "github-tunnel.mjs"),
       codeyDirectory: codey, codeyBin: path.join(codey, "bin/codey.mjs"), codeyEntrySha256: this.manifest.codey.entrySha256,
       codexExe: environment.CODEY_CODEX_EXECUTABLE, codexHome, modelKey, identityFile, tunnelFile, qualifiedTunnel: qualified,
+      ...(tunnelAuth ? { tunnelAuth } : {}),
       certificate: cert, serverName, setupFile: path.join(this.configRoot, "setup.json"), environment, baseEnvironment: base,
       state: "installing", ready: false, fileHashes: {} };
     await this.adapter.configure(config);
-    for (const name of ["nodeExe", "devtunnelExe", "workerPath", "helperPath", "registrationHelper", "commonPath"]) {
+    for (const name of ["nodeExe", "devtunnelExe", "workerPath", "helperPath", "registrationHelper", "commonPath", "authHelperPath", "tunnelAuthHelperPath"]) {
       if (config[name]) config.fileHashes[name] = await digest(config[name]);
     }
     await this.write(config.setupFile, this.setup);
@@ -372,7 +390,7 @@ export class Installer {
       const token = path.join(copilot, "github_token");
       if (!await exists(token) || !(await lstat(token)).size) {
         await this.run(node, [config.codeyBin, "copilot", "login"],
-          { env: environment, cwd: codey, interactive: true, timeout: 900000 });
+          { env: this.githubEnvironment(environment), cwd: codey, interactive: true, timeout: 900000 });
       }
       const installer = path.join(release, windows ? "codex-install.ps1" : "codex-install.sh");
       await this.download(this.pins.codex, installer);
@@ -401,7 +419,7 @@ export class Installer {
       await this.write(path.join(copilot, "portal-build.json"), {
         schema: 1, sourceCommit: this.manifest.copilotApi?.commit, version: this.manifest.copilotApi?.version,
       });
-      await this.adapter.available();
+      await this.adapter.available(codexHome);
       await this.checkPorts(previous);
       console.log("[4/4] Start owner services and verify Workspace/gateway/Codex responses");
       await this.adapter.start(config, previous, started);

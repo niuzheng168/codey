@@ -23,7 +23,13 @@ OS service supervision, tunnel-token renewal and private Portal registration:
 - macOS arm64/x64: `bash scripts/install-macos.sh --check`; apply with
   `--apply --network-approved --expected-computer "COMPUTER"` after approval.
   The shell only bootstraps Node when missing; installation and LaunchAgent
-  workers run in Node, not Python. A GUI owner login is required.
+workers run in Node, not Python. A GUI owner login is required.
+
+If GitHub CLI is already signed in (`gh auth login`), the installer and Codey
+commands reuse it when their own credentials are absent. No second GitHub
+authorization is needed. Existing independent accounts are preserved; gh account
+bindings pin the username/ID and CLI location without copying its token.
+GitHub CLI is optional and is not installed or logged in automatically.
 
 No Portal upgrade agent or persistent local updater is included. Installation only exports
 a private registration JSON; importing it is a separate user action. Registration requires
@@ -85,6 +91,13 @@ groups commands by `codey <command>`, with separate entries for each Copilot and
 DevTunnel subcommand. Each entry includes usage, parameter meanings, aliases,
 defaults, constraints and examples. It ships at `onboarding/references/codey-cli.md`
 in the npm package; parameter details are maintained there rather than duplicated here.
+
+`codey copilot login` now ensures authentication rather than always reauthorizing;
+use `--force` for an explicit new device login. Startup reuses gh without prompting.
+DevTunnel uses gh for management and passes only a host-scoped token to the
+official CLI on stdin. The existing native supervisor rotates it before expiry;
+connect tokens retain their separate renewal path. A raw `devtunnel user show`
+can therefore still say "Not logged in"; use `codey doctor` for Codey's state.
 
 `codey guard` enables and starts all installed native supervisors: CloudCLI/Copilot API,
 DevTunnel host and token renewal, plus tunnel health monitoring on Linux.

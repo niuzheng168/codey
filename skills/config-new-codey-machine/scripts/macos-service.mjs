@@ -15,7 +15,9 @@ export function label(nodeId, component) {
 export function agentDefinition(config, file, component) {
   const value = {
     Label: label(config.nodeId, component),
-    ProgramArguments: [config.nodeExe, config.workerPath, component, file],
+    ProgramArguments: config.tunnelAuth?.source === "gh" && component !== "codey" ?
+      [config.nodeExe, path.join(config.codeyDirectory, "lib/tunnel.mjs"), component === "tunnel" ? "host" : "renew", file] :
+      [config.nodeExe, config.workerPath, component, file],
     RunAtLoad: true, ProcessType: "Background", ThrottleInterval: 15, Umask: 63,
     WorkingDirectory: config.runtimeRoot,
     StandardOutPath: path.join(config.stateRoot, component + ".log"),
@@ -53,7 +55,8 @@ export async function runtime(file, { home = os.homedir(), worker = fileURLToPat
     ["macos-arm64", "macos-x64"].includes(config.platform) && ["installing", "ready"].includes(config.state));
   requireValue(file === path.join(home, ".config/codey-machine-macos/runtime.json") &&
     config.runtimeRoot === path.join(home, ".local/share/codey-machine-macos"));
-  for (const name of ["nodeExe", "devtunnelExe", "workerPath", "helperPath", "registrationHelper", ...(config.commonPath ? ["commonPath"] : [])]) {
+  for (const name of ["nodeExe", "devtunnelExe", "workerPath", "helperPath", "registrationHelper",
+    ...["commonPath", "authHelperPath", "tunnelAuthHelperPath"].filter(name => config[name])]) {
     await checkedPath(config[name], config.runtimeRoot);
     requireValue(await digest(config[name]) === config.fileHashes[name], "Native worker/tool fingerprint mismatch");
   }

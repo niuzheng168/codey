@@ -121,11 +121,17 @@ async function fixture(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   await cp(new URL("bin", packageRoot), path.join(root, "bin"), { recursive: true });
   await cp(new URL("lib", packageRoot), path.join(root, "lib"), { recursive: true });
+  await mkdir(path.join(root, "onboarding/scripts"), { recursive: true });
+  await cp(new URL("../skills/config-new-codey-machine/scripts/github-auth.mjs", import.meta.url),
+    path.join(root, "onboarding/scripts/github-auth.mjs"));
   await writeFile(path.join(root, "package.json"), '{"name":"codey","version":"1.2.3","type":"module"}');
+  const environment = { ...process.env, GH_CONFIG_DIR: path.join(root, "isolated-gh"),
+    COPILOT_API_HOME: path.join(root, "isolated-api"), COPILOT_API_GITHUB_TOKEN: "",
+    COPILOT_API_OAUTH_APP: "", COPILOT_API_AUTH_MODE: "", COPILOT_API_ENTERPRISE_URL: "" };
   const invoke = (args, env = {}) => exec(process.execPath, [path.join(root, "bin/codey.mjs"), ...args], {
-    env: { ...process.env, ...env }, cwd: os.tmpdir(),
+    env: { ...environment, ...env }, cwd: os.tmpdir(),
   });
-  return { root, invoke };
+  return { root, invoke, environment };
 }
 
 test("help and version work without importing either server; errors return a failing exit code", async t => {
@@ -225,7 +231,7 @@ setInterval(()=>{},1000);
   }
   const child = spawn(process.execPath, [path.join(f.root, "bin/codey.mjs"), "start", "--foreground",
     "--host", "::1", "--workspace-port", "4567", "--gateway-port", "4568"], {
-    cwd: os.tmpdir(), env: { ...process.env, HOST: "ignored-host", SERVER_PORT: "ignored-port", CODEY_MANAGED: "false" },
+    cwd: os.tmpdir(), env: { ...f.environment, HOST: "ignored-host", SERVER_PORT: "ignored-port", CODEY_MANAGED: "false" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stopped = once(child, "exit");

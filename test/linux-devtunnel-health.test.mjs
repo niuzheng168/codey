@@ -106,6 +106,42 @@ test("connectivity accepts the actual banner-prefixed CLI shape and only the con
   }
 });
 
+test("gh health recognizes the pinned Node host worker and uses credential-free management inspection", async () => {
+  const f = fixture();
+  const runtimeFile = "/home/fixture/.config/codey-machine/runtime.json";
+  const config = { schema: 2, platform: "linux-x64", ownerUid: process.getuid(), ownerHome: "/home/fixture",
+    tunnelAuth: { source: "gh" }, nodeExe: "/fixture/node", codeyDirectory: "/fixture/codey",
+    codeyBin: "/fixture/codey/bin/codey.mjs", devtunnelExe: devtunnel, qualifiedTunnel: tunnelId };
+  f.options = healthOptions([devtunnel, tunnelId, stateFile, "--runtime", runtimeFile]);
+  f.args = [config.nodeExe, "/fixture/codey/lib/tunnel.mjs", "host", runtimeFile];
+  f.dependencies.runtime = async file => { assert.equal(file, runtimeFile); return config; };
+  const execute = f.dependencies.command;
+  f.dependencies.command = async (file, args, timeout) => {
+    if (file !== config.nodeExe) return execute(file, args, timeout);
+    assert.deepEqual(args, ["/fixture/codey/lib/tunnel.mjs", "show", runtimeFile]);
+    assert.equal(timeout, 25000);
+    f.calls.push({ file, args, timeout });
+    if (f.probeError) throw f.probeError;
+    return JSON.stringify({ tunnelId: tunnelId.split(".")[0], clusterId: "usw2",
+      status: { hostConnectionCount: { current: f.connections } } });
+  };
+  f.connections = 1;
+  assert.equal((await f.check()).status, "host-online");
+  assert.equal(f.restarts().length, 0);
+  assert.ok(f.calls.every(call => !call.args.includes("login") && !call.args.includes("token")));
+  f.connections = 0;
+  await f.check(60000);
+  await f.check(60000);
+  assert.equal((await f.check(60000)).restartRequested, true);
+  f.probeError = new Error("secret must not be printed");
+  const result = await f.check(60000);
+  assert.equal(result.status, "probe-unavailable");
+  assert.equal(result.failures, 0);
+  assert.ok(!JSON.stringify(result).includes("secret"));
+  f.dependencies.runtime = async () => ({ ...config, qualifiedTunnel: "another.usw2" });
+  await assert.rejects(f.check(), /runtime identity mismatch/);
+});
+
 test("only three spaced, consecutive offline samples permit recovery", () => {
   let result = offline();
   assert.equal(result.state.failures, 1);

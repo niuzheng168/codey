@@ -138,7 +138,22 @@ export function macosAdapter(i) {
         if (!item.enabled && !old.running) await i.run("/bin/launchctl", ["disable", target]);
       }
     },
-    switchPackage: async (before) => { await adapter.status(before); },
+    async switchPackage(before, after) {
+      await adapter.status(before);
+      const changed = [];
+      try {
+        for (const component of COMPONENTS) {
+          const old = agentDefinition(before, i.file, component), next = agentDefinition(after, i.file, component);
+          if (isDeepStrictEqual(old, next)) continue;
+          const file = path.join(i.agents, label(before.nodeId, component) + ".plist");
+          changed.push({ file, old });
+          await i.write(file, plist(next));
+        }
+      } catch (error) {
+        for (const { file, old } of changed) await i.write(file, plist(old));
+        throw error;
+      }
+    },
   async verify(config) {
     const disabled = (await i.run("/bin/launchctl", ["print-disabled", i.domain])).stdout;
     for (const component of COMPONENTS) {

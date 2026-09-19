@@ -14,16 +14,82 @@ const environment = value => Object.entries(value).map(([key, val]) => {
   return `${key}=${JSON.stringify(val)}`;
 }).join("\n") + "\n";
 
+/** Inspect, never signal, Codex processes. A separate service's CODEX_HOME is not ours. */
+export async function assertLinuxCodexAvailable(codexHome, {
+  execute, procRoot = "/proc", pid = process.pid, uid = process.getuid(),
+} = {}) {
+  const candidates = new Set();
+  for (const args of [["-x", "codex"], ["-f", "(^|/)[c]odex([.]js)?([[:space:]]|$)"]]) {
+    const result = await execute("/usr/bin/pgrep", ["-u", String(uid), ...args], { check: false });
+    requireValue(result.code === 0 || result.code === 1, "Cannot inspect running Codex processes");
+    if (result.code === 0) {
+      const values = result.stdout.trim().split(/\s+/);
+      requireValue(values.every(value => /^[1-9][0-9]*$/.test(value)), "Cannot inspect running Codex processes");
+      for (const value of values) candidates.add(Number(value));
+    }
+  }
+  if (!candidates.size) return;
+  const close = "Close Codex/Desktop yourself for the target CODEX_HOME and use an external terminal";
+  requireValue(codexHome, close); // Callers without a verified target retain the conservative check.
+  const snapshot = async id => {
+    const text = await readFile(path.join(procRoot, String(id), "stat"), "utf8");
+    const fields = text.slice(text.lastIndexOf(") ") + 2).trim().split(/\s+/);
+    requireValue(fields.length >= 20 && /^\d+$/.test(fields[1]) && /^\d+$/.test(fields[19]),
+      "Cannot inspect running Codex processes");
+    return { parent: Number(fields[1]), start: fields[19] };
+  };
+  // Even a different CODEX_HOME must not allow an installer to mutate its own host.
+  const visited = new Set();
+  for (let current = pid; current > 1 && !visited.has(current);) {
+    requireValue(!candidates.has(current), close);
+    visited.add(current);
+    try { current = (await snapshot(current)).parent; }
+    catch (error) {
+      if (error.code === "ENOENT") break;
+      throw error;
+    }
+  }
+  const canonical = async file => {
+    requireValue(path.isAbsolute(file), "Cannot determine a running Codex process's CODEX_HOME");
+    try { return await realpath(file); }
+    catch (error) { if (error.code === "ENOENT") return path.resolve(file); throw error; }
+  };
+  const target = await canonical(codexHome);
+  for (const id of candidates) {
+    try {
+      const before = await snapshot(id);
+      const entries = (await readFile(path.join(procRoot, String(id), "environ"), "utf8")).split("\0");
+      const values = Object.fromEntries(entries.filter(entry => /^(?:HOME|CODEX_HOME)=/.test(entry))
+        .map(entry => { const at = entry.indexOf("="); return [entry.slice(0, at), entry.slice(at + 1)]; }));
+      const home = values.CODEX_HOME || (values.HOME && path.join(values.HOME, ".codex"));
+      requireValue(home, "Cannot determine a running Codex process's CODEX_HOME; no process was stopped");
+      const actual = await canonical(home);
+      requireValue((await snapshot(id)).start === before.start, "Codex process changed during inspection; retry");
+      requireValue(actual !== target && !actual.startsWith(target + path.sep) && !target.startsWith(actual + path.sep), close);
+    } catch (error) {
+      if (error.code === "ENOENT") continue; // It exited while being inspected.
+      if (error.code === "EACCES" || error.code === "EPERM") {
+        requireValue(false, "Cannot inspect a running Codex process; no process was stopped");
+      }
+      throw error;
+    }
+  }
+}
+
 // The installer, lifecycle CLI and package switch all use these exact definitions.
 export function linuxUnitFiles(config) {
   const home = safe(config.ownerHome), root = safe(config.runtimeRoot), state = safe(config.stateRoot);
   const node = safe(config.nodeExe), entry = safe(config.codeyBin), tunnel = safe(config.devtunnelExe);
+  const github = config.tunnelAuth?.source === "gh";
+  const worker = `${node} ${safe(path.join(config.codeyDirectory, "lib/tunnel.mjs"))}`;
+  const runtime = `${safe(config.configRoot)}/runtime.json`;
   requireValue(/^codey-n-[a-f0-9]{24}\.[a-z][a-z0-9]{1,15}$/.test(config.qualifiedTunnel));
   const commands = {
     "codey-copilot-api.service": `${node} ${entry} copilot start --host 127.0.0.1 --port 4141`,
     "codey-cloudcli.service": `${node} ${safe(path.join(config.codeyDirectory, "lib/workspace.mjs"))}`,
-    "codey-devtunnel.service": `${tunnel} host ${config.qualifiedTunnel} --host-header unchanged --origin-header unchanged`,
-    "codey-devtunnel-renew.service": `${node} ${safe(config.helperPath)} renew ${safe(config.configRoot)}/runtime.json`,
+    "codey-devtunnel.service": github ? `${worker} host ${runtime}` :
+      `${tunnel} host ${config.qualifiedTunnel} --host-header unchanged --origin-header unchanged`,
+    "codey-devtunnel-renew.service": github ? `${worker} renew ${runtime}` : `${node} ${safe(config.helperPath)} renew ${runtime}`,
   };
   const files = {};
   for (const [name, command] of Object.entries(commands)) {
@@ -36,8 +102,10 @@ export function linuxUnitFiles(config) {
   }
   files["codey-devtunnel-renew.timer"] =
     "[Unit]\nDescription=Renew Codey connect token\n[Timer]\nOnActiveSec=30m\nOnUnitActiveSec=6h\nPersistent=true\nUnit=codey-devtunnel-renew.service\n[Install]\nWantedBy=timers.target\n";
+  const health = github ? safe(path.join(config.codeyDirectory, "onboarding/scripts/linux-devtunnel-health.mjs")) :
+    `${root}/linux-devtunnel-health.mjs`;
   files["codey-devtunnel-health.service"] = "[Unit]\nDescription=Check Codey DevTunnel host connectivity\nAfter=network-online.target\n\n" +
-    `[Service]\nType=oneshot\nEnvironment=HOME=${home}\nExecStart=${node} ${root}/linux-devtunnel-health.mjs ${tunnel} ${config.qualifiedTunnel} ${state}/devtunnel-health.json\n` +
+    `[Service]\nType=oneshot\nEnvironment=HOME=${home}\nExecStart=${node} ${health} ${tunnel} ${config.qualifiedTunnel} ${state}/devtunnel-health.json${github ? ` --runtime ${runtime}` : ""}\n` +
     "TimeoutStartSec=45s\nNoNewPrivileges=true\nUMask=0077\n";
   files["codey-devtunnel-health.timer"] = "[Unit]\nDescription=Monitor Codey DevTunnel for disconnected live hosts\n\n" +
     "[Timer]\nOnActiveSec=1min\nOnUnitInactiveSec=1min\nAccuracySec=5s\nUnit=codey-devtunnel-health.service\n\n[Install]\nWantedBy=timers.target\n";
@@ -79,11 +147,8 @@ export function linuxAdapter(i) {
         .map(match => Number(match[1])));
       return [3001, 4141, 8443].map(port => ({ port, status: owned.has(port) ? "owned-codey" : "free" }));
     },
-    async available() {
-      const result = await i.run("/usr/bin/pgrep", ["-u", String(process.getuid()), "-x", "codex"], { check: false });
-      requireValue(result.code === 1, "Close Codex/Desktop yourself and use an external terminal");
-      const matches = await i.run("/usr/bin/pgrep", ["-u", String(process.getuid()), "-f", "(^|/)[c]odex([.]js)?([[:space:]]|$)"], { check: false });
-      requireValue(matches.code === 1, "Close Codex/Desktop yourself and use an external terminal");
+    async available(codexHome) {
+      await assertLinuxCodexAvailable(codexHome, { execute: i.run });
       await i.run("/usr/bin/openssl", ["version"]);
       if ((await i.run("/usr/bin/loginctl", ["show-user", String(process.getuid()), "-p", "Linger", "--value"])).stdout.trim() !== "yes") {
         await i.run("/usr/bin/sudo", ["-n", "true"]);
@@ -184,7 +249,7 @@ export function linuxAdapter(i) {
       const files = linuxUnitFiles(after);
       const previous = linuxUnitFiles(before), changed = [];
       try {
-        for (const name of ["codey-copilot-api.service", "codey-cloudcli.service"]) {
+        for (const name of Object.keys(files).filter(name => files[name] !== previous[name])) {
           changed.push(name);
           await i.write(path.join(units, name), Buffer.from(files[name]));
         }
@@ -203,7 +268,8 @@ export function linuxAdapter(i) {
           (await systemctl(["is-active", name])).stdout.trim() === "active", `${name} is not enabled and active`);
       }
       const host = await readFile(path.join(units, "codey-devtunnel.service"), "utf8");
-      requireValue(host.split("\n").includes(`ExecStart=${config.devtunnelExe} host ${config.qualifiedTunnel} --host-header unchanged --origin-header unchanged`),
+      requireValue(config.tunnelAuth?.source === "gh" ? host === linuxUnitFiles(config)["codey-devtunnel.service"] :
+        host.split("\n").includes(`ExecStart=${config.devtunnelExe} host ${config.qualifiedTunnel} --host-header unchanged --origin-header unchanged`),
         "Tunnel service belongs to another configuration");
       requireValue((await i.run("/usr/bin/loginctl", ["show-user", String(process.getuid()), "-p", "Linger", "--value"])).stdout.trim() === "yes",
         "User linger is not enabled");

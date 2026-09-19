@@ -5,6 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { exists, fileHash } from "./package-files.mjs";
+import { GH_BINDING_FILE } from "./copilot-auth.mjs";
 
 const LIMIT = 32 * 1024 * 1024, FILE_LIMIT = 4 * 1024 * 1024;
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -13,7 +14,7 @@ const json = bytes => {
   try { return JSON.parse(bytes); } catch { fail("Invalid backup JSON; private contents were not printed"); }
 };
 const gatewayName = name => /^(?:(?!\.{1,2}\/)[a-zA-Z0-9_-]+\/)?(?:ent_)?github_token$/.test(name) ||
-  ["config.json", "codex_credentials.json"].includes(name);
+  ["config.json", "codex_credentials.json", GH_BINDING_FILE].includes(name);
 
 function fixedFiles(m) {
   const c = m.config;
@@ -62,7 +63,7 @@ export async function backupDocument(m) {
   for (const item of files) if (await fileHash(targetFile(m, item.name)) !== item.sha256) fail("Settings changed during backup; retry");
   return { schema: 1, kind: "codey-settings-backup", createdAt: new Date().toISOString(),
     node: { nodeId: m.config.nodeId, platform: m.i.target, computer: m.config.computer, ownerHome: m.i.home },
-    files, missing, excluded: ["programs/dependencies", "databases/projects/sessions", "OS credential stores (DevTunnel/Keychain/Credential Manager)"] };
+    files, missing, excluded: ["programs/dependencies", "databases/projects/sessions", "OS/gh credential stores (DevTunnel/Keychain/Credential Manager/GitHub CLI)"] };
 }
 
 export function decodeBackup(bytes) {
@@ -136,6 +137,11 @@ export async function importMachine(m, options) {
   if (snapshot?.schema !== 2 || snapshot.layout !== "npm-codey-package" ||
       typeof snapshot.environment !== "object" || !snapshot.environment) fail("Invalid saved node configuration");
   const settingsOnly = Boolean(options["settings-only"]);
+  const ghName = `gateway/${GH_BINDING_FILE}`;
+  if (files.has(ghName)) {
+    const { validateGhBinding } = await import(pathToFileURL(path.join(m.i.skill, "scripts/github-auth.mjs")).href);
+    validateGhBinding(json(files.get(ghName)), String(document.node.platform).startsWith("windows-") ? "win32" : "linux");
+  }
   if (!settingsOnly && (document.node.nodeId !== m.config.nodeId || document.node.ownerHome !== m.i.home ||
       document.node.platform !== m.i.target || document.node.computer !== m.config.computer)) {
     fail("Full restore is for the same node/owner/platform; use --settings-only on a different node");
@@ -167,7 +173,8 @@ export async function importMachine(m, options) {
   }
   const writes = [];
   for (const [name, original] of files) {
-    if (name === "node/runtime.json" || name === "node/setup.json" || settingsOnly && name.startsWith("node/")) continue;
+    if (name === "node/runtime.json" || name === "node/setup.json" ||
+        settingsOnly && (name.startsWith("node/") || name === ghName)) continue;
     const file = targetFile(m, name);
     await m.i.checked(file);
     let bytes = original;

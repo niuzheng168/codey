@@ -21,6 +21,8 @@ $helpers = @($PSCommandPath, (Join-Path $PSScriptRoot 'windows-common.ps1'),
 if ($config.PSObject.Properties['taskHostExe']) { $helpers += $config.taskHostExe }
 if ($config.helperHashes.PSObject.Properties['registration.mjs']) { $helpers += (Join-Path $PSScriptRoot 'registration.mjs') }
 if ($config.helperHashes.PSObject.Properties['machine-common.mjs']) { $helpers += (Join-Path $PSScriptRoot 'machine-common.mjs') }
+if ($config.helperHashes.PSObject.Properties['github-auth.mjs']) { $helpers += (Join-Path $PSScriptRoot 'github-auth.mjs') }
+if ($config.helperHashes.PSObject.Properties['github-tunnel.mjs']) { $helpers += (Join-Path $PSScriptRoot 'github-tunnel.mjs') }
 foreach ($file in $helpers) {
     $null = Assert-CodeyPath $file $config.runtimeRoot
     $expected = $config.helperHashes.PSObject.Properties[[IO.Path]::GetFileName($file)]

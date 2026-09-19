@@ -78,13 +78,13 @@ test("every business command has its own reference entry under the actual CLI hi
   }
 });
 
-test("the public reference exposes only selected Copilot options, all backed by the upstream implementation", () => {
+test("the public reference distinguishes Codey's force option from forwarded upstream Copilot options", () => {
   const select = (definitions, names) => Object.fromEntries(names.map(name => {
     assert.ok(definitions[name], `Missing underlying Copilot option: ${name}`);
     return [name, definitions[name]];
   }));
   assertFlags("`codey copilot login`", {
-    ...select(auth.auth.subCommands.login.args, ["verbose", "show-token"]), ...globals,
+    force: {}, ...select(auth.auth.subCommands.login.args, ["verbose", "show-token"]), ...globals,
   });
   assertFlags("`codey copilot start`", {
     ...select(start.args, ["host", "port", "verbose", "proxy-env"]), ...globals,
@@ -98,7 +98,7 @@ test("the public reference exposes only selected Copilot options, all backed by 
 test("documented Codey-native parameters follow the real parsers, including defaults and equals rejection", () => {
   assertFlags("`codey start`", { host: {}, "workspace-port": {}, "gateway-port": {}, foreground: {}, json: {}, timeout: {} });
   assertFlags("`codey doctor`", { "package-only": {}, "runtime-only": {}, offline: {}, model: {}, json: {} });
-  assertFlags("`codey copilot login`", { verbose: { alias: "v" }, "show-token": {}, "api-home": {}, "oauth-app": {}, "enterprise-url": {} });
+  assertFlags("`codey copilot login`", { force: {}, verbose: { alias: "v" }, "show-token": {}, "api-home": {}, "oauth-app": {}, "enterprise-url": {} });
   for (const [command, usage] of Object.entries(MACHINE_USAGE)) {
     if (command === "start") continue; // Foreground options are in the public router, checked above.
     const flags = Object.fromEntries([...usage.matchAll(/--([a-z][a-z0-9-]*)/g)].map(match => [match[1], {}]));
@@ -162,6 +162,7 @@ test("documented Copilot examples parse without starting any service or authenti
     ["copilot", "start", "--port=4142", "--no-proxy-env"],
     ["copilot", "login", "--api-home", "/absolute/gateway home"],
     ["copilot", "login", "--api-home=/absolute/gateway home", "--no-show-token"],
+    ["copilot", "login", "--force", "--api-home=/absolute/gateway home"],
   ]) {
     const plan = commandPlan(example);
     assert.equal(plan.kind, "gateway");

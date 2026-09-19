@@ -10,6 +10,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { nativePlatform, registrationDocument as nativeRegistrationDocument, verifyRegistrationFile, writeRegistration } from "./registration.mjs";
 import { checkedPath, digest, readPrivate, run } from "./machine-common.mjs";
+import { readGhCredential } from "./github-auth.mjs";
+import { issueGhTunnelToken, listGhTunnels, scopedTunnelToken } from "./github-tunnel.mjs";
 
 const exec = promisify(execFile);
 const read = async file => JSON.parse(await readFile(file, "utf8"));
@@ -27,13 +29,27 @@ export function parseTunnelJson(text) {
 }
 
 /** Shared by installation and `codey devtunnel login`; never switch an existing provider. */
-export async function loginTunnel(executable, environment, execute) {
+export async function loginTunnel(executable, environment, execute, {
+  binding, github = readGhCredential, verify = listGhTunnels, githubEnvironment = environment, interactive = true,
+} = {}) {
+  const reuseGh = async credential => {
+    requireValue(credential, "The selected GitHub CLI account is unavailable; no other account was selected");
+    await verify(credential);
+    const result = { ok: true, provider: "github", loggedIn: true, existing: true,
+      source: "gh", binding: credential.binding };
+    Object.defineProperty(result, "credential", { value: credential });
+    return result;
+  };
+  if (binding) return reuseGh(await github({ environment: githubEnvironment, binding }));
   const shown = await execute(executable, ["user", "show", "--json"], { env: environment, check: false });
   let user = shown.code === 0 ? parseTunnelJson(shown.stdout) : {};
   requireValue(user.status !== "Logged in" || user.provider === "github",
     "DevTunnel is signed in with another provider; review that account rather than switching it automatically");
   const existing = user.status === "Logged in";
   if (!existing) {
+    const credential = await github({ environment: githubEnvironment });
+    if (credential) return reuseGh(credential);
+    requireValue(interactive, "No DevTunnel or GitHub CLI login is available; run codey devtunnel login in the owner's terminal");
     await execute(executable, ["user", "login", "--github", "--use-device-code-auth"],
       { env: environment, interactive: true, timeout: 900000 });
     user = parseTunnelJson((await execute(executable, ["user", "show", "--json"], { env: environment })).stdout);
@@ -68,16 +84,7 @@ export function validateTunnel(raw, expectedId, expectedCluster) {
 
 export function validateConnectToken(value, coordinates, now = Date.now()) {
   const token = value?.token ?? value?.accessToken;
-  requireValue(typeof token === "string" && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token),
-    "Invalid connect credential");
-  let claims;
-  try { claims = JSON.parse(Buffer.from(token.split(".")[1], "base64url")); }
-  catch { throw new Error("Invalid connect credential"); }
-  requireValue(claims.scp === "connect" && claims.tunnelId === coordinates.tunnelId &&
-    claims.clusterId === coordinates.clusterId && Number.isInteger(claims.exp) &&
-    claims.exp > now / 1000 + 3600 && claims.exp <= now / 1000 + 86400 + 300,
-  "Wrong scope, tunnel or expiry on connect credential");
-  return token;
+  return scopedTunnelToken(token, coordinates, "connect", now).token;
 }
 
 export function clientTicket(identity, now = Date.now()) {
@@ -158,14 +165,15 @@ export function registrationDocument(setup, identity, coordinates, token, certif
   return nativeRegistrationDocument(setup, identity, coordinates, token, certificate, computer);
 }
 
-export async function tokenFor(config, coordinates) {
+export async function tokenFor(config, coordinates, dependencies) {
+  if (config.tunnelAuth?.source === "gh") return (await issueGhTunnelToken(config, coordinates, "connect", dependencies)).token;
   const result = await exec(config.devtunnelExe, [
     "token", `${coordinates.tunnelId}.${coordinates.clusterId}`, "--scope", "connect", "--json",
   ], { windowsHide: true, timeout: 60000, maxBuffer: 32768, env: config.baseEnvironment ?? process.env });
   return validateConnectToken(parseTunnelJson(result.stdout), coordinates);
 }
 
-async function renew(config, identity, coordinates, token) {
+export async function renew(config, identity, coordinates, token) {
   const origin = new URL(config.portalOrigin);
   requireValue(origin.protocol === "https:" && origin.origin === config.portalOrigin, "Invalid portal origin");
   const target = `/api/machine-tunnels/${identity.nodeId}/token`;

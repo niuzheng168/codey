@@ -87,14 +87,18 @@ export function windowsAdapter(i) {
       config.services = {
         codey: { executable: config.nodeExe, arguments: [config.codeyBin, "start", "--foreground", "--host", "127.0.0.1",
           "--workspace-port", "3001", "--gateway-port", "4141"], workingDirectory: config.codeyDirectory, environment: config.environment },
-        tunnel: { executable: config.devtunnelExe, arguments: ["host", config.qualifiedTunnel,
-          "--host-header", "unchanged", "--origin-header", "unchanged"], workingDirectory: config.releaseDirectory, environment: config.baseEnvironment },
-        renew: { executable: config.nodeExe, arguments: [config.helperPath, "renew", i.file],
+        tunnel: { executable: config.tunnelAuth?.source === "gh" ? config.nodeExe : config.devtunnelExe,
+          arguments: config.tunnelAuth?.source === "gh" ? [path.join(config.codeyDirectory, "lib/tunnel.mjs"), "host", i.file] :
+            ["host", config.qualifiedTunnel, "--host-header", "unchanged", "--origin-header", "unchanged"],
+          workingDirectory: config.releaseDirectory, environment: config.baseEnvironment },
+        renew: { executable: config.nodeExe, arguments: [config.tunnelAuth?.source === "gh" ?
+          path.join(config.codeyDirectory, "lib/tunnel.mjs") : config.helperPath, "renew", i.file],
           workingDirectory: config.releaseDirectory, environment: config.baseEnvironment },
       };
       config.helperHashes = {};
       for (const name of ["windows-common.ps1", "windows-process.cs", "windows-service.ps1", "windows-runtime.mjs",
-        "registration.mjs", "machine-common.mjs", "codey-task-host.exe"]) config.helperHashes[name] = await digest(path.join(supervisor, name));
+        "registration.mjs", "machine-common.mjs", "github-auth.mjs", "github-tunnel.mjs",
+        "codey-task-host.exe"]) config.helperHashes[name] = await digest(path.join(supervisor, name));
     },
     async start(config, previous, started) {
       started.push("tasks");

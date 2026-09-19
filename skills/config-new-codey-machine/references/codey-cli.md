@@ -6,11 +6,12 @@
 
 ### `codey copilot login`
 
-通过 GitHub 设备码登录 Copilot，保存凭据；不启动 API，也不登录 DevTunnel。
+优先复用已有 Copilot 凭据；没有自身凭据时自动复用已登录的 GitHub CLI（gh）。
+均不可用时才通过设备码登录。不会启动 API，也不登录 DevTunnel。
 
 ```text
 codey copilot login [--api-home DIR] [--oauth-app APP] [--enterprise-url DOMAIN]
-                    [--verbose] [--show-token]
+                    [--force] [--verbose] [--show-token]
 ```
 
 | 参数 / 别名 | 取值与默认值 | 含义 |
@@ -18,17 +19,25 @@ codey copilot login [--api-home DIR] [--oauth-app APP] [--enterprise-url DOMAIN]
 | `--api-home DIR` | 目录；`COPILOT_API_HOME`，否则 `~/.local/share/copilot-api` | 保存配置、凭据和用量数据；建议绝对路径 |
 | `--oauth-app APP` | 字符串；`COPILOT_API_OAUTH_APP`，否则内置默认应用 | 选择 OAuth 应用；`opencode` 选择其内置应用，不是任意 OAuth client ID |
 | `--enterprise-url DOMAIN` | 域名；`COPILOT_API_ENTERPRISE_URL`，否则 `github.com` | 使用指定 GitHub Enterprise 域名 |
+| `--force` | 布尔；`false` | 跳过复用，明确重新进行 GitHub 设备码登录；由 Codey 处理，不传成上游参数 |
 | `--verbose`, `-v` | 布尔；`false` | 输出详细登录日志 |
-| `--show-token` | 布尔；`false` | 打印 token；常规操作不要开启或分享其输出 |
+| `--show-token` | 布尔；`false` | 设备码登录流程可打印 token；复用已有/gh 凭据不打印。常规操作不要开启 |
 
-每次执行都会重新认证；固定登录 Copilot，不接受 `--provider` 或 `--alias`。
-值参数支持 `--name=value`；布尔参数可用 `--no-verbose`、`--no-show-token` 或 `--name=false` 关闭。拒绝重复或未知参数。
+默认不强制重新认证；固定为 Copilot，不接受 `--provider` 或 `--alias`。
+显式 OAuth app/Enterprise 选择保留其自己的登录流程，不自动使用 github.com 的 gh 凭据。
+值参数支持 `--name=value`；布尔参数可用 `--no-force`、`--no-verbose`、`--no-show-token` 或 `--name=false` 关闭。拒绝重复或未知参数。
+
+gh 复用验证实际 GitHub 账号及 Copilot 模型访问权限，在 API home 的 `github-cli.json`
+保存账号和 gh 路径，不复制 token。后续固定该账号，不跟随 `gh auth switch`，也不会被普通
+`GH_TOKEN`/`GITHUB_TOKEN` 环境变量换号。已有独立 token 或显式 `COPILOT_API_GITHUB_TOKEN`
+优先；失效凭据报错，不自动改用另一个账号。gh 缓存失效应由原用户重新 `gh auth login`。
 
 **示例**
 
 ```sh
 codey copilot login
 codey copilot login --api-home "$HOME/.local/share/copilot-api" --verbose
+codey copilot login --force
 ```
 
 ### `codey copilot start`
@@ -52,7 +61,9 @@ codey copilot start [--host HOST] [--port PORT] [--api-home DIR]
 
 - HTTP `4141` 提供 `POST /responses`、`POST /v1/responses`、`/usage`、`/token-usage` 及其 `/daily`、`/events` 接口。
 - 已配置的节点保留同进程 HTTPS `8443` 只读用量/历史接口和现有证书、鉴权；`8443` 不提供 Responses。不在此命令中创建证书或后台服务。
-- 启动不交互登录；模型调用和上游配额查询需要凭据。GitHub token 来自 `COPILOT_API_GITHUB_TOKEN` 或登录保存的文件，不等于客户端访问 API 的 key。
+- 启动不交互登录。依次使用显式 `COPILOT_API_GITHUB_TOKEN`、已保存的 token、已固定/当前
+  gh 账号；显式 app/Enterprise 配置不自动回退 gh。gh 走 direct OAuth，不调用默认的 v2
+  token exchange；选中账号仍须有 Copilot 权限。GitHub token 不等于客户端访问 API 的 key。
 - 值参数支持等号写法；布尔参数支持 `--no-verbose`、`--no-proxy-env` 或 `--name=false`。内部固定 `headless`，不提供额外的上游启动参数。
 - 改 HTTP 端口不会同步修改模型地址、HTTPS `8443` 或隧道；已有后台节点时不要重复启动。
 
@@ -67,7 +78,8 @@ codey copilot start --host 127.0.0.1 --port 4141 --proxy-env
 
 ### `codey devtunnel login`
 
-检查本节点的 DevTunnel GitHub 登录；未登录时执行设备码认证，最长等待 15 分钟。
+检查本节点的 DevTunnel GitHub 登录；没有自身登录时，自动尝试已登录的 gh。
+两者都不可用才执行设备码认证，最长等待 15 分钟。
 
 ```text
 codey devtunnel login
@@ -75,7 +87,19 @@ codey devtunnel login
 
 **参数：** 无业务参数。使用本节点保存的 DevTunnel 可执行文件和原用户环境。
 
-已有 GitHub 登录直接复用；已有其他 provider 时停止，不自动切换账号。不登录 Copilot、不创建或启动隧道。
+已有 GitHub 登录直接复用；已有其他 provider 时停止，不自动切换账号。
+gh 模式将账号绑定保存在原节点 runtime 配置，验证可以访问原 tunnel ID，准备三平台
+host/续期/健康检查使用的限 scope 令牌通道；不写 GitHub token，不登录 Copilot、不创建或启动隧道。
+首次从旧缓存模式改为 gh 时，若隧道正在运行，先停止本节点隧道再登录：
+
+```sh
+codey devtunnel stop
+codey devtunnel login
+codey devtunnel start
+```
+
+gh 模式不改原始 DevTunnel 登录缓存，因此 `devtunnel user show` 仍可能显示
+`Not logged in`；用 `codey doctor` 检查实际身份、权限和 host 连接。
 
 **示例**
 
@@ -97,6 +121,9 @@ codey devtunnel start [--json] [--timeout SECONDS]
 | `--timeout SECONDS` | 整数 `1–600`；`60` 秒 | 等待相关服务达到启动状态的时限 |
 
 重新启用被 stop 禁用的隧道守护；已运行组件不重复拉起。云端是否真正连接，用 `codey doctor` 检查。
+停止状态下没有 DevTunnel 自身登录时可自动绑定 gh；无可用认证则报错，不弹设备码。
+gh host 只从 stdin 获取 host-only token，过期前 5 分钟由现有原生守护轮换；
+connect-only token 继续单独续期。网络/认证失败不是“host 离线”的证据，不据此反复重启。
 
 **示例**
 

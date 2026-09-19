@@ -51,7 +51,8 @@ export async function writeResources(i, config) {
     cloud: { tunnel: config.qualifiedTunnel, deleteTunnel: false, deletePortalRecord: false },
     uninstallImplemented: false, reverifyBeforeRemoval: true,
   };
-  for (const candidate of [...new Set([config.helperPath, config.registrationHelper, config.commonPath, config.workerPath,
+  for (const candidate of [...new Set([config.helperPath, config.registrationHelper, config.commonPath,
+    config.authHelperPath, config.tunnelAuthHelperPath, config.workerPath,
     config.runnerPath, config.taskHostExe,
     ...Object.keys(config.helperHashes ?? {}).map(name => path.join(i.root, "supervisor", name)),
     ...(i.target === "linux-x64" ? [path.join(i.root, "linux-devtunnel-health.mjs")] : [])].filter(Boolean))]) {

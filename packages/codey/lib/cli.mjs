@@ -5,10 +5,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { machineOptions } from "./machine.mjs";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const COPILOT_LOGIN_HELP = `Usage: codey copilot login [--verbose|-v] [--show-token]
+const COPILOT_LOGIN_HELP = `Usage: codey copilot login [--force] [--verbose|-v] [--show-token]
                            [--api-home DIR] [--oauth-app APP] [--enterprise-url DOMAIN]
-GitHub device login for Copilot; saves credentials without starting an API service.
+Reuse existing Copilot credentials, then a signed-in gh account, before device login.
+Pins the gh account without copying its token. Existing accounts are not silently switched.
+--force skips reuse and explicitly performs GitHub device login.
+No API service starts. Explicit OAuth-app/Enterprise choices keep their own login flow.
 --verbose defaults to false. --show-token defaults to false and prints secrets.
+Reused credentials (especially gh tokens) are never printed, even with --show-token.
 Connection options default to the matching COPILOT_API_* environment variables.
 --api-home otherwise defaults to HOME/.local/share/copilot-api.
 --provider/--alias overrides are not supported here. --help/-h displays this help.
@@ -21,7 +25,8 @@ Defaults: --host 127.0.0.1 (ignores HOST), --port 4141 (range 1–65535).
 The same server exposes /responses, /v1/responses, /usage and /token-usage.
 A managed node also retains its configured HTTPS 8443 read-only usage/history API.
 No Workspace/CloudCLI or DevTunnel starts, and no services or certificates are created.
-Startup never prompts for provider setup; use codey copilot login first.
+Startup never prompts. Without explicit/saved credentials it automatically reuses gh.
+Use codey copilot login if neither existing credentials nor gh are available.
 --verbose and --proxy-env default to false. --proxy-env enables proxy environment variables.
 Connection options use the same COPILOT_API_* defaults as copilot login.
 There are no --headless, --github-token, --show-token or --claude-code startup options.
@@ -32,7 +37,7 @@ const HELP = `Codey — workspace and model gateway
 Usage:
   codey [--help|-h|help]
   codey --version|-v|version
-  codey copilot login [--verbose|-v] [--show-token] [connection options]
+  codey copilot login [--force] [--verbose|-v] [--show-token] [connection options]
   codey copilot start [--host HOST] [--port PORT|-p PORT]
     [--verbose|-v] [--proxy-env] [connection options]
   codey devtunnel login
@@ -69,7 +74,9 @@ CloudCLI starts through codey start, not a separate command. Do not duplicate an
 Codey's start/guard require space-separated values, not --name=value.
 Port changes do not reconfigure model URLs, HTTPS 8443, DevTunnel or OS services.
 
-copilot login --show-token can print secrets; keep it off and never paste secret output.
+Copilot and DevTunnel reuse gh when their own credentials are absent; existing accounts win.
+GitHub CLI bindings pin the account; changing gh's active account does not switch Codey.
+copilot login --force explicitly signs in again; --show-token can print secrets during that flow.
 doctor checks the package and node components without repair or interactive login.
 --model permits bounded real model requests; --offline skips online tunnel checks.
 --runtime-only skips the managed node; --package-only also skips native/SDK/PTY.
@@ -108,7 +115,7 @@ function serverOptions(args, allowed) {
 
 function copilotOptions(args, action) {
   const seen = new Set(), options = {}, forwarded = [];
-  const booleans = action === "login" ? ["--verbose", "--show-token"] : ["--verbose", "--proxy-env"];
+  const booleans = action === "login" ? ["--force", "--verbose", "--show-token"] : ["--verbose", "--proxy-env"];
   const values = ["--api-home", "--oauth-app", "--enterprise-url", ...(action === "start" ? ["--host", "--port"] : [])];
   for (let index = 0; index < args.length; index++) {
     const [name, ...tail] = args[index].split("="), value = tail.join("=");
@@ -117,7 +124,8 @@ function copilotOptions(args, action) {
     seen.add(canonical);
     if (booleans.includes(canonical)) {
       if (tail.length && !["true", "false"].includes(value)) throw new Error(`Invalid Copilot ${action} boolean`);
-      forwarded.push(args[index]);
+      if (canonical === "--force") options.force = !name.startsWith("--no-") && value !== "false";
+      else forwarded.push(args[index]);
     } else if (values.includes(canonical) && !name.startsWith("--no-")) {
       const argument = tail.length ? value : args[++index];
       if (!argument?.trim() || argument.startsWith("-") || /[\0\r\n]/.test(argument)) throw new Error(`Missing or invalid Copilot ${action} option value`);
@@ -147,7 +155,7 @@ export function commandPlan(args, env = process.env) {
       return { kind: "help", text: action === "login" ? COPILOT_LOGIN_HELP : COPILOT_START_HELP };
     }
     const { options, forwarded } = copilotOptions(parameters, action);
-    return { kind: "gateway", args: action === "login" ? ["auth", "login", "--provider", "copilot", ...forwarded] :
+    return { kind: "gateway", ...(options.force ? { force: true } : {}), args: action === "login" ? ["auth", "login", "--provider", "copilot", ...forwarded] :
       ["start", "--headless", "--host", options["--host"] ?? "127.0.0.1", "--port", options["--port"] ?? "4141", ...forwarded] };
   }
   if (command === "doctor") return { kind: "doctor", args: rest };
@@ -265,6 +273,10 @@ export async function runCli(args = process.argv.slice(2)) {
     return;
   }
   const entry = path.join(ROOT, "gateway/main.js");
+  const { prepareCopilotAuth } = await import("./copilot-auth.mjs");
+  const authentication = await prepareCopilotAuth(ROOT, plan.args ?? [], { force: plan.force });
+  if (authentication.handled) return;
+  Object.assign(process.env, authentication.environment);
   process.env.CODEY_MANAGED = "true";
   process.chdir(ROOT);
   process.argv = [process.execPath, entry, ...(plan.args ?? [])];

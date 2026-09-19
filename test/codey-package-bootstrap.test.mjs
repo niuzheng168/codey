@@ -42,6 +42,7 @@ async function fixture(t) {
     "onboarding/templates/a100-models.json", "onboarding/templates/codex-config.toml",
     "onboarding/scripts/install-devtunnel-health.sh", "onboarding/scripts/linux-devtunnel-health.mjs",
     "onboarding/scripts/linux-preflight.sh", "onboarding/scripts/windows-runtime.mjs",
+    "onboarding/scripts/github-auth.mjs", "onboarding/scripts/github-tunnel.mjs",
   ]) {
     await mkdir(path.dirname(path.join(pkg, name)), { recursive: true });
     await writeFile(path.join(pkg, name), entry);

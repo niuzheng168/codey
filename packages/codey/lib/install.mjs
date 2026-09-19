@@ -82,6 +82,7 @@ export async function installedSetup(root, configFile, nodeVersion = process.ver
     "onboarding/templates/a100-models.json", "onboarding/templates/codex-config.toml",
     "onboarding/scripts/install-devtunnel-health.sh", "onboarding/scripts/linux-devtunnel-health.mjs",
     "onboarding/scripts/linux-preflight.sh", "onboarding/scripts/windows-runtime.mjs",
+    "onboarding/scripts/github-auth.mjs", "onboarding/scripts/github-tunnel.mjs",
   ]) {
     if (!(await stat(path.join(root, name))).isFile()) throw new Error(`Missing Codey setup file: ${name}`);
   }

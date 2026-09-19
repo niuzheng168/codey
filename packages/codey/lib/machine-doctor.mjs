@@ -4,6 +4,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { doctorOptions, runDoctor, DOCTOR_HELP } from "./doctor.mjs";
 import { openMachine } from "./machine.mjs";
+import { GH_BINDING_FILE } from "./copilot-auth.mjs";
+import { exists } from "./package-files.mjs";
 
 export async function runDiagnostics(root, args, { open = openMachine, packageCheck = runDoctor, log = console.log } = {}) {
   const options = doctorOptions(args);
@@ -51,13 +53,21 @@ export async function runDiagnostics(root, args, { open = openMachine, packageCh
       });
     }
     await check("Copilot saved login", async () => {
+      if (c.environment.COPILOT_API_GITHUB_TOKEN?.trim()) return "explicit environment credential present (not an online authentication proof)";
       const app = c.environment.COPILOT_API_OAUTH_APP ?? "";
       if (!/^[a-zA-Z0-9_-]*$/.test(app)) throw new Error();
       const token = path.join(c.environment.COPILOT_API_HOME, app,
         (c.environment.COPILOT_API_ENTERPRISE_URL ? "ent_" : "") + "github_token");
-      await m.privateFile(token);
-      if ((await lstat(token)).size === 0) throw new Error();
-      return "token file present (not an online authentication proof)";
+      if (await exists(token) && (await lstat(token)).size > 0) {
+        await m.privateFile(token);
+        return "token file present (not an online authentication proof)";
+      }
+      if (app || c.environment.COPILOT_API_ENTERPRISE_URL) throw new Error();
+      const file = path.join(c.environment.COPILOT_API_HOME, GH_BINDING_FILE);
+      await m.privateFile(file);
+      const { validateGhBinding } = await import(pathToFileURL(path.join(i.skill, "scripts/github-auth.mjs")).href);
+      const binding = validateGhBinding(await i.read(file));
+      return { source: "gh", username: binding.login, detail: "account binding present; gh credentials remain in GitHub CLI" };
     });
     await check("TLS certificate/private key", async () => { await i.certificate(await i.read(c.identityFile), false); });
     await executableCheck("local gateway/TLS/SSO/authentication", async () => {
@@ -66,7 +76,15 @@ export async function runDiagnostics(root, args, { open = openMachine, packageCh
     });
     if (!options.offline) {
       const helpers = await import(pathToFileURL(path.join(i.skill, "scripts/windows-runtime.mjs")).href);
+      let githubCredential;
       await executableCheck("DevTunnel GitHub login", async () => {
+        if (c.tunnelAuth?.source === "gh") {
+          const { readGhCredential } = await import(pathToFileURL(path.join(i.skill, "scripts/github-auth.mjs")).href);
+          githubCredential = await (i.auth?.github ?? readGhCredential)({ environment: c.baseEnvironment, binding: c.tunnelAuth });
+          if (!githubCredential) throw new Error();
+          tunnelAuthenticated = true;
+          return { source: "gh", username: githubCredential.binding.login };
+        }
         const response = await i.run(c.devtunnelExe, ["user", "show", "--json"], { env: c.baseEnvironment, timeout: 30000 });
         const user = helpers.parseTunnelJson(response.stdout);
         if (user.status !== "Logged in" || user.provider !== "github") throw new Error();
@@ -75,7 +93,10 @@ export async function runDiagnostics(root, args, { open = openMachine, packageCh
       });
       await executableCheck("private tunnel/host connection", async () => {
         if (!tunnelAuthenticated) throw new Error("Login required; doctor never logs in");
-        const response = await i.run(c.devtunnelExe, ["show", c.qualifiedTunnel, "--json"], { env: c.baseEnvironment, timeout: 30000 });
+        const { getGhTunnel, tunnelCoordinates } = await import(pathToFileURL(path.join(i.skill, "scripts/github-tunnel.mjs")).href);
+        const response = githubCredential ? {
+          stdout: JSON.stringify(await (i.auth?.getTunnel ?? getGhTunnel)(githubCredential, tunnelCoordinates(c.qualifiedTunnel))),
+        } : await i.run(c.devtunnelExe, ["show", c.qualifiedTunnel, "--json"], { env: c.baseEnvironment, timeout: 30000 });
         const document = helpers.parseTunnelJson(response.stdout);
         helpers.validateTunnel(document, `codey-${c.nodeId}`, c.qualifiedTunnel.split(".")[1]);
         const { hostConnectionCount } = await import(pathToFileURL(path.join(i.skill, "scripts/linux-devtunnel-health.mjs")).href);

@@ -3,7 +3,7 @@
 // actual host connection, not just its PID, without issuing or logging tokens.
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -31,12 +31,13 @@ export async function boundedCommand(file, args, timeoutMs) {
 export function healthOptions(args) {
   const checkOnly = args.at(-1) === "--check";
   const values = checkOnly ? args.slice(0, -1) : args;
-  const [devtunnel, tunnelId, stateFile] = values;
-  if (values.length !== 3 || !path.isAbsolute(devtunnel || "") ||
+  const [devtunnel, tunnelId, stateFile, flag, runtimeFile] = values;
+  if (!(values.length === 3 || values.length === 5 && flag === "--runtime" && path.isAbsolute(runtimeFile || "")) ||
+      !path.isAbsolute(devtunnel || "") ||
       !tunnelPattern.test(tunnelId || "") || !path.isAbsolute(stateFile || "")) {
-    throw new Error("Usage: linux-devtunnel-health.mjs DEVTUNNEL TUNNEL.CLUSTER STATE_FILE [--check]");
+    throw new Error("Usage: linux-devtunnel-health.mjs DEVTUNNEL TUNNEL.CLUSTER STATE_FILE [--runtime FILE] [--check]");
   }
-  return { devtunnel, tunnelId, stateFile, checkOnly };
+  return { devtunnel, tunnelId, stateFile, checkOnly, ...(runtimeFile ? { runtimeFile } : {}) };
 }
 
 export function hostConnectionCount(output, expectedTunnel) {
@@ -121,7 +122,16 @@ function parseService(output) {
   };
 }
 
-function hostArguments(options) {
+export async function healthRuntime(file) {
+  const info = await lstat(file);
+  if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid() || info.mode & 0o077 || info.size > 1024 * 1024) {
+    throw new Error("Invalid private tunnel runtime");
+  }
+  return JSON.parse(await readFile(file, "utf8"));
+}
+
+function hostArguments(options, config) {
+  if (config) return [config.nodeExe, path.join(config.codeyDirectory, "lib/tunnel.mjs"), "host", options.runtimeFile];
   return [options.devtunnel, "host", options.tunnelId, "--host-header", "unchanged", "--origin-header", "unchanged"];
 }
 
@@ -130,7 +140,17 @@ export async function checkTunnelHealth(options, {
   read = file => readFile(file, "utf8"),
   save = saveState,
   clock = () => Math.floor(os.uptime() * 1000),
+  runtime = healthRuntime,
 } = {}) {
+  const config = options.runtimeFile ? await runtime(options.runtimeFile) : null;
+  if (options.runtimeFile && (!config || config.schema !== 2 || config.platform !== "linux-x64" || config.tunnelAuth?.source !== "gh" ||
+      config.ownerUid !== process.getuid() || typeof config.ownerHome !== "string" ||
+      options.runtimeFile !== path.join(config.ownerHome, ".config/codey-machine/runtime.json") ||
+      config.devtunnelExe !== options.devtunnel || config.qualifiedTunnel !== options.tunnelId ||
+      !path.isAbsolute(config.nodeExe ?? "") || !path.isAbsolute(config.codeyDirectory ?? "") ||
+      config.codeyBin !== path.join(config.codeyDirectory, "bin/codey.mjs"))) {
+    throw new Error("Tunnel health runtime identity mismatch");
+  }
   const bootId = (await read("/proc/sys/kernel/random/boot_id")).trim();
   if (!/^[a-f0-9-]{36}$/.test(bootId)) throw new Error("Cannot identify the current boot");
   const service = async () => parseService(await command(systemctl, [
@@ -141,7 +161,7 @@ export async function checkTunnelHealth(options, {
     if (!unit.active || !Number.isSafeInteger(unit.pid) || unit.pid <= 1 ||
         !/^[a-f0-9]{32}$/.test(unit.invocationId)) return false;
     const args = (await read(`/proc/${unit.pid}/cmdline`)).replace(/\0$/, "").split("\0");
-    return JSON.stringify(args) === JSON.stringify(hostArguments(options));
+    return JSON.stringify(args) === JSON.stringify(hostArguments(options, config));
   };
   let previous;
   try {
@@ -158,9 +178,9 @@ export async function checkTunnelHealth(options, {
     else if (!await matchesHost(before)) status = "unrecognized-host";
     else if (clock() - before.startedMs < HEALTH_POLICY.startupGraceMs) status = "startup-grace";
     else {
-      connections = hostConnectionCount(await command(options.devtunnel, [
-        "show", options.tunnelId, "--json",
-      ], 15_000), options.tunnelId);
+      connections = hostConnectionCount(config ? await command(config.nodeExe, [
+        path.join(config.codeyDirectory, "lib/tunnel.mjs"), "show", options.runtimeFile,
+      ], 25000) : await command(options.devtunnel, ["show", options.tunnelId, "--json"], 15000), options.tunnelId);
       status = connections > 0 ? "host-online" : "host-offline";
     }
   } catch {

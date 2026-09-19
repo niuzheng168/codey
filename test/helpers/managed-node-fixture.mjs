@@ -83,6 +83,7 @@ export async function managedFixture(t, target = "linux-x64") {
   f.user = { status: "Logged in", provider: "github" };
   const i = {
     ...locations, home: f.home, target, state, computer: config.computer, skill: path.join(app, "onboarding"),
+    auth: { github: async () => null },
     ownerSid: config.ownerSid, setup: await readPrivate(config.setupFile), commandRegistered: false,
     checked: file => checkedPath(file, f.home), directory: file => directory(file, f.home),
     read: readPrivate, write: writePrivate, pause: ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 2))),
