@@ -5,6 +5,24 @@ import { checkedPath, exists, requireValue, writePrivate } from "./machine-commo
 const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 export const unixProfiles = target => [".profile", ".bashrc", ".bash_profile", ".bash_login",
   ...(target.startsWith("macos-") ? [".zprofile", ".zshrc"] : [])];
+export async function installUnixModelEnvironment(i, config) {
+  requireValue(/^[A-Za-z0-9_-]{43}$/.test(config.modelKey), "Invalid model API key");
+  const provider = await i.checked(path.join(i.configRoot, "provider.env"));
+  const bytes = `CODEY_MODEL_API_KEY=${config.modelKey}\n`;
+  if (!await exists(provider) || await readFile(provider, "utf8") !== bytes) await i.write(provider, Buffer.from(bytes));
+  await chmod(provider, 0o600);
+  const quoted = shellQuote(provider);
+  const marker = "# >>> Codey model API >>>";
+  const block = `\n${marker}\nif [ -r ${quoted} ]; then\n  . ${quoted}\n  export CODEY_MODEL_API_KEY\nfi\n# <<< Codey model API <<<\n`;
+  for (const name of unixProfiles(i.target)) {
+    const profile = path.join(i.home, name), present = await exists(profile);
+    if ([".bash_profile", ".bash_login"].includes(name) && !present) continue;
+    const destination = present ? await realpath(profile) : profile;
+    await checkedPath(destination, i.home);
+    if (present && (await readFile(destination, "utf8")).includes(marker)) continue;
+    await appendFile(destination, block, { mode: 0o600 });
+  }
+}
 export async function installUnixCommand(i, config) {
     const bin = await i.directory(path.join(i.home, ".local/bin")), file = path.join(bin, "codey");
     const marker = "# CODEY_MANAGED_LAUNCHER";

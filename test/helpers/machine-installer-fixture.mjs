@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -55,6 +55,7 @@ export async function machineFixture(t, target = "macos-arm64") {
   };
   await refreshSums();
   const f = { temp, home, skill, assets, setup, manifest, pins, build, lock, refreshSums, calls: [], native: [], answer: "CODEY_CODEX_OK" };
+  f.machineId = "12345678-1234-1234-1234-123456789abc";
   const createFile = async (file, bytes) => {
     await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
     await writeFile(file, bytes, { mode: 0o700 });
@@ -63,6 +64,9 @@ export async function machineFixture(t, target = "macos-arm64") {
     f.calls.push({ file, args, options });
     const ok = stdout => ({ code: 0, stdout: stdout || "", stderr: "" });
     if (file === "/usr/sbin/sysctl") return ok("0");
+    if (file === "/usr/sbin/ioreg") return ok(`"IOPlatformUUID" = "${f.machineId}"`);
+    if (file === "/usr/bin/codesign") { if (f.badSignature) throw new Error("invalid OpenAI signature"); return ok(); }
+    if (file === "/usr/bin/lipo") return ok(arch === "arm64" ? "arm64" : "x86_64");
     if (file === "/usr/bin/pgrep") return { ...ok(), code: 1 };
     if (file === "/usr/bin/openssl") {
       if (args[0] === "version") return ok("fixture");
@@ -96,18 +100,27 @@ export async function machineFixture(t, target = "macos-arm64") {
       return ok();
     }
     if (file === "/bin/bash" || file === "/fixture/powershell.exe") {
-      await createFile(path.join(options.env.CODEX_INSTALL_DIR, windows ? "codex.exe" : "codex"), "fixture Codex");
+      if (mac) {
+        const root = path.join(options.env.CODEX_HOME, "packages/standalone/releases",
+          `0.152.0-${arch === "arm64" ? "aarch64" : "x86_64"}-apple-darwin`);
+        await f.createCodex(root);
+        for (const name of ["codex", "codex-code-mode-host"]) {
+          await symlink(path.join(root, "bin", name), path.join(options.env.CODEX_INSTALL_DIR, name));
+        }
+      } else await createFile(path.join(options.env.CODEX_INSTALL_DIR, windows ? "codex.exe" : "codex"), "fixture Codex");
       return ok();
     }
-    if (args[0] === "--version") return ok(path.basename(file).startsWith("codex") ? "codex-cli fixture\n" : `v${pins.nodeVersion}\n`);
+    if (args[0] === "--version") return ok(path.basename(file).startsWith("codex") ? `codex-cli ${mac ? "0.152.0" : "fixture"}\n` : `v${pins.nodeVersion}\n`);
     if (args[0]?.endsWith("install-runtime.mjs")) {
       const app = path.join(args[args.indexOf("--prefix") + 1], windows ? "node_modules/codey" : "lib/node_modules/codey");
       await mkdir(path.dirname(app), { recursive: true, mode: 0o700 });
       await cp(appSource, app, { recursive: true });
       await mkdir(path.join(app, "node_modules"), { recursive: true });
+      if (f.failNpm) throw new Error("fixture npm failure");
       return ok();
     }
     if (path.basename(file).startsWith("devtunnel")) {
+      if (f.failTunnel) throw new Error("fixture tunnel login failure");
       if (args[0] === "user") return ok(JSON.stringify({ status: "Logged in", provider: "github" }));
       const id = args[1].split(".")[0];
       return ok(JSON.stringify({ tunnelId: id, clusterId: "jpe1",
@@ -134,8 +147,20 @@ export async function machineFixture(t, target = "macos-arm64") {
       if (f.occupyAfterAuth) f.blockPort = 8443;
       return ok();
     }
-    if (args[1] === "doctor" && args.includes("--runtime-only")) return ok('{"ok":true}');
+    if (args[1] === "doctor" && args.includes("--runtime-only")) {
+      if (f.failNative) throw new Error("fixture native dependency failure");
+      return ok('{"ok":true}');
+    }
     assert.fail("Unexpected fixture command: " + path.basename(file));
+  };
+  f.createCodex = async root => {
+    for (const name of ["bin/codex", "bin/codex-code-mode-host", "codex-path/rg", "codex-resources/resource"]) {
+      await createFile(path.join(root, name), "fixture official " + name);
+    }
+    await writePrivate(path.join(root, "codex-package.json"), { layoutVersion: 1, version: "0.152.0",
+      target: `${arch === "arm64" ? "aarch64" : "x86_64"}-apple-darwin`, variant: "codex",
+      entrypoint: "bin/codex", resourcesDir: "codex-resources", pathDir: "codex-path" });
+    await symlink("bin/codex", path.join(root, "codex"));
   };
   const fakeNative = i => ({
     startup: "fixture native services", directories: [], helpers: [],

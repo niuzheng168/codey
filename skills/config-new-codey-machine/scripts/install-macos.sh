@@ -36,11 +36,17 @@ fi
 # A managed node already has Node even when the owner has no global Node/PATH.
 # Reuse only its private, checksummed executable; never download on a rerun.
 runtime="$HOME/.config/codey-machine-macos/runtime.json"
+if [[ ! -f "$runtime" && -f "$HOME/.config/codey-machine-macos/application.json" ]]; then
+  runtime="$HOME/.config/codey-machine-macos/application.json"
+fi
 if [[ -f "$runtime" ]]; then
   [[ ! -L "$runtime" && "$(/usr/bin/stat -f '%u:%Lp' "$runtime")" == "$(id -u):600" ]] ||
     die "Existing runtime ownership/permissions require review."
   node="$(/usr/bin/plutil -extract nodeExe raw -o - "$runtime")"
-  checksum="$(/usr/bin/plutil -extract fileHashes.nodeExe raw -o - "$runtime")"
+  checksum="$(/usr/bin/plutil -extract fileHashes.nodeExe raw -o - "$runtime" 2>/dev/null || true)"
+  [[ -n "$checksum" || "$runtime" == "$HOME/.config/codey-machine-macos/application.json" ]] ||
+    die "Existing runtime has no verified Node fingerprint."
+  if [[ -n "$checksum" ]]; then
   [[ "$node" == "$HOME/.local/share/codey-machine-macos/releases/"* && "$checksum" =~ ^[a-f0-9]{64}$ ]] ||
     die "Existing runtime requires explicit migration."
   cursor="$node"
@@ -53,6 +59,7 @@ if [[ -f "$runtime" ]]; then
   done
   [[ "$(/usr/bin/shasum -a 256 "$node" | awk '{print $1}')" == "$checksum" ]] || die "Existing Node fingerprint mismatch."
   exec "$node" "$HERE/install-macos.mjs" "$@"
+  fi
 fi
 if [[ "$apply" != true ]]; then
   printf '%s\n' 'Node 22.13+ with npm is not installed. Apply will prepare the pinned official Node, then run the complete preflight.' \

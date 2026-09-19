@@ -43,6 +43,9 @@ Linux 后台更新无须退出客户端，不等于零中断：进行中的请�
 - 已有独立凭据优先，不能因为 gh active account 不同就切换现有模型配额/隧道所有者。
   首次复用记录账号 ID、用户名、gh 可执行文件与配置目录；不复制 gh token，不随
   `gh auth switch` 自动换号。失效的 pinned 账号停止并报告，不尝试另一个账号。
+- **全新 Mac 节点例外**：先验证并复用 gh，不先执行会读取系统钥匙串的
+  `devtunnel user show`；没有可用 gh 时才走原生登录路径。已有节点的认证绑定不变。
+  Codey 不保存 gh token；gh 自身采用的存储仍须能被原用户非交互读取。
 - 普通 `GH_TOKEN`/`GITHUB_TOKEN` 不替代 gh 的登录缓存；显式
   `COPILOT_API_GITHUB_TOKEN`、OAuth app、Enterprise 设置仍优先。
   gh 模式下原始 `devtunnel user show` 可以仍显示未登录，用 `codey doctor` 检查。
@@ -60,6 +63,9 @@ Linux 后台更新无须退出客户端，不等于零中断：进行中的请�
   不依赖 LaunchAgent/systemd 的交互式 PATH。OS 安全存储须对原用户可用且已解锁；
   Linux keyring 使用运行时的 D-Bus/XDG 会话，不把会话地址或秘密复制进账号绑定。
 - **正常流程不要求预装 Python 或 Bun。** 若 npm 回退源码编译并索要 Python，停止报告具体模块，不擅自加装工具链。
+- macOS 默认优先复制本用户已有的完整官方 standalone Codex（稳定版 0.152.0+），核对 OpenAI 签名、
+  原生架构、版本和伴随文件；不覆盖原有程序，不采用 npm shim、Desktop 缓存或单独的可执行文件。
+  找不到兼容安装才下载最新版；发现完整包但签名/完整性异常时停止，不绕过检查。
 
 ## 完整安装入口
 
@@ -82,16 +88,38 @@ Linux 与其他 Codex 服务共存时，可用 `CODEX_HOME="$HOME/.local/share/c
 
 ### 失败续装、镜像与耗时
 
-先核对失败状态，再使用 `--retry-failed`（Windows：`-RetryFailed`）。有当前安装器写入的 `prepared.json` 时，核对用户/平台/发行版、Node 和包摘要、依赖树及原生模块后原地继续，不复制 `node_modules`、不重新下载 Node。没有准备凭据的旧失败目录不能直接认领。
+先核对失败状态，再使用 `--retry-failed`（Windows：`-RetryFailed`）。当前安装器用 `application.json` 分阶段记录 Node 和应用，也兼容此前的 `prepared.json`；核对用户/平台/发行版、Node 和包摘要、依赖树及原生模块后原地继续，不复制 `node_modules`、不重新下载 Node。没有准备凭据的旧失败目录不能直接认领。
 已校验的 DevTunnel/Codex 使用本机私有摘要凭据复用；Windows 官方 Codex junction 只允许解析到本节点拥有的 standalone release，其他链接仍拒绝。准备文件或工具被修改时停止，不静默创建新目录绕过错误。
 
-需要公共 npm 镜像时，Windows 加 `-Registry https://mirrors.cloud.tencent.com/npm/`，Node 共用入口和独立运行包安装器加 `--registry https://mirrors.cloud.tencent.com/npm/`。只接受不含账号、查询串的 HTTPS 地址；隔离用户/全局 npm 配置和 npm 凭据，保留锁文件完整性和 TLS 校验，不修改全局 npm 源。
+需要公共 npm 镜像时，Windows 加 `-Registry https://mirrors.cloud.tencent.com/npm/`，Node 共用入口和独立运行包安装器加 `--registry https://mirrors.cloud.tencent.com/npm/`；未指定参数时可用 `CODEY_NPM_REGISTRY` 设置本次安装的默认镜像。只接受不含账号、查询串的 HTTPS 地址；隔离用户/全局 npm 配置和 npm 凭据，保留锁文件完整性和 TLS 校验，不修改全局 npm 源。
 
 Windows 在写入程序前检查指向安装目录的旧计划任务，即使端口暂时空闲也会阻止它们在安装中途自动启动。须由用户审查、备份并禁用/停止相关任务；安装器不会自动处理不明归属任务。
 GitHub 登录后立即检查 GitHub 用户和 Copilot 访问权限，401/403 在下载 Codex、启动服务前报告。
 
 安装输出阶段时间戳、耗时和每 10 秒的进度，私有配置目录保存不含凭据的 `install-timings.json`。不要固定等待 90/120 秒猜测进程是否完成，应观察退出码和阶段结果。
 三分钟应分别计量“运行包＋依赖”和“完整空白机器节点”；后者还包含 Node/DevTunnel/Codex 下载、认证检查及真实模型响应。已有有效 gh 登录时不需设备授权；否则单独记录设备登录的人工等待。不得把缓存续装或只安装 `.tgz` 的成绩宣称为全新机器完整安装成绩。
+
+### Mac 快速路径与失败重试
+
+一次授权后直接执行 `--apply` 即包含预检；不必先反复测试镜像、逐项手工运行 doctor 或重装全部依赖。
+安装器输出阶段耗时。若网络限制公共 npm，可在同一条安装命令前指定
+`CODEY_NPM_REGISTRY=https://mirrors.cloud.tencent.com/npm`；也可指定其他可信 HTTPS registry。
+只影响本次依赖安装，优先使用 npm 缓存；不修改全局 npm 配置、锁文件版本/SRI 或 TLS 校验。
+不自动遍历镜像，也不在失败后无提示地换源重新下载。
+
+失败后先查看报错阶段和私有状态，确认没有仍在运行的安装，再使用原命令加 `--retry-failed`。
+`application.json` 分别记录已校验的 Node 和应用；重试检查摘要、包文件和原生模块后继续，
+不重复下载已成功准备的 Node/DevTunnel/Codex，不创建另一份应用版本，不重复备份相同模型配置。
+捕获到 npm 失败时仅删除本次新建的 app prefix；进程被强杀、残留锁或校验失败仍需人工审查。
+旧布局或失效启动器在下载前报告，不自动卸载或认领旧服务。
+
+新 Mac 节点用私有硬件 UUID 绑定机器，hostname 仅用于当前操作确认和展示；
+网络切换导致 hostname 改变不会阻断继续安装。没有此标识的旧节点仍保留原来的机名检查。
+普通 zsh/bash 终端从 `0600` 的 `provider.env` 加载模型 key，shell 配置不直接保存密钥。
+
+**3 分钟是快速路径目标，不是冷安装保证**：首次 Node/依赖下载、用户设备登录、上游模型延迟和
+Portal 手动导入均可能超出此预算。必须分开报告实测的包安装时间与完整节点接入时间，
+不能用模拟测试或“本机完成”冒充已经在 Portal 添加成功。
 
 ## 完整安装流程
 
@@ -101,7 +129,8 @@ GitHub 登录后立即检查 GitHub 用户和 Copilot 访问权限，401/403 在
    旧 Python/升级代理节点须单独迁移；不要把重跑安装当作更新、卸载或事务恢复。
 2. **准备本机状态和应用**：在原用户私有目录创建节点 ID、SSO/数据访问/隧道续期密钥；准备经校验的官方 Node/npm。
    将唯一 Codey npm 包装入新的私有目录，按锁文件准备依赖并检查 SQLite/PTY 等原生模块；同版本重跑先核对包文件，直接复用，不先装一遍 npm。
-3. **DevTunnel**：与 `codey devtunnel login` 共用认证选择；已有缓存优先，否则尝试 gh，
+3. **DevTunnel**：与 `codey devtunnel login` 共用认证选择；已有节点/其他平台缓存优先，否则尝试 gh；
+   全新 Mac 节点先尝试 gh，避免读取无关的 DevTunnel 钥匙串条目。
    只有两者都不存在时才设备码登录。gh 模式用管理 API 创建/检查隧道并签发限 scope token，
    官方 host CLI 只通过 stdin 接收 host-only token，不接收高权限 GitHub token。
    三平台均只从指定微软 HTTPS 地址下载 DevTunnel，不固定滚动文件的旧 SHA-256；Windows 额外校验微软 Authenticode 签名。Node/Codey 版本包和已安装文件的完整性校验仍保留。
@@ -120,7 +149,8 @@ GitHub 登录后立即检查 GitHub 用户和 Copilot 访问权限，401/403 在
    gh host 的 Node 凭据传递进程属于同一个原生服务；提前 5 分钟结束 host，由已有守护重启、
    重读 pinned gh 并签发新 host token。connect-only 令牌继续走独立续期，不新增守护服务。
    此后用 `codey guard` 启用/启动全部已有守护；也可沿用后台 `codey start`，二者不会重复拉起。用 `codey restart/stop` 重启或停止整节点。
-7. **本机验收**：检查服务守护、隧道私有配置、TLS、SSO、数据鉴权和匿名拒绝；经授权执行有超时的 Codex CLI/SDK 短请求并核对真实响应，不接受提示词回显。
+7. **本机验收**：检查服务守护、隧道私有配置、TLS、SSO、数据鉴权和匿名拒绝；经授权并行执行 Codex CLI/SDK 短请求，各限时 60 秒、使用低推理强度并核对真实响应，不接受提示词回显。
+   仅覆盖验收请求，不改变用户正常会话的模型/推理设置；两项请求均结束后才导出或回滚。
    日常以 `codey status`、`codey doctor` 检查，经授权再用 `codey doctor --model`；本机检查不能替代导入后从 Portal 完成的真实访问验收。
 8. **导出 JSON，安装到此结束**：取得新鲜 connect-only token，在原用户 Home 写出私有 `codey-machine-registration.json`。
    内容包含平台、节点/隧道信息、公开证书和节点接入凭据，不含 TLS 私钥、模型 key 或 GitHub 登录令牌；Unix 权限 `0600`，Windows 为原用户/SYSTEM 私有 ACL。

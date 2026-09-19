@@ -1,17 +1,25 @@
 /** macOS native ownership, sockets and LaunchAgents only; no installation workflow. */
-import { readFile } from "node:fs/promises";
+import { lstat, readFile, readdir } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { InstallationError, checkedPath, exists, requireValue, run, writePrivate } from "./machine-common.mjs";
 import { COMPONENTS, agentDefinition, label, plist, runtime } from "./macos-service.mjs";
-import { installUnixCommand } from "./platform-unix.mjs";
+import { installUnixCommand, installUnixModelEnvironment } from "./platform-unix.mjs";
+import { recordMacCodex, reuseMacCodex } from "./macos-tools.mjs";
+export function launchAgentEnabled(output, name) {
+  const rows = [...output.matchAll(/^\s*"([^"]+)"\s*=>\s*([^\s,;]+)\s*[,;]?\s*$/gm)]
+    .filter(match => match[1] === name);
+  requireValue(rows.length <= 1 && (!rows.length || ["true", "false", "enabled", "disabled"].includes(rows[0][2])),
+    "Unrecognized LaunchAgent enable state");
+  return !rows.length || ["false", "enabled"].includes(rows[0][2]);
+}
 async function freePort(port) {
-  for (const host of ["0.0.0.0", "::"]) {
+  for (const host of ["127.0.0.1", "::1", "0.0.0.0", "::"]) {
     await new Promise((resolve, reject) => {
       const server = net.createServer();
       server.once("error", error => {
-        if (host === "::" && ["EAFNOSUPPORT", "EADDRNOTAVAIL"].includes(error.code)) resolve();
+        if (host.includes(":") && ["EAFNOSUPPORT", "EADDRNOTAVAIL"].includes(error.code)) resolve();
         else reject(new InstallationError(`Port ${port} is occupied or cannot be inspected; installation stopped`));
       });
       server.listen({ port, host, ipv6Only: host === "::" }, () => server.close(resolve));
@@ -69,10 +77,33 @@ export function macosAdapter(i) {
     startup: "owner GUI logon LaunchAgents",
     directories: [i.agents],
     helpers: ["macos-service.mjs"],
+    async machineIdentity() {
+      const value = (await i.run("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"])).stdout;
+      const uuid = /"IOPlatformUUID"\s*=\s*"([a-f0-9-]{36})"/i.exec(value)?.[1];
+      requireValue(uuid && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(uuid), "Cannot identify this Mac");
+      i.machineId = uuid.toLowerCase();
+    },
     async inspect() {
       const translated = await i.run("/usr/sbin/sysctl", ["-in", "sysctl.proc_translated"], { check: false });
       requireValue(translated.stdout.trim() !== "1", "Use a native terminal/Node, not Rosetta");
       await i.run("/bin/launchctl", ["print", i.domain]);
+      await adapter.machineIdentity();
+    },
+    async collisions(previous) {
+      if (previous) return;
+      const legacy = path.join(i.home, ".config/codey-machine");
+      requireValue(!await exists(legacy) || !(await readdir(legacy)).length,
+        "Legacy Codey installation found in ~/.config/codey-machine; review migration before downloading");
+      const launcher = path.join(i.home, ".local/bin/codey");
+      if (!await exists(launcher)) return;
+      const info = await lstat(launcher);
+      if (info.isSymbolicLink()) {
+        throw new InstallationError("Stale or unrecognized codey link; review migration before downloading");
+      }
+      await i.checked(launcher);
+      requireValue(info.isFile() && (await readFile(launcher, "utf8")).includes("# CODEY_MANAGED_LAUNCHER") &&
+        await exists(path.join(i.configRoot, "attempt.json")),
+      "Existing codey launcher has no matching runtime; review migration before downloading");
     },
     async ready(config) { await runtime(i.file, { home: i.home, worker: config.workerPath }); },
     async available() {
@@ -82,6 +113,8 @@ export function macosAdapter(i) {
     },
     port: (port, previous) => macPortPreflight(port, previous, { execute: i.run }),
     configure: config => { config.workerPath = path.join(config.runtimeRoot, "supervisor/macos-service.mjs"); },
+    codex: config => reuseMacCodex(i, config),
+    recordCodex: config => recordMacCodex(i, config),
     async start(config, previous, started) {
       for (const component of COMPONENTS) {
         const file = path.join(i.agents, label(config.nodeId, component) + ".plist");
@@ -117,7 +150,7 @@ export function macosAdapter(i) {
         if (loaded) requireValue(/^\s*path = (.+)$/m.exec(shown.stdout)?.[1] === file, "LaunchAgent path mismatch");
         const pid = Number(/^\s*pid = ([1-9][0-9]*)$/m.exec(shown.stdout)?.[1]) || null;
         result.push({ name, component: component === "codey" ? "codey" : "tunnel",
-          auxiliary: false, enabled: !disabled.includes(`"${name}" => true`), loaded, pid,
+          auxiliary: false, enabled: launchAgentEnabled(disabled, name), loaded, pid,
           running: loaded && (component === "renew" || Boolean(pid)), state: loaded ? pid ? "running" : "waiting" : "stopped" });
       }
       return result;
@@ -158,7 +191,7 @@ export function macosAdapter(i) {
     const disabled = (await i.run("/bin/launchctl", ["print-disabled", i.domain])).stdout;
     for (const component of COMPONENTS) {
       const id = label(config.nodeId, component), file = path.join(i.agents, id + ".plist");
-      requireValue(!disabled.includes(`"${id}" => true`), "LaunchAgent is disabled");
+      requireValue(launchAgentEnabled(disabled, id), "LaunchAgent is disabled");
       await checkedPath(file, i.home);
       const saved = JSON.parse((await i.run("/usr/bin/plutil", ["-convert", "json", "-o", "-", file])).stdout);
       requireValue(isDeepStrictEqual(saved, agentDefinition(config, i.file, component)), "LaunchAgent belongs to another installation");
@@ -168,7 +201,10 @@ export function macosAdapter(i) {
       requireValue(component === "renew" || /^\s*pid = [1-9][0-9]*$/m.test(status), "LaunchAgent is not running");
     }
   },
-    command: config => installUnixCommand(i, config),
+    async command(config) {
+      await installUnixCommand(i, config);
+      await installUnixModelEnvironment(i, config);
+    },
     resources: config => COMPONENTS.map(component => ({ kind: "launchagent", name: label(config.nodeId, component),
       path: path.join(i.agents, label(config.nodeId, component) + ".plist") })),
   };

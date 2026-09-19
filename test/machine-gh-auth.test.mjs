@@ -178,6 +178,7 @@ for (const target of ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]) {
     const execute = f.installer.run;
     f.installer.run = async (exe, args, options) => {
       if (path.basename(exe).startsWith("devtunnel") && args[0] === "user") {
+        assert.ok(!target.startsWith("macos-"), "A new Mac with valid gh must not access DevTunnel's Keychain");
         assert.deepEqual(args, ["user", "show", "--json"]);
         return { code: 0, stdout: '{"status":"Not logged in"}' };
       }

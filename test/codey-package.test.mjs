@@ -117,13 +117,15 @@ test("guard help works without an installed node and never imports either applic
 });
 
 async function fixture(t) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "codey-npm-cli-"));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "codey-npm-cli-")));
   t.after(() => rm(root, { recursive: true, force: true }));
   await cp(new URL("bin", packageRoot), path.join(root, "bin"), { recursive: true });
   await cp(new URL("lib", packageRoot), path.join(root, "lib"), { recursive: true });
   await mkdir(path.join(root, "onboarding/scripts"), { recursive: true });
-  await cp(new URL("../skills/config-new-codey-machine/scripts/github-auth.mjs", import.meta.url),
-    path.join(root, "onboarding/scripts/github-auth.mjs"));
+  // GH_CONFIG_DIR alone does not isolate macOS's shared credential store.
+  // These process-routing fixtures must never discover the tester's account.
+  await writeFile(path.join(root, "onboarding/scripts/github-auth.mjs"),
+    "export const readGhCredential = async () => null;\n");
   await writeFile(path.join(root, "package.json"), '{"name":"codey","version":"1.2.3","type":"module"}');
   const environment = { ...process.env, GH_CONFIG_DIR: path.join(root, "isolated-gh"),
     COPILOT_API_HOME: path.join(root, "isolated-api"), COPILOT_API_GITHUB_TOKEN: "",

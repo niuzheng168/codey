@@ -3,6 +3,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Installer, HELP, installOptions } from "./install-machine.mjs";
+import { InstallationError } from "./machine-common.mjs";
 export { Installer, HELP, installOptions } from "./install-machine.mjs";
 export { macPortPreflight } from "./platform-macos.mjs";
 export { modelConfiguration, readPackage } from "./machine-package.mjs";
@@ -12,6 +13,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   else {
     process.umask(0o077);
     await new Installer(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")).apply(options)
-      .catch(() => { console.error("Installation failed; inspect the private installation state."); process.exitCode = 1; });
+      .catch(error => {
+        console.error(error instanceof InstallationError ? error.message : "Installation failed; inspect the private installation state.");
+        process.exitCode = 1;
+      });
   }
 }

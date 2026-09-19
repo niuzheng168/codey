@@ -63,6 +63,24 @@ test("missing native login uses verified gh without device code; pinned gh does 
   assert.equal(pinned.source, "gh");
 });
 
+test("new Mac gh preference avoids native Keychain reads and never falls through on a rejected gh account", async () => {
+  const execute = async () => assert.fail("Do not open the native Keychain when gh is available");
+  const result = await loginTunnel("/devtunnel", {}, execute, {
+    preferGh: true, github: async () => credential, verify: async value => assert.equal(value, credential),
+  });
+  assert.equal(result.source, "gh");
+  assert.ok(!JSON.stringify(result).includes(credential.token));
+  await assert.rejects(loginTunnel("/devtunnel", {}, execute, {
+    preferGh: true, github: async () => credential, verify: async () => { throw new Error("HTTP 403"); },
+  }), /403/);
+  let discoveries = 0;
+  const fallback = await loginTunnel("/devtunnel", {}, async () => ({
+    code: 0, stdout: '{"status":"Logged in","provider":"github"}',
+  }), { preferGh: true, github: async () => { discoveries++; return null; } });
+  assert.equal(fallback.existing, true);
+  assert.equal(discoveries, 1);
+});
+
 test("device login remains an explicit fallback; service starts never prompt and gh failures do not fall through", async () => {
   let loggedIn = false, logins = 0;
   const execute = async (_file, args) => {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter, once } from "node:events";
-import { chmod, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import net from "node:net";
 import path from "node:path";
@@ -14,6 +14,8 @@ import { COMPONENTS, agentDefinition, checkedPath, command, digest, label, plist
 import { registrationDocument, writeRegistration } from "../skills/config-new-codey-machine/scripts/registration.mjs";
 import { machineFixture as fixture } from "./helpers/machine-installer-fixture.mjs";
 import { treeFiles } from "./codey-update-fixture.mjs";
+import { reuseMacCodex } from "../skills/config-new-codey-machine/scripts/macos-tools.mjs";
+import { directory, run } from "../skills/config-new-codey-machine/scripts/machine-common.mjs";
 
 const execute = promisify(execFile);
 const hash = value => createHash("sha256").update(value).digest("hex");
@@ -38,7 +40,7 @@ nativeTest("Mac package preflight needs no Python and checks all bundled hashes 
   const before = await treeFiles(f.home);
   await f.installer.apply({ "codex-home": f.options["codex-home"], check: true });
   assert.deepEqual(await treeFiles(f.home), before);
-  assert.deepEqual(f.calls.map(call => call.file), ["/usr/sbin/sysctl", "/bin/launchctl"],
+  assert.deepEqual(f.calls.map(call => call.file), ["/usr/sbin/sysctl", "/bin/launchctl", "/usr/sbin/ioreg"],
     "Only read-only native architecture/session queries; no downloads, writes or model requests");
   await writeFile(path.join(f.assets, "codey-0.1.16.tgz"), "tampered");
   await assert.rejects(readPackage(f.skill, target), /checksum mismatch/);
@@ -234,6 +236,182 @@ nativeTest("same-release Mac rerun retains keys/certificate/session files and do
     ["registration"], "The export performs the live check; no duplicate standalone verification");
 });
 
+nativeTest("Mac retries npm without downloading Node again or accumulating failed application prefixes", async t => {
+  const f = await fixture(t);
+  f.failNpm = true;
+  await assert.rejects(f.installer.apply(f.options), /npm failure/);
+  const prepared = await readPrivate(path.join(f.installer.configRoot, "application.json"));
+  await assert.rejects(stat(path.join(prepared.releaseDirectory, "app")), { code: "ENOENT" });
+  f.failNpm = false;
+  f.calls.length = 0;
+  const config = await f.installer.apply({ ...f.options, "retry-failed": true });
+  assert.equal(config.releaseDirectory, prepared.releaseDirectory);
+  assert.equal(f.calls.filter(call => call.args[0]?.endsWith("install-runtime.mjs")).length, 1);
+  assert.ok(!f.calls.some(call => call.args.at(-1) === f.pins.platforms[target].node.url));
+  assert.equal((await readdir(path.join(f.installer.root, "releases"))).length, 1);
+});
+
+nativeTest("Mac retries failed tunnel authentication from the verified application checkpoint", async t => {
+  const f = await fixture(t);
+  f.failTunnel = true;
+  await assert.rejects(f.installer.apply(f.options), /tunnel login failure/);
+  await assert.rejects(stat(f.installer.file), { code: "ENOENT" });
+  f.calls.length = 0;
+  f.failTunnel = false;
+  const config = await f.installer.apply({ ...f.options, "retry-failed": true });
+  assert.ok(!f.calls.some(call => call.args[0]?.endsWith("install-runtime.mjs") ||
+    [f.pins.platforms[target].node.url, f.pins.platforms[target].devTunnel.url].includes(call.args.at(-1))));
+  assert.ok(f.calls.some(call => call.args[1] === "doctor" && call.args.includes("--runtime-only")));
+  assert.equal((await readdir(path.join(config.runtimeRoot, "releases"))).length, 1);
+});
+
+nativeTest("Mac retries a failed model response without npm, any downloads, new keys or duplicate configuration backups", async t => {
+  const f = await fixture(t);
+  f.answer = "not a real accepted response";
+  await assert.rejects(f.installer.apply(f.options), /response mismatch/);
+  const previous = await readPrivate(f.installer.file);
+  const cert = await readFile(previous.certificate);
+  f.answer = "CODEY_CODEX_OK";
+  f.calls.length = 0;
+  const config = await f.installer.apply({ ...f.options, "retry-failed": true });
+  assert.equal(config.nodeId, previous.nodeId);
+  assert.equal(config.nodeExe, previous.nodeExe);
+  assert.equal(config.modelKey, previous.modelKey);
+  assert.deepEqual(await readFile(config.certificate), cert);
+  assert.ok(!f.calls.some(call => call.file === "/usr/bin/curl" || call.file === "/bin/bash" ||
+    call.args[0]?.endsWith("install-runtime.mjs")));
+  assert.deepEqual((await readdir(config.codexHome)).sort(), ["config.toml", "models.json"]);
+});
+
+nativeTest("Mac refuses altered prepared Node, application, Codex companions and broken native dependencies", async t => {
+  for (const changed of ["node", "application", "codex", "native"]) {
+    const f = await fixture(t);
+    f.answer = "wrong";
+    await assert.rejects(f.installer.apply(f.options));
+    const config = await readPrivate(f.installer.file);
+    if (changed === "native") f.failNative = true;
+    else {
+      const file = changed === "node" ? config.nodeExe : changed === "application" ? config.codeyBin :
+        path.join(path.dirname(await realpath(config.codexExe)), "codex-code-mode-host");
+      await writeFile(file, "tampered");
+    }
+    f.calls.length = 0;
+    await assert.rejects(f.installer.apply({ ...f.options, "retry-failed": true }));
+    assert.ok(!f.calls.some(call => call.file === "/usr/bin/curl" || call.args[0] === "bootstrap"));
+    await assert.rejects(stat(path.join(f.home, "codey-machine-registration.json")), { code: "ENOENT" });
+  }
+});
+
+nativeTest("Mac reuses a signed complete standalone Codex privately and preserves its original files", async t => {
+  const f = await fixture(t), original = path.join(f.home, ".codex/packages/standalone/releases/official");
+  await f.createCodex(original);
+  await symlink("releases/official", path.join(f.home, ".codex/packages/standalone/current"));
+  const before = await treeFiles(original);
+  const config = await f.installer.apply(f.options);
+  assert.deepEqual(await treeFiles(original), before);
+  assert.ok((await realpath(config.codexExe)).startsWith(path.join(f.installer.root, "codex-install/reused-")));
+  assert.ok(!f.calls.some(call => call.file === "/bin/bash" || call.args.at(-1) === f.pins.codex.url));
+  assert.ok(f.calls.some(call => call.file === "/usr/bin/codesign"));
+  assert.ok(f.calls.some(call => call.args[0] === "exec") && f.calls.some(call => call.args[1] === "sdk-probe"));
+});
+
+nativeTest("Mac does not execute or copy a standalone Codex with an invalid OpenAI signature", async t => {
+  const f = await fixture(t), original = path.join(f.home, ".codex/packages/standalone/releases/official");
+  await f.createCodex(original);
+  await symlink("releases/official", path.join(f.home, ".codex/packages/standalone/current"));
+  f.badSignature = true;
+  await assert.rejects(f.installer.apply(f.options), /signature/);
+  assert.ok(!f.calls.some(call => call.file === path.join(original, "bin/codex") || call.args[0] === "bootstrap"));
+});
+
+nativeTest("Mac leaves an incompatible standalone Codex untouched and downloads the native version instead", async t => {
+  const f = await fixture(t), original = path.join(f.home, ".codex/packages/standalone/releases/intel");
+  await f.createCodex(original);
+  const metadata = path.join(original, "codex-package.json");
+  await writePrivate(metadata, { ...await readPrivate(metadata), target: "x86_64-apple-darwin" });
+  await symlink("releases/intel", path.join(f.home, ".codex/packages/standalone/current"));
+  const before = await treeFiles(original);
+  await f.installer.apply(f.options);
+  assert.deepEqual(await treeFiles(original), before);
+  assert.ok(f.calls.some(call => call.file === "/bin/bash"));
+  assert.ok(!f.calls.some(call => call.file === path.join(original, "bin/codex")));
+});
+
+nativeTest("Mac identity survives network hostname changes, but never another hardware UUID", async t => {
+  const f = await fixture(t);
+  f.answer = "wrong";
+  await assert.rejects(f.installer.apply(f.options));
+  const previous = await readPrivate(f.installer.file);
+  f.installer.computer = "new-network-hostname";
+  const options = { ...f.options, "expected-computer": f.installer.computer, "retry-failed": true };
+  f.answer = "CODEY_CODEX_OK";
+  const config = await f.installer.apply(options);
+  assert.equal(config.nodeId, previous.nodeId);
+  assert.equal(config.machineId, previous.machineId);
+  f.installer.computer = "another-network";
+  await f.installer.apply({ ...options, "expected-computer": f.installer.computer });
+  f.machineId = "87654321-1234-1234-1234-123456789abc";
+  await assert.rejects(f.installer.apply({ ...options, "expected-computer": f.installer.computer }), /migration/);
+});
+
+nativeTest("Mac stops on legacy configuration or a stale launcher before downloading anything", async t => {
+  for (const legacy of ["config", "launcher"]) {
+    const f = await fixture(t);
+    if (legacy === "config") {
+      const root = path.join(f.home, ".config/codey-machine");
+      await mkdir(root, { recursive: true, mode: 0o700 });
+      await writePrivate(path.join(root, "identity.json"), { legacy: true });
+    } else {
+      await mkdir(path.join(f.home, ".local/bin"), { recursive: true, mode: 0o700 });
+      await symlink(path.join(f.home, "missing-old-runtime"), path.join(f.home, ".local/bin/codey"));
+    }
+    const snapshot = () => legacy === "config" ? treeFiles(f.home) : readlink(path.join(f.home, ".local/bin/codey"));
+    const before = await snapshot();
+    await assert.rejects(f.installer.apply(f.options), /[Ll]egacy|[Ss]tale/);
+    assert.deepEqual(await snapshot(), before);
+    assert.ok(!f.calls.some(call => call.file === "/usr/bin/curl"));
+  }
+});
+
+test("fresh macOS login and interactive shells load the private model key without inheriting it", {
+  skip: process.platform !== "darwin",
+}, async t => {
+  const f = await fixture(t), config = await f.installer.apply(f.options);
+  const env = { HOME: f.home, ZDOTDIR: f.home, PATH: "/usr/bin:/bin", EXPECTED_KEY: config.modelKey };
+  for (const args of [["-lc"], ["-ic"]]) {
+    const result = await execute("/bin/zsh", [...args, '[[ "$CODEY_MODEL_API_KEY" == "$EXPECTED_KEY" ]] && print -r -- MODEL_ENV_OK'],
+      { env, timeout: 10000 });
+    assert.equal(result.stdout.trim(), "MODEL_ENV_OK");
+  }
+  assert.equal((await stat(path.join(f.installer.configRoot, "provider.env"))).mode & 0o777, 0o600);
+  const resources = await readPrivate(path.join(f.installer.configRoot, "resources.json"));
+  for (const name of [".profile", ".bashrc", ".zprofile", ".zshrc"]) {
+    const file = path.join(f.home, name);
+    assert.ok(!(await readFile(file, "utf8")).includes(config.modelKey));
+    assert.ok(resources.modified.some(item => item.path === file && item.marker === "# >>> Codey model API >>>"));
+  }
+});
+
+test("native Mac experiment copies and verifies the real official Codex without modifying the installed node", {
+  skip: process.platform !== "darwin" || !process.env.CODEY_TEST_NATIVE_CODEX,
+}, async t => {
+  const home = await realpath(os.homedir());
+  const temporary = await mkdtemp(path.join(home, ".codey-mac-tools-test-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const i = { home, target: `macos-${process.arch}`, root: path.join(temporary, "runtime"),
+    configRoot: path.join(temporary, "config"), checked: file => checkedPath(file, home),
+    directory: file => directory(file, home), read: readPrivate, write: writePrivate, run };
+  await i.directory(i.configRoot);
+  const config = { codexHome: path.join(home, ".codex"),
+    codexExe: path.join(await i.directory(path.join(i.root, "codex-bin")), "codex") };
+  const start = performance.now();
+  assert.equal(await reuseMacCodex(i, config), true);
+  const seconds = (performance.now() - start) / 1000;
+  assert.ok(seconds < 180, "Verified Codex copy exceeds the three-minute budget");
+  t.diagnostic(`Actual signed Codex reuse: ${seconds.toFixed(1)}s`);
+  assert.equal(await reuseMacCodex(i, config), true);
+});
+
 nativeTest("Mac's final registration still refuses failed TLS/SSO after removing the duplicate verify call", async t => {
   const f = await fixture(t), config = await f.installer.apply(f.options);
   const output = path.join(f.home, "codey-machine-registration.json");
@@ -271,7 +449,7 @@ nativeTest("Mac checks every port even on a ready-node rerun and stops before do
   await assert.rejects(f.installer.apply(f.options), /foreign listener/);
   assert.deepEqual(checked, [3001, 4141, 8443]);
   assert.deepEqual(await treeFiles(f.home), before);
-  assert.ok(f.calls.every(call => ["/usr/sbin/sysctl", "/bin/launchctl"].includes(call.file)));
+  assert.ok(f.calls.every(call => ["/usr/sbin/sysctl", "/bin/launchctl", "/usr/sbin/ioreg"].includes(call.file)));
 });
 
 nativeTest("Mac refuses old Python descriptors, changed release/Codex home, and stale install locks without takeover", async t => {

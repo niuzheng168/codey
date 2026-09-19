@@ -6,7 +6,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { linuxAdapter, linuxUnitFiles } from "../skills/config-new-codey-machine/scripts/platform-linux.mjs";
-import { macosAdapter } from "../skills/config-new-codey-machine/scripts/platform-macos.mjs";
+import { launchAgentEnabled, macosAdapter } from "../skills/config-new-codey-machine/scripts/platform-macos.mjs";
 import { agentDefinition, COMPONENTS, label, plist } from "../skills/config-new-codey-machine/scripts/macos-service.mjs";
 import { managedFixture } from "./helpers/managed-node-fixture.mjs";
 import { runMachine } from "../packages/codey/lib/machine.mjs";
@@ -68,7 +68,16 @@ test("real Linux adapter validates every unit and disables timers before stoppin
   assert.equal(calls.length, before, "Validate all definitions before changing any unit");
 });
 
-test("real macOS adapter bootouts disabled jobs, starts idempotently and never rewrites LaunchAgents", async t => {
+test("macOS recognizes both launchctl boolean and enabled/disabled states without label collisions", () => {
+  const name = "com.codey.machine.n-123.codey";
+  for (const value of ["true", "disabled"]) assert.equal(launchAgentEnabled(`  "${name}" => ${value}`, name), false);
+  for (const value of ["false", "enabled"]) assert.equal(launchAgentEnabled(`  "${name}" => ${value}`, name), true);
+  assert.equal(launchAgentEnabled(`"${name}.other" => true`, name), true);
+  assert.throws(() => launchAgentEnabled(`"${name}" => unknown`, name), /Unrecognized/);
+  assert.throws(() => launchAgentEnabled(`"${name}" => true\n"${name}" => false`, name), /Unrecognized/);
+});
+
+for (const disabledValue of ["true", "disabled"]) test(`real macOS adapter handles ${disabledValue}, starts idempotently and never rewrites LaunchAgents`, async t => {
   const f = await managedFixture(t, "macos-arm64"), definitions = new Map(), states = new Map(), calls = [];
   f.config.workerPath = path.join(f.i.root, "supervisor/macos-service.mjs");
   const adapter = macosAdapter(f.i);
@@ -83,7 +92,7 @@ test("real macOS adapter bootouts disabled jobs, starts idempotently and never r
     if (executable === "/usr/bin/plutil") return { stdout: JSON.stringify(definitions.get(args.at(-1))), code: 0 };
     assert.equal(executable, "/bin/launchctl");
     const [action, target] = args;
-    if (action === "print-disabled") return { stdout: [...states].filter(([, item]) => !item.enabled).map(([name]) => `"${name}" => true`).join("\n"), code: 0 };
+    if (action === "print-disabled") return { stdout: [...states].filter(([, item]) => !item.enabled).map(([name]) => `"${name}" => ${disabledValue}`).join("\n"), code: 0 };
     const name = (action === "bootstrap" ? path.basename(args[2], ".plist") : target.split("/").at(-1));
     const state = states.get(name); assert.ok(state);
     if (action === "print") return { code: state.loaded ? 0 : 113,
@@ -96,7 +105,10 @@ test("real macOS adapter bootouts disabled jobs, starts idempotently and never r
   const before = await adapter.status(f.config);
   await adapter.setStates(f.config, before.map(item => ({ ...item, enabled: false, running: false })));
   assert.ok([...states.values()].every(item => !item.loaded && !item.enabled));
+  assert.ok((await adapter.status(f.config)).every(item => !item.enabled && !item.running));
+  await assert.rejects(adapter.verify(f.config), /disabled/);
   await adapter.setStates(f.config, before);
+  assert.ok([...states.values()].every(item => item.loaded && item.enabled));
   const changes = calls.length;
   await adapter.setStates(f.config, before);
   assert.equal(calls.length, changes);

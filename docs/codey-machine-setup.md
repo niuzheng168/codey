@@ -62,6 +62,8 @@ bash scripts/install-macos.sh --apply --network-approved --expected-computer "$(
 端口空闲或经系统 PID/用户/路径/启动配置确认属于本用户 Codey 才继续。
 其他程序占用或归属不明时终止，不按进程名猜测、不强杀清端口。配置服务前重新检查。
 同版本、同配置的完成节点复用身份、证书和密钥，继续验收/导出，不覆盖运行版本或重启服务。
+macOS 的工具复用、阶段重试、普通终端模型环境和 3 分钟预算边界见
+[Mac 快速安装说明](./codey-macos-nodes.md)。这些优化不移除 TLS、鉴权或端口归属检查。
 
 ## 服务、证书与隧道
 

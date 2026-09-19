@@ -23,7 +23,7 @@ _source_spec.loader.exec_module(release_source)
 RUNTIME_PLATFORMS = ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]
 NPM_ONBOARDING_FILES = [
     "dependencies.json", "dependencies.windows.json", "dependencies.macos.json", "references/codey-cli.md",
-    "scripts/install.sh", "scripts/macos-service.mjs",
+    "scripts/install.sh", "scripts/macos-service.mjs", "scripts/macos-tools.mjs",
     "scripts/install-devtunnel-health.sh", "scripts/linux-devtunnel-health.mjs", "scripts/linux-preflight.sh",
     "scripts/registration.mjs", "scripts/windows-runtime.mjs",
     "scripts/github-auth.mjs", "scripts/github-tunnel.mjs",
@@ -269,7 +269,9 @@ def inspect_npm_package(file):
                     raise RuntimeError("Codey runtime packages must not contain Python scripts or retired updaters")
                 prefix = archive.extractfile(item).read(4)
                 if (name.suffix.lower() in {".node", ".exe", ".dll", ".so", ".dylib"}
-                        or prefix == b"\x7fELF" or prefix[:2] == b"MZ"):
+                        or prefix == b"\x7fELF" or prefix[:2] == b"MZ"
+                        or prefix.hex() in {"feedface", "cefaedfe", "feedfacf", "cffaedfe",
+                                            "cafebabe", "bebafeca", "cafebabf", "bfbafeca"}):
                     raise RuntimeError("Shared Codey packages must not bundle platform-native binaries")
         if not required.issubset(files) or any(
             "/node_modules/" in name or name.endswith((".tgz", ".tar.gz"))
@@ -317,17 +319,28 @@ def pack_runtime(runtime, output, node, env):
     rows = json.loads(run([
         node / "bin/npm", "pack", "--json", "--ignore-scripts", "--pack-destination", output,
     ], cwd=runtime, env=env, capture=True).stdout)
-    if len(rows) != 1 or rows[0]["name"] != "codey" or rows[0].get("bundled"):
+    # npm 12 keys pack results by package name; older versions return an array.
+    if isinstance(rows, dict):
+        rows = list(rows.values())
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict) or rows[0].get("name") != "codey" or rows[0].get("bundled"):
         raise RuntimeError("Expected exactly one unbundled Codey npm package")
     package = output / rows[0]["filename"]
     inspect_npm_package(package)
     return metadata(package)
 
 
+def validate_build_host(allow_reviewed_diff, node_dir):
+    if platform.system() == "Linux" and platform.machine() == "x86_64":
+        return
+    if (platform.system() == "Darwin" and platform.machine() in {"arm64", "x86_64"}
+            and allow_reviewed_diff and node_dir):
+        return
+    raise RuntimeError("Release builds require Linux x86_64; Mac experiments require --allow-reviewed-diff and --node-dir")
+
+
 def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work=False, setup_config=None,
                   source_commit=None):
-    if platform.system() != "Linux" or platform.machine() != "x86_64":
-        raise RuntimeError("Build and validate Codey on Linux x86_64")
+    validate_build_host(allow_reviewed_diff, node_dir)
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
@@ -349,12 +362,21 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
         node, distribution = Path(node_dir).resolve(), None
     else:
         node, distribution = official_node(work, dependencies["node"]["version"])
+    registry = os.environ.get("CODEY_NPM_REGISTRY", "https://registry.npmjs.org").rstrip("/")
+    registry_url = urlsplit(registry)
+    if (registry_url.scheme != "https" or not registry_url.hostname or registry_url.username or registry_url.password
+            or registry_url.query or registry_url.fragment):
+        raise RuntimeError("CODEY_NPM_REGISTRY must be an HTTPS registry without credentials, query or fragment")
     env = {
         **os.environ, "PATH": str(node / "bin") + os.pathsep + os.environ.get("PATH", ""),
         "HUSKY": "0", "SKIP_INSTALL_SIMPLE_GIT_HOOKS": "1", "CI": "true",
         "ELECTRON_SKIP_BINARY_DOWNLOAD": "1", "npm_config_audit": "false", "npm_config_fund": "false",
+        "npm_config_registry": registry,
     }
     node_version = run([node / "bin/node", "-p", "process.versions.node"], env=env, capture=True).stdout.strip()
+    npm_version = run([node / "bin/npm", "--version"], env=env, capture=True).stdout.strip()
+    if int(npm_version.split(".")[0]) >= 12:
+        raise RuntimeError("Use the pinned Node 24.20.0/npm 11 build toolchain; npm 12 omits npm-shrinkwrap.json from packages")
     cloud, copilot = work / "cloudcli-source", work / "copilot-source"
     if frozen:
         for name, destination in [("cloudcli", cloud), ("copilot-api", copilot)]:
@@ -395,11 +417,11 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     normalize_runtime_text(runtime)
     run([node / "bin/node", source_root / "scripts/check-codey-runtime-dependencies.mjs", runtime, cloud], env=env)
     run([node / "bin/npm", "ci", "--omit=dev", "--no-audit", "--no-fund",
-         "--registry=https://registry.npmjs.org"], cwd=runtime, env=env)
+         "--registry=" + registry], cwd=runtime, env=env)
     if (runtime / "npm-shrinkwrap.json").read_bytes() != locked_bytes:
         raise RuntimeError("npm changed the canonical shared dependency lock")
     source_commit = frozen["commit"] if frozen else run(["git", "-C", ROOT, "rev-parse", "HEAD"], capture=True).stdout.strip()
-    source_dirty = False if frozen else bool(run([
+    source_dirty = False if frozen else platform.system() != "Linux" or bool(run([
         "git", "-C", ROOT, "status", "--porcelain", "--",
         "packages/codey", "scripts/codey_package.py", "scripts/build-machine-bundle.py",
         "scripts/check-codey-runtime-dependencies.mjs",

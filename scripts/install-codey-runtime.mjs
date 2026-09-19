@@ -12,6 +12,9 @@ const DEFAULT_PACKAGE_FILE = "";
 const DEFAULT_PACKAGE_SHA256 = "";
 const MARKER = "CODEY_SHARED_NPM_LAUNCHER";
 const PUBLIC_REGISTRY = "https://registry.npmjs.org";
+export function npmRegistry(value = process.env.CODEY_NPM_REGISTRY || PUBLIC_REGISTRY) {
+  return registryUrl(value);
+}
 const HELP = `Usage: node install-codey.mjs [--package FILE.tgz] [--sha256 HASH] [--prefix DIR] [--check | --no-launcher]
                               [--reuse-from EXISTING_CODEY_DIRECTORY] [--registry HTTPS_URL]
 
@@ -28,6 +31,8 @@ or rebuilding them. This offline path requires the same dependency lock and a
 compatible existing Node/native ABI; it never falls back to the registry.
 --registry selects an approved HTTPS mirror for public dependencies only.
 User/global npm configuration and npm authentication are not inherited.
+CODEY_NPM_REGISTRY sets the default mirror when --registry is omitted; npm's global
+configuration, locked versions, integrity hashes and TLS verification stay intact.
 
 No services, DevTunnel, credentials or Codex settings are modified, and no Portal
 registration JSON is generated. For a complete node use the installation Skill's
@@ -62,7 +67,7 @@ export function installOptions(args, directory = path.dirname(fileURLToPath(impo
     throw new Error("Provide a local Codey .tgz and its SHA-256; do not install the unrelated public npm package.");
   }
   options.sha256 = options.sha256.toLowerCase();
-  options.registry = registryUrl(options.registry ?? PUBLIC_REGISTRY);
+  options.registry = npmRegistry(options.registry);
   if (options.check && options.noLauncher) throw new Error("--check cannot be combined with --no-launcher");
   return options;
 }
@@ -274,7 +279,7 @@ export async function installRuntime(args) {
   const env = npmEnvironment(prefix, node, options.registry);
   await Promise.all([env.npm_config_userconfig, env.npm_config_globalconfig].map(file =>
     writeFile(file, "", { mode: 0o600, flag: "wx" })));
-  const npmFlags = ["--omit=dev", "--no-audit", "--no-fund", "--umask=0077", "--strict-ssl=true",
+  const npmFlags = ["--omit=dev", "--no-audit", "--no-fund", "--prefer-offline", "--umask=0077", "--strict-ssl=true",
     "--fetch-retries=1", "--fetch-timeout=30000", `--registry=${options.registry}`];
   const npmArgs = platform === "win32" ? [npm] : [
     "--input-type=commonjs", "-e", "process.umask(0o077); require(process.argv[1]);", npm,

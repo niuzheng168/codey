@@ -31,6 +31,7 @@ export function parseTunnelJson(text) {
 /** Shared by installation and `codey devtunnel login`; never switch an existing provider. */
 export async function loginTunnel(executable, environment, execute, {
   binding, github = readGhCredential, verify = listGhTunnels, githubEnvironment = environment, interactive = true,
+  preferGh = false,
 } = {}) {
   const reuseGh = async credential => {
     requireValue(credential, "The selected GitHub CLI account is unavailable; no other account was selected");
@@ -41,13 +42,15 @@ export async function loginTunnel(executable, environment, execute, {
     return result;
   };
   if (binding) return reuseGh(await github({ environment: githubEnvironment, binding }));
+  const preferred = preferGh ? await github({ environment: githubEnvironment }) : null;
+  if (preferred) return reuseGh(preferred);
   const shown = await execute(executable, ["user", "show", "--json"], { env: environment, check: false });
   let user = shown.code === 0 ? parseTunnelJson(shown.stdout) : {};
   requireValue(user.status !== "Logged in" || user.provider === "github",
     "DevTunnel is signed in with another provider; review that account rather than switching it automatically");
   const existing = user.status === "Logged in";
   if (!existing) {
-    const credential = await github({ environment: githubEnvironment });
+    const credential = preferGh ? null : await github({ environment: githubEnvironment });
     if (credential) return reuseGh(credential);
     requireValue(interactive, "No DevTunnel or GitHub CLI login is available; run codey devtunnel login in the owner's terminal");
     await execute(executable, ["user", "login", "--github", "--use-device-code-auth"],
@@ -200,7 +203,7 @@ async function sdkProbe(config) {
   } });
   const thread = codex.startThread({
     workingDirectory: config.ownerHome, skipGitRepoCheck: true, sandboxMode: "danger-full-access",
-    approvalPolicy: "never", model: "gpt-6-astra", modelReasoningEffort: "max",
+    approvalPolicy: "never", model: "gpt-6-astra", modelReasoningEffort: "low",
   });
   const answer = await thread.run("Reply with only CODEY_CLOUDCLI_OK. Do not use tools.");
   requireValue(answer.finalResponse.trim() === "CODEY_CLOUDCLI_OK", "CloudCLI Codex response mismatch");

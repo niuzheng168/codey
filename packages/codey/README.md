@@ -51,13 +51,15 @@ Windows `-RepairServices` is removed. All native installers render the same
 `templates/codex-config.toml`, substituting only the local model catalog path.
 
 After reviewing a failed attempt, `--retry-failed` (Windows: `-RetryFailed`)
-resumes its prepared application in place. The private receipt binds the owner,
+resumes its prepared application in place. The private `application.json` receipt binds the owner,
 platform, release, package and Node hashes; package files, dependency tree and
 native modules are checked again. No dependency directory is copied. Verified
 DevTunnel/Codex tools are retained, including the official Windows standalone
 junction; arbitrary links are still rejected. Changed receipts/tools stop the
 retry rather than silently creating another release. Old attempts without a
-preparation receipt require fresh preparation.
+preparation receipt require fresh preparation. Earlier `application.json` and
+`prepared.json` receipts remain supported and are revalidated; new receipts
+checkpoint Node separately so a caught npm failure need not download it again.
 
 Windows preflight also rejects enabled/running stale tasks referencing this
 runtime, even when the ports are currently free. It never disables tasks itself.
@@ -110,7 +112,8 @@ it is not an updater and never switches a running service.
 
 `--registry HTTPS_URL` selects an approved public dependency mirror (Windows
 complete Skill: `-Registry HTTPS_URL`; shared Node entry: `--registry HTTPS_URL`).
-For example, `https://mirrors.cloud.tencent.com/npm/`. The canonical lock and its
+For example, `https://mirrors.cloud.tencent.com/npm/`. `CODEY_NPM_REGISTRY` provides
+the install-scoped default when the explicit option is absent. The canonical lock and its
 integrities are unchanged. npm runs with empty private user/global configuration,
 without inherited npm credentials, and with TLS verification enabled; global
 npm settings are not modified. Network retries/timeouts are bounded.

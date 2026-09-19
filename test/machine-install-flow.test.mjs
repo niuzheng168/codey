@@ -56,4 +56,18 @@ for (const platform of ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"])
     assert.equal(inventory.state, "failed");
     assert.ok(inventory.services.every(item => item.ownership !== "verified"));
   });
+
+  test(`shared ${platform}: a failed tunnel login resumes the same verified Node/application`, { skip: process.platform === "win32" }, async t => {
+    const f = await machineFixture(t, platform);
+    f.failTunnel = true;
+    await assert.rejects(f.installer.apply(f.options), /tunnel login failure/);
+    const prepared = JSON.parse(await readFile(path.join(f.installer.configRoot, "application.json")));
+    f.failTunnel = false;
+    f.calls.length = 0;
+    const config = await f.installer.apply({ ...f.options, "retry-failed": true });
+    assert.equal(config.nodeExe, prepared.nodeExe);
+    assert.equal(config.codeyDirectory, prepared.codeyDirectory);
+    assert.equal(f.calls.some(call => call.args[0]?.endsWith("install-runtime.mjs") ||
+      call.args.at(-1) === f.pins.platforms[platform].node.url), false);
+  });
 }

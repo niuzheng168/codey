@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { machineFixture } from "./helpers/machine-installer-fixture.mjs";
@@ -33,13 +33,64 @@ test("a corrupt prepared runtime is rejected without downloads or a new release"
   const f = await machineFixture(t, "linux-x64");
   f.failVerify = true;
   await assert.rejects(f.installer.apply(f.options));
-  const receipt = JSON.parse(await readFile(path.join(f.installer.configRoot, "prepared.json")));
-  await writeFile(receipt.node, "corrupt");
+  const receipt = JSON.parse(await readFile(path.join(f.installer.configRoot, "application.json")));
+  await writeFile(receipt.nodeExe, "corrupt");
   f.calls.length = 0;
   await assert.rejects(f.installer.apply({ ...f.options, "retry-failed": true, "replace-existing": true }), /Node fingerprint mismatch/);
   assert.ok(!f.calls.some(call => call.file === "/usr/bin/curl"));
   assert.equal((await readdir(path.join(f.installer.root, "releases"))).length, 1);
 });
+
+for (const format of ["prepared", "application-v1"]) {
+  test(`${format}: an existing preparation and DevTunnel receipt remain resumable`, { skip: process.platform === "win32" }, async t => {
+    const target = format === "prepared" ? "windows-x64" : "macos-arm64";
+    const f = await machineFixture(t, target);
+    f.failTunnel = true;
+    await assert.rejects(f.installer.apply(f.options), /tunnel login failure/);
+    const application = path.join(f.installer.configRoot, "application.json");
+    const record = JSON.parse(await readFile(application));
+    if (format === "prepared") {
+      await f.installer.write(path.join(f.installer.configRoot, "prepared.json"), {
+        schema: 1, platform: target, ownerHome: f.home, releaseId: record.releaseId,
+        artifactSha256: record.artifactSha256, nodeArchiveSha256: record.nodeArchiveSha256,
+        release: record.releaseDirectory, codey: record.codeyDirectory, node: record.nodeExe,
+        nodeSha256: record.fileHashes.nodeExe,
+      });
+      await unlink(application);
+    } else {
+      const { artifactSha256, nodeArchiveSha256, ...legacy } = record;
+      await f.installer.write(application, { ...legacy, schema: 1 });
+      const file = f.installer.adapter.devtunnel ?? path.join(record.releaseDirectory, "devtunnel");
+      const receipt = JSON.parse(await readFile(file + ".verified.json"));
+      await f.installer.write(path.join(f.installer.configRoot, "devtunnel-tool.json"), { file, sha256: receipt.sha256 });
+      await unlink(file + ".verified.json");
+    }
+    f.failTunnel = false;
+    f.calls.length = 0;
+    const config = await f.installer.apply({ ...f.options, "retry-failed": true });
+    assert.equal(config.releaseDirectory, record.releaseDirectory);
+    assert.equal((await readdir(path.join(f.installer.root, "releases"))).length, 1);
+    assert.ok(!f.calls.some(call => call.args[0]?.endsWith("install-runtime.mjs") ||
+      [f.installer.pins.node.url, f.installer.pins.devTunnel.url].includes(call.args.at(-1))));
+    assert.ok(f.calls.some(call => call.args.includes("--runtime-only")));
+  });
+}
+
+for (const field of ["artifactSha256", "nodeArchiveSha256"]) {
+  test(`application receipt binds ${field} before any retry work`, { skip: process.platform === "win32" }, async t => {
+    const f = await machineFixture(t, "linux-x64");
+    f.failTunnel = true;
+    await assert.rejects(f.installer.apply(f.options), /tunnel login failure/);
+    const file = path.join(f.installer.configRoot, "application.json");
+    const record = JSON.parse(await readFile(file));
+    assert.equal(record.schema, 2);
+    await f.installer.write(file, { ...record, [field]: "0".repeat(64) });
+    f.calls.length = 0;
+    await assert.rejects(f.installer.apply({ ...f.options, "retry-failed": true }), /another installation/);
+    assert.ok(!f.calls.some(call => call.file === "/usr/bin/curl" || call.args.includes("--runtime-only")));
+    assert.equal((await readdir(path.join(f.installer.root, "releases"))).length, 1);
+  });
+}
 
 test("invalid GitHub access fails before Codex downloads and service startup", { skip: process.platform === "win32" }, async t => {
   const f = await machineFixture(t, "linux-x64");
@@ -81,4 +132,19 @@ test("npm registry override isolates user configuration and authentication on ev
   assert.equal(env.npm_config_strict_ssl, "true");
   assert.equal(env.npm_config_registry, options.registry);
   assert.equal(env.HTTPS_PROXY, "https://proxy.example");
+});
+
+test("the explicit npm registry overrides the install-scoped environment default", () => {
+  const original = process.env.CODEY_NPM_REGISTRY;
+  const args = ["--package", "codey.tgz", "--sha256", "a".repeat(64)];
+  try {
+    process.env.CODEY_NPM_REGISTRY = "https://mirror.example.test/npm/";
+    assert.equal(installOptions(args).registry, "https://mirror.example.test/npm");
+    assert.equal(installOptions([...args, "--registry", "https://registry.npmjs.org/"]).registry, "https://registry.npmjs.org");
+    process.env.CODEY_NPM_REGISTRY = "http://mirror.example.test";
+    assert.throws(() => installOptions(args), /HTTPS/);
+  } finally {
+    if (original === undefined) delete process.env.CODEY_NPM_REGISTRY;
+    else process.env.CODEY_NPM_REGISTRY = original;
+  }
 });

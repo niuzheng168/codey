@@ -46,6 +46,8 @@ test("unsafe tar entries, duplicate names, embedded runtimes and traversal are r
     { name: "package/aux.txt", body: "reserved Windows device" },
     { name: "package/codey.exe", body: "binary" },
     { name: "package/native", body: Buffer.from("7f454c460000", "hex") },
+    ...["feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca"]
+      .map(magic => ({ name: "package/mach-" + magic, body: Buffer.from(magic + "0000", "hex") })),
     { name: "package/.npmrc", body: "registry=https://untrusted.test" },
   ]) {
     await packFixture(f.next, f.archive, [extra]);
