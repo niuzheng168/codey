@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { installerPlatform, npmPackageRoot } from "../scripts/install-codey-runtime.mjs";
 import { knownRuntimePlatforms } from "../packages/codey/lib/package-info.mjs";
 
@@ -70,15 +70,22 @@ test("the identical shared artifact installs, validates native modules and start
     await cp(process.env.CODEY_PACKAGE_REUSE_FROM, donor, { recursive: true, verbatimSymlinks: true });
     reuseArgs.push("--reuse-from", donor);
   }
-  const startedAt = performance.now();
+  const installStarted = performance.now();
   const install = await exec(process.execPath, [installer, "--package", file, "--sha256", hash,
-    "--prefix", prefix, "--no-launcher", ...reuseArgs], {
+    "--prefix", prefix, "--no-launcher", ...reuseArgs,
+    ...(process.env.CODEY_PACKAGE_REGISTRY ? ["--registry", process.env.CODEY_PACKAGE_REGISTRY] : [])], {
     env, timeout: reuseArgs.length ? 600000 : 240000, maxBuffer: 8 * 1024 * 1024,
   });
+  const installSeconds = (performance.now() - installStarted) / 1000;
+  t.diagnostic(`Runtime installation including npm/native checks: ${installSeconds.toFixed(3)} seconds`);
+  if (process.env.CODEY_INSTALL_MAX_SECONDS) assert.ok(installSeconds <= Number(process.env.CODEY_INSTALL_MAX_SECONDS),
+    `Runtime installation exceeded ${process.env.CODEY_INSTALL_MAX_SECONDS}s: ${installSeconds.toFixed(3)}s`);
   assert.match(install.stdout, /"pathChanged":false,"serviceChanges":false/);
   if (reuseArgs.length) assert.match(install.stdout, /"dependencyMode":"reuse-installed-offline"/);
   const root = npmPackageRoot(prefix);
   const cli = path.join(root, "bin/codey.mjs");
+  const onboarding = await import(pathToFileURL(path.join(root, "onboarding/scripts/install-machine.mjs")).href);
+  assert.equal(typeof onboarding.Installer, "function", "The packed CLI must resolve every native adapter helper");
   const info = JSON.parse((await exec(process.execPath, [cli, "doctor", "--runtime-only", "--json"], { env, timeout: 20000 })).stdout);
   const build = JSON.parse(await readFile(path.join(root, "codey-build.json"), "utf8"));
   assert.equal(info.ok, true);
@@ -154,7 +161,7 @@ test("the identical shared artifact installs, validates native modules and start
   assert.ok(ready, output);
   assert.equal((await fetch(gateway + "/token-usage")).status, 401);
   assert.equal((await fetch(gateway + "/token-usage", { headers: { Authorization: `Bearer ${key}` } })).status, 200);
-  const elapsed = (performance.now() - startedAt) / 1000;
+  const elapsed = (performance.now() - installStarted) / 1000;
   t.diagnostic(`Fresh package install, native modules, both servers and data authentication: ${elapsed.toFixed(1)}s (${process.env.CODEY_COLD_INSTALL ? "empty" : "existing"} npm cache)`);
   if (process.env.CODEY_INSTALL_BUDGET_SECONDS) {
     assert.ok(elapsed < Number(process.env.CODEY_INSTALL_BUDGET_SECONDS), "Runtime installation exceeded the requested time budget");

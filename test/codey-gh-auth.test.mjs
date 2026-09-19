@@ -47,7 +47,7 @@ test("copilot start automatically pins gh, enables direct OAuth and never writes
   assert.deepEqual(JSON.parse(text), f.binding);
   assert.ok(!text.includes(secret));
   assert.ok(!f.log.join("\n").includes(secret));
-  assert.equal((await lstat(path.join(f.api, GH_BINDING_FILE))).mode & 0o777, 0o600);
+  if (process.platform !== "win32") assert.equal((await lstat(path.join(f.api, GH_BINDING_FILE))).mode & 0o777, 0o600);
   await assert.rejects(lstat(path.join(f.api, "github_token")), { code: "ENOENT" });
   assert.deepEqual(f.calls.map(call => call.operation), ["gh", "models"]);
 });
@@ -119,12 +119,15 @@ test("malformed, linked or public binding files fail without leaking saved conte
   const f = await fixture(t);
   await f.save(GH_BINDING_FILE, "{ " + secret);
   await assert.rejects(f.prepare(), error => /Invalid saved/.test(error.message) && !error.message.includes(secret));
-  await chmod(path.join(f.api, GH_BINDING_FILE), 0o644);
-  await assert.rejects(f.prepare(), /owner-private/);
+  if (process.platform !== "win32") {
+    await chmod(path.join(f.api, GH_BINDING_FILE), 0o644);
+    await assert.rejects(f.prepare(), /owner-private/);
+  }
   await rm(path.join(f.api, GH_BINDING_FILE));
   const elsewhere = path.join(f.home, "elsewhere.json");
   await writeFile(elsewhere, JSON.stringify(f.binding), { mode: 0o600 });
-  await symlink(elsewhere, path.join(f.api, GH_BINDING_FILE));
+  await symlink(process.platform === "win32" ? f.home : elsewhere, path.join(f.api, GH_BINDING_FILE),
+    process.platform === "win32" ? "junction" : "file");
   await assert.rejects(f.prepare(), /regular file/);
   assert.equal(await readFile(elsewhere, "utf8"), JSON.stringify(f.binding));
 });
@@ -135,7 +138,7 @@ test("an empty legacy token file does not suppress gh fallback and connection fl
   assert.equal((await f.prepare()).source, "gh");
   assert.deepEqual(copilotAuthSettings("/package", ["start", "--api-home", "relative", "--oauth-app", "opencode"], {
     COPILOT_API_HOME: "/ignored", COPILOT_API_ENTERPRISE_URL: "enterprise.invalid",
-  }), { home: "/package/relative", app: "opencode", enterprise: "enterprise.invalid" });
+  }), { home: path.resolve("/package", "relative"), app: "opencode", enterprise: "enterprise.invalid" });
 });
 
 test("simultaneous starts atomically pin one account and cannot overwrite it with another", async t => {

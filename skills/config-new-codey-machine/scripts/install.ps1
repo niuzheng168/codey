@@ -2,13 +2,13 @@
 # Thin native owner/Node bootstrap. All platforms use install-machine.mjs.
 [CmdletBinding()]
 param([switch]$Apply, [switch]$NetworkApproved, [switch]$ReplaceExisting,
-    [switch]$RetryFailed, [string]$ExpectedComputerName = '', [string]$CodexHome = '')
+    [switch]$RetryFailed, [string]$ExpectedComputerName = '', [string]$CodexHome = '', [string]$Registry = '')
 . (Join-Path $PSScriptRoot 'windows-native.ps1')
 
 function Invoke-CodeyWindowsInstall {
     [CmdletBinding()]
     param([bool]$DoApply, [bool]$ApprovedNetwork, [bool]$Replace, [bool]$Retry,
-        [string]$ExpectedComputer, [string]$RequestedCodexHome)
+        [string]$ExpectedComputer, [string]$RequestedCodexHome, [string]$DependencyRegistry = '')
     $owner = Get-CodeyOwner
     if ($DoApply -and (-not $ApprovedNetwork -or $ExpectedComputer -cne $owner.Computer)) {
         throw 'Apply requires -NetworkApproved and -ExpectedComputerName matching this computer exactly.'
@@ -19,7 +19,7 @@ function Invoke-CodeyWindowsInstall {
         $null = Assert-CodeyOwnedPath $runtimeFile $owner.Home -Private
         $previous = Read-CodeyJson $runtimeFile
     }
-    Assert-CodeyPortOwnership $owner.Sid $previous
+    $null = Assert-CodeyPortOwnership $owner.Sid $previous
     $node = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     $nodeFile = if ($node) { $node.Source } else { '' }
     if (-not $nodeFile -and $previous) {
@@ -35,7 +35,7 @@ function Invoke-CodeyWindowsInstall {
         }
     }
     if ($nodeFile) {
-        & $nodeFile -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||a===22&&b>=13?0:1)'
+        & $nodeFile -e "const [a,b]=process.versions.node.split('.').map(Number);process.exit(a>22||a===22&&b>=13?0:1)"
         if ($LASTEXITCODE -ne 0) { $nodeFile = '' }
     }
     if (-not $nodeFile -and -not $DoApply) {
@@ -66,6 +66,7 @@ function Invoke-CodeyWindowsInstall {
         if ($Replace) { $arguments += '--replace-existing' }
         if ($Retry) { $arguments += '--retry-failed' }
         if ($RequestedCodexHome) { $arguments += @('--codex-home', $RequestedCodexHome) }
+        if ($DependencyRegistry) { $arguments += @('--registry', $DependencyRegistry) }
         if ($DoApply) {
             # Only apply needs a Job Object. A read-only check must not compile
             # the C# runner or create compiler temporary files.
@@ -80,5 +81,5 @@ function Invoke-CodeyWindowsInstall {
 }
 if ($MyInvocation.InvocationName -ne '.') {
     Invoke-CodeyWindowsInstall -DoApply $Apply -ApprovedNetwork $NetworkApproved -Replace $ReplaceExisting -Retry $RetryFailed `
-        -ExpectedComputer $ExpectedComputerName -RequestedCodexHome $CodexHome
+        -ExpectedComputer $ExpectedComputerName -RequestedCodexHome $CodexHome -DependencyRegistry $Registry
 }

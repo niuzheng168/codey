@@ -50,6 +50,32 @@ npm setup calls that same workflow directly, without a staging/switch installer.
 Windows `-RepairServices` is removed. All native installers render the same
 `templates/codex-config.toml`, substituting only the local model catalog path.
 
+After reviewing a failed attempt, `--retry-failed` (Windows: `-RetryFailed`)
+resumes its prepared application in place. The private `application.json` receipt binds the owner,
+platform, release, package and Node hashes; package files, dependency tree and
+native modules are checked again. No dependency directory is copied. Verified
+DevTunnel/Codex tools are retained, including the official Windows standalone
+junction; arbitrary links are still rejected. Changed receipts/tools stop the
+retry rather than silently creating another release. Old attempts without a
+preparation receipt require fresh preparation. Earlier `application.json` and
+`prepared.json` receipts remain supported and are revalidated; new receipts
+checkpoint Node separately so a caught npm failure need not download it again.
+
+Windows preflight also rejects enabled/running stale tasks referencing this
+runtime, even when the ports are currently free. It never disables tasks itself.
+Windows native operations share a short-lived private PowerShell pipe with
+bounded, credential-free errors. They do not launch PowerShell and compile the
+process runner for every file. Read-only checks still make no filesystem changes.
+GitHub and Copilot access are checked immediately after login, before downloading
+Codex or starting services.
+
+Apply prints stage timestamps, elapsed time and ten-second heartbeats, and saves
+credential-free `install-timings.json` beside `runtime.json`. Runtime-only package
+installation and complete node provisioning are different timing boundaries:
+an empty machine also downloads Node, DevTunnel and official Codex and may wait
+for two device logins and real model responses. A three-minute target is not an
+unconditional promise for these external downloads or human interaction.
+
 Normal installation does not require Python or Bun. If a native npm module has
 no matching prebuilt binary, its source-build fallback can require a compiler
 and Python. Stop and report that dependency rather than silently installing a
@@ -83,6 +109,14 @@ The optional `--reuse-from EXISTING_CODEY_DIRECTORY` copies a matching locked
 dependency tree into a new independent installation, without modifying the
 donor. It refuses changed locks, unsafe links or incompatible native modules;
 it is not an updater and never switches a running service.
+
+`--registry HTTPS_URL` selects an approved public dependency mirror (Windows
+complete Skill: `-Registry HTTPS_URL`; shared Node entry: `--registry HTTPS_URL`).
+For example, `https://mirrors.cloud.tencent.com/npm/`. `CODEY_NPM_REGISTRY` provides
+the install-scoped default when the explicit option is absent. The canonical lock and its
+integrities are unchanged. npm runs with empty private user/global configuration,
+without inherited npm credentials, and with TLS verification enabled; global
+npm settings are not modified. Network retries/timeouts are bounded.
 
 ## Commands
 
@@ -152,3 +186,8 @@ frontend dependency lists must not be copied into Codey. After compilation,
 (including literal lazy imports and `require`) for both missing and unused
 dependencies. It uses the build's existing TypeScript parser, not a new user
 dependency. Native-module and real-server smoke tests cover runtime execution.
+Set `CODEY_PACKAGE_TGZ` to a locally built artifact to run
+`test/codey-package-shared-install.test.mjs` on Windows and Linux. Optional
+`CODEY_PACKAGE_REGISTRY` selects the test mirror and `CODEY_INSTALL_MAX_SECONDS=180`
+enforces the runtime installation budget, including npm and native-module checks.
+The test uses isolated data and random ports, not the running owner's node.

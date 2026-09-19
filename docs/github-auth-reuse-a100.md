@@ -2,7 +2,7 @@
 
 > 本文记录最初的隔离调研。认证复用实现已随后纳入源码提交，包括 CLI、
 > 安装 Skill 和固定的 Copilot API 子模块提交；原先的文档提交 `93159af` 不含实现。
-> **源码提交不等于安装包发布；Windows/macOS 原生验收仍待完成。**
+> **源码提交不等于安装包发布；Windows 开发包原生验收见文末，macOS 原生验收仍待完成。**
 > 基础安装与命令入口见 [安装 Skill](../skills/config-new-codey-machine/SKILL.md) 和
 > [CLI 参考](../skills/config-new-codey-machine/references/codey-cli.md)；
 > gh 复用的行为以本报告和下述开发包实测范围为准。
@@ -169,3 +169,38 @@ A100 现有 `codey-devtunnel.service` 进程参数指向的旧 tunnel ID，不�
   user-token callback 与 tunnel-scoped access token 是不同认证入口。
 - [Microsoft Dev Tunnels SDK：TunnelRequestOptions](https://github.com/microsoft/dev-tunnels/blob/main/ts/src/management/tunnelRequestOptions.ts)：
   获取指定 scope 的 token。
+
+## Windows 原生开发包验收（2026-09-19）
+
+基于 main `bf657137c85a543981e377f0c6cbe1ca1afcfa0a`、其固定的 Copilot API
+`b4a3e91c40232bec77949dabe046db5823988344`，合并本地 Windows 安装修复后，
+在 Linux x64 构建完整 Skill，再在 Windows x64 原用户非管理员会话安装。
+这是 `sourceDirty=true` 的 `0.1.18` 开发包，未发布，不能当作 main 的正式发行验收。
+
+清空本次 Codey 程序、私有 Node/Codex、配置、服务和注册输出后，保留已有
+`gh auth login`、共享 npm 缓存及 Codex 用户历史，按 Skill 的公开 PowerShell
+入口安装，使用腾讯公共 npm 镜像，未使用 `-RetryFailed`。
+**完整安装命令耗时 146.876 秒**，包括工具准备、认证、启动、CLI/SDK 真实模型
+响应和私有注册文件导出；不含包构建、清理与额外复核，不是无缓存全新 OS 基准。
+另一次被人为中断后的续装耗时 150.065 秒，未混入上述全新 Codey 安装成绩。
+
+| 阶段 | 秒 |
+| --- | ---: |
+| 应用准备（含 Node 下载/解压、依赖及原生模块） | 57.384 |
+| DevTunnel 准备与私有隧道配置 | 16.241 |
+| Copilot gh 认证检查 | 2.779 |
+| 官方 Codex 安装 | 14.135 |
+| CLI/SDK 真实模型响应 | 12.635 |
+
+两条认证均固定为原 gh 账号，无设备授权；原始 `devtunnel user show`
+仍为 `Not logged in`。gh token 未复制到 Codey 的 `github_token`，
+host-only token 通过 stdin 传给 DevTunnel。安装后公开 `codey status --json`
+正常，`codey doctor --model --json` 的 17 项全部通过，包括私有隧道 host、
+loopback 端口归属、TLS/SSO/匿名拒绝及真实模型请求。
+注册文件具有原用户/SYSTEM 私有 ACL；没有导入 Portal，未验证 Portal 接入。
+
+同一 Linux 构建的 npm 包 SHA-256：
+`f8622c312e82276e0d9242ed92bd46c3601f3ef763f0d728fe3b6761e368a44d`；
+完整 Skill ZIP SHA-256：
+`ffbd21c5c97a7b38da0d806651861204517985a9673763d083748efa0996fd3f`。
+解压后的 40 个文件与 ZIP 完全一致，验收过程中没有临时修改包内脚本。

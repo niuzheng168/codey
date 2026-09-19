@@ -90,6 +90,19 @@ Linux 与其他 Codex 服务共存时，可用 `CODEX_HOME="$HOME/.local/share/c
 已完成的同版本、同配置节点允许继续验收和导出；复用现有程序、身份、证书、密钥，不覆盖运行版本、不重启服务，不把重跑安装当更新。
 独立的 `node install-codey.mjs` 只安装运行包；其 `--check` 也只读，`--no-launcher` 才是安装依赖但不改 CLI/PATH。
 
+### 失败续装、镜像与耗时
+
+先核对失败状态，再使用 `--retry-failed`（Windows：`-RetryFailed`）。当前安装器用 `application.json` 分阶段记录 Node 和应用，也兼容此前的 `prepared.json`；核对用户/平台/发行版、Node 和包摘要、依赖树及原生模块后原地继续，不复制 `node_modules`、不重新下载 Node。没有准备凭据的旧失败目录不能直接认领。
+已校验的 DevTunnel/Codex 使用本机私有摘要凭据复用；Windows 官方 Codex junction 只允许解析到本节点拥有的 standalone release，其他链接仍拒绝。准备文件或工具被修改时停止，不静默创建新目录绕过错误。
+
+需要公共 npm 镜像时，Windows 加 `-Registry https://mirrors.cloud.tencent.com/npm/`，Node 共用入口和独立运行包安装器加 `--registry https://mirrors.cloud.tencent.com/npm/`；未指定参数时可用 `CODEY_NPM_REGISTRY` 设置本次安装的默认镜像。只接受不含账号、查询串的 HTTPS 地址；隔离用户/全局 npm 配置和 npm 凭据，保留锁文件完整性和 TLS 校验，不修改全局 npm 源。
+
+Windows 在写入程序前检查指向安装目录的旧计划任务，即使端口暂时空闲也会阻止它们在安装中途自动启动。须由用户审查、备份并禁用/停止相关任务；安装器不会自动处理不明归属任务。
+GitHub 登录后立即检查 GitHub 用户和 Copilot 访问权限，401/403 在下载 Codex、启动服务前报告。
+
+安装输出阶段时间戳、耗时和每 10 秒的进度，私有配置目录保存不含凭据的 `install-timings.json`。不要固定等待 90/120 秒猜测进程是否完成，应观察退出码和阶段结果。
+三分钟应分别计量“运行包＋依赖”和“完整空白机器节点”；后者还包含 Node/DevTunnel/Codex 下载、认证检查及真实模型响应。已有有效 gh 登录时不需设备授权；否则单独记录设备登录的人工等待。不得把缓存续装或只安装 `.tgz` 的成绩宣称为全新机器完整安装成绩。
+
 ### Mac 快速路径与失败重试
 
 一次授权后直接执行 `--apply` 即包含预检；不必先反复测试镜像、逐项手工运行 doctor 或重装全部依赖。

@@ -68,7 +68,7 @@ export async function readPackage(skill, target) {
   requireValue(/^codey-\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?\.tgz$/.test(artifact.file) &&
     artifact.file === `codey-${manifest.codey.version}.tgz`);
   const sums = new Map();
-  for (const line of (await readFile(path.join(assets, "SHA256SUMS"), "utf8")).trim().split("\n")) {
+  for (const line of (await readFile(path.join(assets, "SHA256SUMS"), "utf8")).trim().split(/\r?\n/)) {
     const match = /^([a-f0-9]{64})  ([a-zA-Z0-9.-]+)$/.exec(line);
     requireValue(match && !sums.has(match[2]), "Invalid Skill checksums");
     sums.set(match[2], match[1]);

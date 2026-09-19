@@ -1,15 +1,15 @@
 #requires -Version 5.1
 # OS adapter only. Package preparation, login, identity, config and verification are Node code.
 [CmdletBinding()]
-param([string]$RequestFile = '')
+param([string]$RequestFile = '', [switch]$NativeServer)
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
 function Assert-CodeyOwnedPath {
-    param([string]$File, [string]$Home, [switch]$Private)
-    $full = Assert-CodeyPath $File $Home
-    for ($cursor = $full; $cursor -and $cursor -ne $Home; $cursor = Split-Path -Parent $cursor) {
+    param([string]$File, [string]$OwnerHome, [switch]$Private)
+    $full = Assert-CodeyPath $File $OwnerHome
+    for ($cursor = $full; $cursor -and $cursor -ne $OwnerHome; $cursor = Split-Path -Parent $cursor) {
         if (-not (Test-Path -LiteralPath $cursor)) { continue }
         $acl = Get-Acl -LiteralPath $cursor
         $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -30,11 +30,10 @@ function New-CodeyCertificate {
     param([string]$Node, [string]$ServerName, [string]$CertificateFile, [string]$KeyFile)
     if ($ServerName -notmatch '^n-[a-f0-9]{24}\.nodes\.codey\.internal$') { throw 'Invalid node certificate name.' }
     # Use system cryptography in memory, not Git/OpenSSL or the Windows certificate store.
-    $rsa = [Security.Cryptography.RSA]::Create()
+    $rsa = if ($env:OS -eq 'Windows_NT') { [Security.Cryptography.RSACng]::new(3072) }
+        else { [Security.Cryptography.RSA]::Create(3072) }
     $certificate = $null
     try {
-        $rsa.KeySize = 3072
-        if ($rsa -is [Security.Cryptography.RSACryptoServiceProvider]) { $rsa.PersistKeyInCsp = $false }
         $request = [Security.Cryptography.X509Certificates.CertificateRequest]::new(
             "CN=$ServerName", $rsa, [Security.Cryptography.HashAlgorithmName]::SHA256,
             [Security.Cryptography.RSASignaturePadding]::Pkcs1)
@@ -117,12 +116,14 @@ function Get-CodeyForeignListeners {
 function Assert-CodeyPortOwnership {
     param([string]$OwnerSid, $Previous)
     $listeners = @(Get-CodeyListeners)
-    $processes = @(Get-CodeyProcesses $OwnerSid)
+    if (-not $listeners.Count) { return }
+    $processes = @(Get-CodeyProcesses $OwnerSid -ProcessIds @($listeners.OwningProcess))
     $foreign = @(Get-CodeyForeignListeners $listeners $processes $Previous)
     if ($foreign.Count) {
         $ports = @($foreign | Select-Object -ExpandProperty LocalPort -Unique) -join '/'
         throw "Ports $ports have foreign or unverified listeners; installation stopped. No process was killed."
     }
+    return $listeners
 }
 
 function Set-CodeyUserModelKey {
@@ -130,6 +131,24 @@ function Set-CodeyUserModelKey {
     if ([Environment]::GetEnvironmentVariable('CODEY_MODEL_API_KEY', 'User') -ceq $Key) { return }
     [Environment]::SetEnvironmentVariable('CODEY_MODEL_API_KEY', $Key, 'User')
     Send-CodeyEnvironmentChanged
+}
+
+function Assert-CodeyNoStaleTasks {
+    param([string]$RuntimeRoot, [string]$ConfigPath, $Previous)
+    $tasks = @((Get-CodeyTaskFolder).Folder.GetTasks(1))
+    foreach ($task in $tasks) {
+        if (-not $task.Enabled -and $task.State -ne 4) { continue }
+        foreach ($action in @($task.Definition.Actions)) {
+            if ($action.Type -ne 0) { continue }
+            if (-not ([string]$action.Path).StartsWith($RuntimeRoot + '\', [StringComparison]::OrdinalIgnoreCase) -and
+                -not ([string]$action.Arguments).Contains($ConfigPath)) { continue }
+            if ($Previous -and $Previous.ready -and $task.Name -match '^Codey Machine n-[a-f0-9]{24} (codey|tunnel|renew)$') {
+                Assert-CodeyTask $task $Previous $ConfigPath $Matches[1]
+            } else {
+                throw 'Enabled or running tasks reference this installation before it is ready. Back up, disable and stop the reviewed stale tasks before retrying; no task was changed.'
+            }
+        }
+    }
 }
 
 function Add-CodeyPathEntry {
@@ -214,6 +233,7 @@ function Invoke-CodeyNative {
     $owner = Get-CodeyOwner
     switch ($Request.operation) {
         'owner' { return $owner }
+        'preflight' { Assert-CodeyNoStaleTasks $Request.root $Request.file $Request.previous; return $null }
         'path' { return Assert-CodeyOwnedPath $Request.file $owner.Home -Private:([bool]$Request.private) }
         'directory' { $file = Assert-CodeyOwnedPath $Request.file $owner.Home; New-CodeyDirectory $file; return $file }
         'write' {
@@ -222,11 +242,10 @@ function Invoke-CodeyNative {
             return $null
         }
         'ports' {
-            Assert-CodeyPortOwnership $owner.Sid $Request.previous
-            return @(Get-CodeyListeners)
+            return ,@(Assert-CodeyPortOwnership $owner.Sid $Request.previous)
         }
         'available' {
-            $processes = @(Get-CodeyProcesses $owner.Sid)
+            $processes = @(Get-CodeyProcesses $owner.Sid -ControlOnly)
             Assert-CodeyExternalTerminal $processes
             if (@($processes | Where-Object { $_.Name -ieq 'codex.exe' }).Count) {
                 throw 'Close Codex/Desktop yourself from an external terminal; no process will be killed.'
@@ -261,9 +280,9 @@ function Invoke-CodeyNative {
             return $null
         }
         'stop' { Set-CodeyTaskState $Request.config $Request.file @('codey', 'tunnel', 'renew'); return $null }
-        'service-status' { return @(Get-CodeyServiceState $Request.config $Request.file) }
+        'service-status' { return ,@(Get-CodeyServiceState $Request.config $Request.file) }
         'service-state' { Set-CodeyServiceState $Request.config $Request.file $Request.states; return $null }
-        'external' { Assert-CodeyExternalTerminal @(Get-CodeyProcesses $owner.Sid); return $null }
+        'external' { Assert-CodeyExternalTerminal @(Get-CodeyProcesses $owner.Sid -ControlOnly); return $null }
         'model-key' { Set-CodeyUserModelKey $Request.key; return $null }
         'verify' { Assert-CodeyTasksRunning $Request.config $Request.file; return $null }
         'command' {
@@ -284,19 +303,40 @@ function Invoke-CodeyNative {
     }
 }
 
-if ($MyInvocation.InvocationName -ne '.') {
+function Get-CodeyNativeFailure {
+    param($Failure, [string]$Operation)
+    if ($Operation -notmatch '^[a-z-]{1,32}$') { $Operation = 'request' }
+    # Exception messages and invocation text can contain credentials.
+    return "Windows native $Operation failed ($($Failure.Exception.GetType().Name), line $($Failure.InvocationInfo.ScriptLineNumber)); inspect the private installation state."
+}
+
+if ($MyInvocation.InvocationName -ne '.' -and $NativeServer) {
+    while ($null -ne ($line = [Console]::ReadLine())) {
+        $operation = 'request'
+        try {
+            $request = ConvertFrom-Json -InputObject $line
+            $operation = $request.operation
+            $result = Invoke-CodeyNative $request
+            $response = @{ ok = $true; result = $result }
+        } catch { $response = @{ ok = $false; error = (Get-CodeyNativeFailure $_ $operation) } }
+        [Console]::WriteLine((ConvertTo-Json -InputObject $response -Depth 30 -Compress))
+    }
+} elseif ($MyInvocation.InvocationName -ne '.') {
+    $operation = 'request'
     try {
         if ($RequestFile) {
             $owner = Get-CodeyOwner
             $null = Assert-CodeyOwnedPath $RequestFile $owner.Home -Private
             $request = Read-CodeyJson $RequestFile
         } else { $request = [Console]::In.ReadToEnd() | ConvertFrom-Json }
+        $operation = $request.operation
         $result = Invoke-CodeyNative $request
-        ConvertTo-Json -InputObject $result -Depth 30 -Compress
+        if ($null -eq $result) { [Console]::WriteLine('null') }
+        else { ConvertTo-Json -InputObject $result -Depth 30 -Compress }
     } catch {
         # Requests may contain credentials. Never print the request, native argv
         # or a ConvertFrom-Json error that could echo private input.
-        [Console]::Error.WriteLine('Windows native operation failed; inspect ownership, ports and private installation state.')
+        [Console]::Error.WriteLine((Get-CodeyNativeFailure $_ $operation))
         exit 1
     }
 }

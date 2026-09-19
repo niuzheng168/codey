@@ -9,7 +9,8 @@ import {
 
 const token = "fixture_only_github_credential";
 const binding = { schema: 1, source: "gh", host: "github.com", id: 42, login: "fixture_user",
-  executable: "/fixture/bin/gh", configDir: "/fixture/config/gh" };
+  executable: path.resolve("fixture", "bin", process.platform === "win32" ? "gh.exe" : "gh"),
+  configDir: path.resolve("fixture", "config", "gh") };
 const environment = { HOME: "/fixture", PATH: "/fixture/bin:/usr/bin", GH_CONFIG_DIR: binding.configDir,
   GH_TOKEN: "wrong-account", GITHUB_TOKEN: "wrong-account", GH_ENTERPRISE_TOKEN: "wrong-host", GH_HOST: "enterprise.invalid",
   COPILOT_API_GITHUB_TOKEN: "unrelated-provider", CODEY_PORTAL_SSO_KEY: "unrelated-sso", GH_DEBUG: "api",
@@ -93,9 +94,9 @@ test("bindings whitelist metadata and validate Unix/Windows host and paths", () 
 });
 
 test("config directory discovery matches gh precedence without shell interpolation", () => {
-  assert.equal(ghConfigDirectory({ HOME: "/owner" }), "/owner/.config/gh");
-  assert.equal(ghConfigDirectory({ HOME: "/owner", XDG_CONFIG_HOME: "/xdg" }), "/xdg/gh");
-  assert.equal(ghConfigDirectory({ HOME: "/owner", XDG_CONFIG_HOME: "/xdg", GH_CONFIG_DIR: "/chosen" }), "/chosen");
+  assert.equal(ghConfigDirectory({ HOME: "/owner" }, "linux"), "/owner/.config/gh");
+  assert.equal(ghConfigDirectory({ HOME: "/owner", XDG_CONFIG_HOME: "/xdg" }, "linux"), "/xdg/gh");
+  assert.equal(ghConfigDirectory({ HOME: "/owner", XDG_CONFIG_HOME: "/xdg", GH_CONFIG_DIR: "/chosen" }, "linux"), "/chosen");
   assert.equal(ghConfigDirectory({ USERPROFILE: "C:\\Users\\owner", APPDATA: "C:\\AppData" }, "win32"), "C:\\AppData\\GitHub CLI");
   assert.equal(ghConfigDirectory({ USERPROFILE: "C:\\Users\\owner" }, "win32"), "C:\\Users\\owner\\.config\\gh");
   assert.throws(() => ghConfigDirectory({ GH_CONFIG_DIR: "relative" }), /must be absolute/);
@@ -127,9 +128,15 @@ test("gh executable discovery ignores relative PATH entries and does not execute
   const temp = await mkdtemp(path.join(os.tmpdir(), "codey-gh-discovery-"));
   t.after(() => rm(temp, { recursive: true, force: true }));
   await mkdir(path.join(temp, "bin"));
-  const executable = path.join(temp, "bin/gh");
+  const executable = path.join(temp, "bin", process.platform === "win32" ? "gh.exe" : "gh");
   await writeFile(executable, "#!/bin/sh\nexit 99\n", { mode: 0o700 });
-  assert.equal(await findGh({ PATH: ".:relative:" + path.dirname(executable) }), executable);
+  assert.equal(await findGh({ PATH: [".", "relative", path.dirname(executable)].join(path.delimiter) }), executable);
+  if (process.platform === "win32") {
+    await symlink(path.dirname(executable), path.join(temp, "launchers"), "junction");
+    const launcher = path.join(temp, "launchers", "gh.exe");
+    assert.equal(await findGh({ Path: path.dirname(launcher) }), launcher);
+    return;
+  }
   await mkdir(path.join(temp, "launchers"));
   const launcher = path.join(temp, "launchers/gh");
   await symlink(executable, launcher);

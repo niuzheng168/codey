@@ -2,6 +2,7 @@
 param([string]$Root, [string]$NodeExe)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $Root 'package\scripts\install.ps1')
+$env:PATH = @((Split-Path -Parent $NodeExe), (Join-Path $env:SystemRoot 'System32'), $PSHOME) -join ';'
 $script:Count = 0
 function Check($condition, $name) {
     if (-not $condition) { throw "Assertion failed: $name" }
