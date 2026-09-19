@@ -340,7 +340,9 @@ test("failed staging never stops services; failed post-switch validation rolls b
   const f = await managedFixture(t), { file, next } = await f.nextPackage(), original = structuredClone(f.config);
   await assert.rejects(updateMachine(f.m, { file }, { prepare: async () => { throw new Error("staging failure"); } }), /staging failure/);
   assert.ok(!f.calls.some(item => item?.operation === "setStates"));
-  f.m.verifyRunning = async () => { throw new Error("new application health failure"); };
+  f.m.verifyRunning = async () => {
+    if (f.m.config.codeyDirectory !== original.codeyDirectory) throw new Error("new application health failure");
+  };
   await assert.rejects(updateMachine(f.m, { file }, { prepare: async (m, artifact, release) => {
     const app = path.join(release, "app"); await cp(next, app, { recursive: true }); return app;
   } }), /previous package and service state were restored/);

@@ -136,6 +136,25 @@ It shares background `codey start`'s idempotent operation, without another daemo
 `codey start --foreground` runs only CloudCLI and Copilot API; `codey copilot start`
 runs only the API. CloudCLI has no separate public command.
 
+On Linux, `codey update FILE.tgz --background` uses a single-use systemd user job
+that survives a disconnected client. Updates invoked inside Codex/Workspace
+automatically use this mode. Preparation happens while the old services run;
+switching briefly interrupts connections. Unchanged native tunnel units stay up.
+Use `codey update --status` and `codey doctor` to verify completion: acceptance
+is not update success. Active requests and Workspace terminal commands may be
+interrupted and are never automatically replayed. Session files are retained;
+in-memory task state is not transparently migrated. Windows/macOS and older CLIs
+still require an external owner context. This does not add a resident updater.
+Configuration, tools, ports and service state are rechecked immediately before
+switching. Pre-switch refusals never trigger a service-stop rollback. Status
+rechecks the final report after consulting systemd, including when a completed
+transient job has already been collected.
+The opt-in `test/codey-reconnect-native.mjs` acceptance harness submits from a
+simulated Codex ancestor, terminates only its dedicated submitter service, and
+checks authenticated WebSocket reconnection, protected-file hashes and health.
+See [reconnectable update design and validation](../../docs/codey-reconnect-update.md)
+for failure handling, platform boundaries and native acceptance evidence.
+
 Installation and removal are described in the
 [machine Skill](../../skills/config-new-codey-machine/SKILL.md).
 There is no public `codey setup` or unified `codey uninstall` command.

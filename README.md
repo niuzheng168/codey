@@ -51,7 +51,9 @@ registry，不要从公共源安装同名包。构建不会自动发布或部署
 Skill 内是同一份 Linux x64、Windows x64、macOS arm64/x64 npm 包；原生安装支持范围随发行包明确列出。
 旧的 Linux 专用发行版不会被当作共用安装包开放此入口。
 已有节点在“安装包与本机更新”下载 `.tgz`，按页面提供的 SHA-256 命令先检查，
-再在该节点原用户的外部终端执行 `codey update`；Portal 不启动远程更新任务。
+再以该节点原用户执行 `codey update`；当前源码在 Linux 支持 `--background`，
+Codex/Workspace 内自动使用独立一次性任务，允许短暂断连后重连，使用 `update --status`
+确认完成。旧 CLI 首次升级及 Windows/macOS 仍需外部原用户上下文；Portal 不启动远程更新任务。
 
 Linux 的独立 npm 包和 `install-codey-linux.sh` 入口仍保留，不必解压 Skill ZIP。
 将两者放在同一目录，确认目标机名后运行 `bash install-codey-linux.sh --expected-computer "实际机名"`；也可以从仓库执行：

@@ -48,7 +48,8 @@ Usage:
   codey start --foreground [--host HOST] [--workspace-port PORT] [--gateway-port PORT]
   codey export FILE.gz [--json]
   codey import FILE.gz [--check] [--replace-existing] [--settings-only] [--json]
-  codey update FILE.tgz [--sha256 HASH] [--check] [--offline] [--json]
+  codey update FILE.tgz [--sha256 HASH] [--check] [--offline] [--background] [--json]
+  codey update --status [--json]
   codey doctor [--json] [--offline] [--model]
   codey doctor --runtime-only|--package-only [--json]
 
@@ -90,6 +91,10 @@ import --check and update --check are read-only. Confirm overwrites with --repla
 update uses a local trusted .tgz; unchanged dependencies are reused, otherwise npm
 downloads are needed. --offline forbids downloads; --sha256 checks an expected hash.
 Update preserves configuration, tools, identity, service state and the previous release.
+Linux --background uses an independent, single-use systemd job; it is automatic inside
+Codex/Workspace. The command returns before switching; inspect update --status for completion.
+Connections briefly drop and clients can reconnect. In-flight tasks are NOT automatically replayed.
+Windows/macOS still require an external owner terminal for updates.
 No Portal update agent or persistent local updater. Do not rerun installation to upgrade.
 There is no unified uninstall command.
 Full parameter reference: onboarding/references/codey-cli.md in the package,

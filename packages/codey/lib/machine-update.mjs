@@ -3,10 +3,25 @@ import { copyFile, mkdir, readFile, rm } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { inspectPackageArchive, verifyStagedPackage } from "./package-archive.mjs";
 import { buildEnvironment, fileHash, findNpm } from "./package-files.mjs";
 import { copyDependencies, sameDependencies } from "./package-dependencies.mjs";
 import { backupDocument, writeBackup } from "./machine-backup.mjs";
+
+async function assertUpdateBaseline(m, config, setup, states) {
+  if (!isDeepStrictEqual(await m.i.read(m.i.file), config) ||
+      !isDeepStrictEqual(await m.i.read(config.setupFile), setup)) {
+    throw new Error("Node configuration changed while preparing the update; no services were stopped");
+  }
+  await m.tools();
+  await m.i.checkPorts(config);
+  const stable = values => values.filter(item => !item.auxiliary)
+    .map(({ name, enabled, running }) => ({ name, enabled, running })).sort((a, b) => a.name.localeCompare(b.name));
+  if (!isDeepStrictEqual(stable(await m.services()), stable(states))) {
+    throw new Error("Service state changed while preparing the update; no services were stopped");
+  }
+}
 
 /** Same locked dependency helpers as the runtime installer; no package code runs before validation. */
 export async function prepareUpdate(m, artifact, release, { offline = false, reuse = false } = {}) {
@@ -50,7 +65,14 @@ require("node:module").createRequire(process.argv[1])("pacote").extract(process.
   return app;
 }
 
-export async function updateMachine(m, options, { prepare = prepareUpdate } = {}) {
+export async function updateMachine(m, options, {
+  prepare = prepareUpdate, updateJob, progress = async () => {}, activationDelay = 5000,
+} = {}) {
+  if (options.status) return (await import("./machine-update-job.mjs")).readUpdateStatus(m);
+  if (options.background && m.i.target !== "linux-x64") {
+    throw new Error("Background updates currently require Linux systemd user services; use an external owner terminal on this platform");
+  }
+  const started = performance.now();
   const artifact = await inspectPackageArchive(options.file, options.sha256);
   if (!artifact.build.runtimePlatforms.includes(m.i.target)) throw new Error("Package does not support this native platform");
   const required = ["lib/machine.mjs", "lib/machine-update.mjs", "lib/machine-backup.mjs",
@@ -75,23 +97,49 @@ export async function updateMachine(m, options, { prepare = prepareUpdate } = {}
     await verifyStagedPackage(m.config.codeyDirectory, artifact, { home: m.i.home });
     return { ...plan, changed: false };
   }
-  await m.external();
+  let background = Boolean(options.background);
+  if (!background) {
+    try { await m.external(); }
+    catch (error) {
+      if (error.code !== "CODEY_INTERNAL_TERMINAL" || m.i.target !== "linux-x64" || updateJob) throw error;
+      background = true;
+    }
+  }
+  if (background) {
+    if (updateJob) throw new Error("An update worker cannot queue another worker");
+    return (await import("./machine-update-job.mjs")).queueUpdate(m, options, artifact, plan);
+  }
   return m.lock(async () => {
     await m.tools();
+    await m.i.checkPorts(m.config);
     const before = structuredClone(m.config), setupBefore = structuredClone(m.i.setup);
-    const states = (await m.services()).map(item => item.auxiliary ? { ...item, running: false, enabled: false } : item);
-    const stopped = states.map(item => ({ ...item, enabled: false, running: false }));
+    const allStates = (await m.services()).map(item => item.auxiliary ? { ...item, running: false, enabled: false } : item);
     const release = await m.i.checked(path.join(m.i.root, "releases", `package-${artifact.pkg.version}-${randomBytes(8).toString("hex")}`));
     await m.i.directory(path.dirname(release));
     await mkdir(release, { mode: 0o700 });
     await m.i.directory(release);
     let app;
-    try { app = await prepare(m, artifact, release, { offline: Boolean(options.offline), reuse }); }
+    try {
+      await progress({ state: "preparing" });
+      app = await prepare(m, artifact, release, { offline: Boolean(options.offline), reuse });
+    }
     catch (error) { await rm(release, { recursive: true, force: true }); throw error; }
     const backup = path.join(m.i.configRoot, `before-update-${randomBytes(8).toString("hex")}.gz`);
     await writeBackup(m, backup, await backupDocument(m));
     const next = { ...structuredClone(before), codeyDirectory: app, codeyBin: path.join(app, "bin/codey.mjs"),
       releaseDirectory: release, codeyEntrySha256: artifact.entrySha256, releaseId: `machine-${artifact.entrySha256.slice(0, 16)}` };
+    const states = m.i.adapter.updateServices?.(before, next, allStates) ?? allStates;
+    const stopped = states.map(item => ({ ...item, enabled: false, running: false }));
+    const prepared = performance.now();
+    await progress({ state: "ready", backup, services: states.map(item => item.name) });
+    // Let the submitting CLI return before its Workspace/connection is stopped.
+    // This is a reconnectable update, not request draining or automatic replay.
+    if (updateJob) await m.i.pause(activationDelay);
+    // All refusals before the first service action must stay outside rollback:
+    // rolling back here would overwrite another actor's edits or stop healthy services.
+    await progress({ state: "switching" });
+    await assertUpdateBaseline(m, before, setupBefore, allStates);
+    const switching = performance.now();
     try {
       await m.setStates(stopped);
       await m.waitFor(stopped);
@@ -101,10 +149,13 @@ export async function updateMachine(m, options, { prepare = prepareUpdate } = {}
       await m.i.write(next.setupFile, m.i.setup);
       await m.setStates(states);
       await m.waitFor(states);
+      await progress({ state: "verifying" });
       await m.verifyRunning(states);
       const { writeResources } = await import(pathToFileURL(path.join(m.i.skill, "scripts/machine-resources.mjs")).href);
       await writeResources(m.i, next);
       return { ...plan, changed: true, backup,
+        timings: { totalMs: Math.round(performance.now() - started),
+          preparationMs: Math.round(prepared - started), switchMs: Math.round(performance.now() - switching) },
         warning: "Package updated; configuration, credentials, TLS identity and previous release retained. No Portal registration or tool update." };
     } catch {
       try {
@@ -115,8 +166,9 @@ export async function updateMachine(m, options, { prepare = prepareUpdate } = {}
         await m.i.write(before.setupFile, setupBefore);
         await m.setStates(states);
         await m.waitFor(states);
+        await m.verifyRunning(states);
       } catch { m.keepLock = true; throw new Error(`Update failed and rollback needs review; services may be stopped. Private backup: ${backup}`); }
       throw new Error("Update failed; previous package and service state were restored");
     }
-  });
+  }, { updateJob });
 }
