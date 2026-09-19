@@ -444,6 +444,22 @@ class CodeyPackageTests(unittest.TestCase):
             package.validate_dependencies({"dependencies": {"a": "1"}},
                                           {"dependencies": {"a": "1"}}, {"dependencies": {"a": "2"}})
 
+    def test_runtime_manifest_is_a_reviewed_subset_not_the_frontend_dependency_union(self):
+        package.validate_dependencies(
+            {"dependencies": {"server": "1"}},
+            {"dependencies": {"server": "1", "react": "2", "mermaid": "3"},
+             "optionalDependencies": {"unused-desktop": "4"}},
+            {"dependencies": {"build-only": "5"}},
+        )
+        for manifest in (
+            {"dependencies": {"server": "different"}},
+            {"dependencies": {"unreviewed": "1"}},
+            {"dependencies": {"@openai/codex": "1"}},
+            {"dependencies": {"server": "1"}, "optionalDependencies": {"server": "1"}},
+        ):
+            with self.subTest(manifest=manifest), self.assertRaises(RuntimeError):
+                package.validate_dependencies(manifest, {"dependencies": {"server": "1"}}, {})
+
     def test_reviewed_source_patch_applies_inside_an_outer_checkout_without_touching_it(self):
         source = self.root / "source-repo"
         source.mkdir()

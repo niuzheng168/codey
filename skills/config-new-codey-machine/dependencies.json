@@ -12,7 +12,6 @@
   },
   "devTunnel": {
     "url": "https://tunnelsassetsprod.blob.core.windows.net/cli/linux-x64-devtunnel",
-    "sha256": "ff6911548907b5abaea4ed5baa36b2420be7c5debcb637a4f50f7a4002b10b60",
     "provider": "github"
   },
   "npmPackage": {

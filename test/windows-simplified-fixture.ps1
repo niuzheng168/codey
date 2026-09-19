@@ -97,5 +97,27 @@ Check ($messages -match '\[progress\].*\d+s' -and $messages -match '\[done\]') '
 Check ($messages -notmatch 'fixture-private') 'Progress leaked command output.'
 Check ($script:result.Stdout -eq 'fixture-private-output' -and
     $script:result.Stderr -eq 'fixture-private-error') 'Progress broke captured CLI output.'
+
+# Exercise the real native dispatcher; only OS owner/signature results are mocked.
+# This is not a claim that a Windows trust chain was validated on this test host.
+function Get-CodeyOwner { return [pscustomobject]@{ Home = $Root; Sid = 'fixture-owner' } }
+$script:signature = [pscustomobject]@{ Status = 'Valid'
+    SignerCertificate = [pscustomobject]@{ Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, C=US' } }
+function Get-AuthenticodeSignature { param([string]$LiteralPath); return $script:signature }
+$null = Invoke-CodeyNative ([pscustomobject]@{ operation = 'signature'; file = $cache })
+foreach ($invalid in @(
+    @('NotSigned', 'O=Microsoft Corporation'),
+    @('HashMismatch', 'O=Microsoft Corporation'),
+    @('NotTrusted', 'O=Microsoft Corporation'),
+    @('Valid', 'O=Another Publisher'),
+    @('Valid', 'O=Microsoft Corporation Impostor'),
+    @('Valid', 'CN=O=Microsoft Corporation, O=Another Publisher')
+)) {
+    $script:signature.Status = $invalid[0]
+    $script:signature.SignerCertificate.Subject = $invalid[1]
+    $refused = $false
+    try { $null = Invoke-CodeyNative ([pscustomobject]@{ operation = 'signature'; file = $cache }) } catch { $refused = $true }
+    Check $refused 'An invalid or foreign publisher signature was accepted.'
+}
 @{ passed = $true; certificate = $true; tls = $true; cache = $true; secretSafeProgress = $true
-    nativeServices = $false; modelCalls = 0 } | ConvertTo-Json -Compress
+    signaturePolicy = $true; nativeServices = $false; modelCalls = 0 } | ConvertTo-Json -Compress

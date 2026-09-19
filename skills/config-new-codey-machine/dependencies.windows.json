@@ -13,7 +13,6 @@
   },
   "devTunnel": {
     "url": "https://aka.ms/TunnelsCliDownload/win-x64",
-    "sha256": "78190ac81c664828858de2390fd9c15eeec0e4edfe4e7b0d6a323dc49df625db",
     "provider": "github"
   },
   "npmPackage": {

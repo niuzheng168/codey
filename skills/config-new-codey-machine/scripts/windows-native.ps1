@@ -244,7 +244,8 @@ function Invoke-CodeyNative {
         'extract' { Expand-CodeyZip $Request.archive $Request.destination; return $null }
         'signature' {
             $signature = Get-AuthenticodeSignature -LiteralPath $Request.file
-            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+            if ($signature.Status -ne 'Valid' -or
+                $signature.SignerCertificate.Subject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)') {
                 throw 'DevTunnel Authenticode verification failed.'
             }
             return $null

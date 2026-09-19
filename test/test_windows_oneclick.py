@@ -177,7 +177,7 @@ class PortablePowerShellTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 proof = json.loads(result.stdout.strip().splitlines()[-1])
                 self.assertTrue(proof["passed"] and proof["certificate"] and proof["tls"]
-                                and proof["cache"] and proof["secretSafeProgress"])
+                                and proof["cache"] and proof["secretSafeProgress"] and proof["signaturePolicy"])
                 self.assertFalse(proof["nativeServices"])
 
     def test_shared_and_legacy_windows_metadata_and_registration_reexport(self):

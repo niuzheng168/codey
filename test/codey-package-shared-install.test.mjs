@@ -78,6 +78,7 @@ test("the identical shared artifact installs, validates native modules and start
   const root = npmPackageRoot(prefix);
   const cli = path.join(root, "bin/codey.mjs");
   const info = JSON.parse((await exec(process.execPath, [cli, "doctor", "--runtime-only", "--json"], { env, timeout: 20000 })).stdout);
+  const build = JSON.parse(await readFile(path.join(root, "codey-build.json"), "utf8"));
   assert.equal(info.ok, true);
   assert.equal(info.platform, windows ? "windows-x64" : "linux-x64");
   assert.ok(knownRuntimePlatforms(info.runtimePlatforms));
@@ -93,7 +94,7 @@ test("the identical shared artifact installs, validates native modules and start
   const workspacePort = await port();
   let gatewayPort = await port();
   while (gatewayPort === workspacePort) gatewayPort = await port();
-  const child = spawn(process.execPath, [cli, "start", "--workspace-port", String(workspacePort),
+  const child = spawn(process.execPath, [cli, "start", "--foreground", "--workspace-port", String(workspacePort),
     "--gateway-port", String(gatewayPort)], { env, cwd: home, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   let output = "";
   for (const stream of [child.stdout, child.stderr]) stream.on("data", bytes => { output = (output + bytes).slice(-65536); });
@@ -122,22 +123,30 @@ test("the identical shared artifact installs, validates native modules and start
   const workspace = `http://127.0.0.1:${workspacePort}`;
   const gateway = `http://127.0.0.1:${gatewayPort}`;
   let ready = false;
-  for (let attempt = 0; attempt < 120; attempt++) {
+  const deadline = Date.now() + 60000;
+  while (Date.now() < deadline) {
     assert.equal(child.exitCode, null, output);
     try {
-      const health = await fetch(workspace + "/health");
-      const viewer = await fetch(gateway + "/usage-viewer");
+      const health = await fetch(workspace + "/health", { signal: AbortSignal.timeout(5000) });
+      const viewer = await fetch(gateway + "/usage-viewer", { signal: AbortSignal.timeout(5000) });
       if (health.ok && viewer.ok) {
         const healthBody = await health.json();
         assert.equal(healthBody.version, info.version);
-        assert.deepEqual(healthBody.codey, {
-          name: "codey", version: info.version, commit: info.sourceCommit,
-          releaseId: "machine-" + info.entrySha256.slice(0, 16), nodeMajor: info.nodeMajor,
-        });
+        if (build.sourceDirty === false) {
+          assert.deepEqual(healthBody.codey, {
+            name: "codey", version: info.version, commit: info.sourceCommit,
+            releaseId: "machine-" + info.entrySha256.slice(0, 16), nodeMajor: info.nodeMajor,
+          });
+        } else {
+          assert.equal(healthBody.codey, undefined, "A development build must not claim a committed release identity");
+        }
         ready = true;
         break;
       }
-    } catch { /* Wait only for the two private test listeners. */ }
+    } catch (error) {
+      if (error.code === "ERR_ASSERTION") throw error;
+      // Wait only for the two private test listeners.
+    }
     await new Promise(resolve => setTimeout(resolve, 250));
   }
   assert.ok(ready, output);

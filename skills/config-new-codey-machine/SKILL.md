@@ -67,6 +67,7 @@ CloudCLI 统一由 `codey start` 启动，没有独立子命令。`copilot start
 2. **准备本机状态和应用**：在原用户私有目录创建节点 ID、SSO/数据访问/隧道续期密钥；准备经校验的官方 Node/npm。
    将唯一 Codey npm 包装入新的私有目录，按锁文件准备依赖并检查 SQLite/PTY 等原生模块；同版本重跑先核对包文件，直接复用，不先装一遍 npm。
 3. **DevTunnel**：使用与 `codey devtunnel login` 相同的登录逻辑，检查本人 GitHub 登录，必要时设备码登录；不切换其他账号。
+   三平台均只从指定微软 HTTPS 地址下载 DevTunnel，不固定滚动文件的旧 SHA-256；Windows 额外校验微软 Authenticode 签名。Node/Codey 版本包和已安装文件的完整性校验仍保留。
    创建或复用私有 `codey-<nodeId>` 隧道，记录实际 tunnel/cluster ID；仅转发 HTTPS `3001/8443`，禁止匿名访问，不转发 `4141`。
 4. **证书与配置**：生成本机模型 key，保留已有身份、证书与密钥，不生成升级凭据。
    本机生成自签名非 CA 服务端证书，SAN 为 `<nodeId>.nodes.codey.internal`；私钥只留私有目录，不购买域名、不导入系统根证书库。

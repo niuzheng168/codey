@@ -167,19 +167,24 @@ def official_node(work, version):
 
 
 def validate_dependencies(package, cloud, copilot):
-    """A source dependency change must be reviewed in the one production lockfile."""
+    """The reviewed runtime subset must use upstream specs, not the frontend union.
+
+    After compilation the emitted Node imports are audited against this subset.
+    Frontend/build-only dependencies stay in the component build environments.
+    """
     for group in ("dependencies", "optionalDependencies"):
-        expected = {}
+        available = {}
         for component in (cloud, copilot):
             for name, spec in component.get(group, {}).items():
                 if name in {"@openai/codex", "@openai/codex-sdk"}:
                     # Bundle the locked SDK's JS, not its transitive native Codex runtime.
                     continue
-                if name in expected and expected[name] != spec:
+                if name in available and available[name] != spec:
                     raise RuntimeError(f"Resolve the shared dependency conflict before building: {name}")
-                expected[name] = spec
-        if package.get(group, {}) != expected:
-            raise RuntimeError(f"Update packages/codey/{group} and its lockfile for the reviewed sources")
+                available[name] = spec
+        for name, spec in package.get(group, {}).items():
+            if available.get(name) != spec:
+                raise RuntimeError(f"Runtime dependency {name} must match the reviewed upstream {group}")
     forbidden = {"@cloudcli-ai/cloudcli", "@jeffreycao/copilot-api", "@openai/codex", "@openai/codex-sdk"}
     if forbidden.intersection(package.get("dependencies", {})):
         raise RuntimeError("Codey must compile the apps, not depend on their npm packages")
@@ -387,6 +392,7 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     shutil.copy2(copilot / "LICENSE", runtime / "licenses/copilot-api-LICENSE")
     shutil.copy2(cloud / "node_modules/@openai/codex-sdk/LICENSE", runtime / "licenses/codex-sdk-LICENSE")
     normalize_runtime_text(runtime)
+    run([node / "bin/node", source_root / "scripts/check-codey-runtime-dependencies.mjs", runtime, cloud], env=env)
     run([node / "bin/npm", "ci", "--omit=dev", "--no-audit", "--no-fund",
          "--registry=https://registry.npmjs.org"], cwd=runtime, env=env)
     if (runtime / "npm-shrinkwrap.json").read_bytes() != locked_bytes:
@@ -395,6 +401,7 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     source_dirty = False if frozen else bool(run([
         "git", "-C", ROOT, "status", "--porcelain", "--",
         "packages/codey", "scripts/codey_package.py", "scripts/build-machine-bundle.py",
+        "scripts/check-codey-runtime-dependencies.mjs",
         "scripts/install-codey-runtime.mjs", "skills/config-new-codey-machine",
     ], capture=True).stdout.strip())
     provenance = {

@@ -23,11 +23,9 @@ test("Codey has one application identity, executable and lock, not dependencies 
   const sources = await Promise.all(["cloudcli", "copilot-api"].map(name =>
     json(new URL(`../${name}/package.json`, import.meta.url))));
   for (const group of ["dependencies", "optionalDependencies"]) {
-    const expected = Object.assign({}, ...sources.map(source => source[group]));
-    delete expected["@openai/codex"];
-    delete expected["@openai/codex-sdk"];
-    assert.deepEqual(pkg[group], expected);
-    assert.deepEqual(lock.packages[""][group], expected);
+    const upstream = Object.assign({}, ...sources.map(source => source[group]));
+    for (const [name, spec] of Object.entries(pkg[group] ?? {})) assert.equal(spec, upstream[name], name);
+    assert.deepEqual(lock.packages[""][group] ?? {}, pkg[group] ?? {});
   }
   for (const name of ["@cloudcli-ai/cloudcli", "@jeffreycao/copilot-api", "@openai/codex"]) {
     assert.equal(pkg.dependencies[name], undefined);
@@ -35,6 +33,30 @@ test("Codey has one application identity, executable and lock, not dependencies 
   }
   assert.ok(pkg.files.includes("npm-shrinkwrap.json"));
   assert.deepEqual(pkg.imports, { "#codey/codex-sdk": "./lib/codex-sdk/index.js" });
+});
+
+test("runtime dependencies exclude already-bundled frontend and unused desktop packages", async () => {
+  const pkg = await json(new URL("package.json", packageRoot));
+  const lock = await json(new URL("package-lock.json", packageRoot));
+  const names = Object.keys({ ...pkg.dependencies, ...pkg.optionalDependencies });
+  assert.equal(names.length, 35, "Review new runtime dependencies; do not copy the component manifests wholesale");
+  assert.ok(Object.keys(lock.packages).length < 400, "Do not restore the old 1,116-entry frontend/runtime union");
+  for (const name of ["react", "react-dom", "mermaid", "lucide-react", "@codemirror/lang-javascript",
+    "@uiw/react-codemirror", "@xterm/xterm", "@nut-tree-fork/nut-js", "screenshot-desktop",
+    "typescript", "vite", "electron", "rolldown"]) {
+    assert.ok(!names.includes(name), name);
+    assert.equal(lock.packages[`node_modules/${name}`], undefined, name);
+  }
+  for (const name of ["bcrypt", "better-sqlite3", "node-pty", "@vscode/ripgrep",
+    "@anthropic-ai/claude-agent-sdk", "@azure/identity", "@modelcontextprotocol/sdk", "gpt-tokenizer", "ws"]) {
+    assert.ok(pkg.dependencies[name], name);
+    assert.ok(lock.packages[`node_modules/${name}`], name);
+  }
+  // Cross-platform optional native packages are required on their own targets.
+  for (const target of ["darwin-arm64", "darwin-x64", "win32-x64", "linux-x64"]) {
+    assert.ok(lock.packages[`node_modules/@vscode/ripgrep-${target}`], target);
+    assert.ok(lock.packages[`node_modules/@anthropic-ai/claude-agent-sdk-${target}`], target);
+  }
 });
 
 test("single CLI starts CloudCLI only through the whole-node command", () => {

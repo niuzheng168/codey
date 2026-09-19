@@ -19,10 +19,15 @@ export async function readPins(skill, target) {
     pins.node.url === `https://nodejs.org/dist/v${version}/node-v${version}-${mac ? "darwin" : windows ? "win" : "linux"}-${arch}.${windows ? "zip" : mac ? "tar.gz" : "tar.xz"}` &&
     pins.devTunnel?.url === (windows ? "https://aka.ms/TunnelsCliDownload/win-x64" :
       `https://tunnelsassetsprod.blob.core.windows.net/cli/${mac ? "osx" : "linux"}-${arch}-devtunnel`) &&
-    [pins.node, pins.devTunnel].every(item => /^[a-f0-9]{64}$/.test(item?.sha256)) &&
+    /^[a-f0-9]{64}$/.test(pins.node?.sha256) &&
     isDeepStrictEqual(pins.codex, { url: `https://chatgpt.com/codex/install.${windows ? "ps1" : "sh"}`, release: "latest" }),
     "Invalid official runtime pins");
-  return pins;
+  // DevTunnel URLs serve current Microsoft builds, not immutable release bytes.
+  // Only the exact official HTTPS URL for this platform is allowed; Windows
+  // additionally checks Authenticode before execution. Discard legacy hashes
+  // on every platform so old pin files cannot restore the stale gate.
+  const { sha256: _legacyDevTunnelHash, ...devTunnel } = pins.devTunnel;
+  return { ...pins, devTunnel };
 }
 export async function assertInstalled(root, manifest, { artifact, home } = {}) {
   const pkg = await jsonFile(path.join(root, "package.json")), build = await jsonFile(path.join(root, "codey-build.json"));

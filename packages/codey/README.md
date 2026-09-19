@@ -4,6 +4,12 @@ One npm application containing the Workspace and model gateway, compiled from
 CloudCLI and copilot-api. Both use one locked dependency tree. The official
 Codex CLI is a separate tool; its SDK JavaScript is inlined into Codey.
 
+The published manifest contains only dependencies used by the Node runtime.
+React, CodeMirror, Mermaid and other browser dependencies stay in CloudCLI's
+build environment; their compiled UI assets are still included. Unused desktop
+automation packages are not installed. Browser Use's existing on-demand
+Playwright installation remains separate.
+
 ## Complete node installation
 
 Use the complete `config-new-codey-machine` release Skill. Its native entrypoints
@@ -107,3 +113,10 @@ for the complete Skill. A machine build needs an explicit HTTPS Portal origin,
 not an updater public key. Production builds still require the reviewed main
 commit and its recorded submodule commits. Native Windows/macOS acceptance is
 separate from portable fixture tests; no release is published by running tests.
+
+Runtime dependency specs must match the upstream components, but their entire
+frontend dependency lists must not be copied into Codey. After compilation,
+`scripts/check-codey-runtime-dependencies.mjs` audits the emitted Node imports
+(including literal lazy imports and `require`) for both missing and unused
+dependencies. It uses the build's existing TypeScript parser, not a new user
+dependency. Native-module and real-server smoke tests cover runtime execution.

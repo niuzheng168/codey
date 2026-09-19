@@ -66,6 +66,10 @@ test("built npm package installs as Codey and starts both real servers without u
   assert.deepEqual((await readdir(path.join(prefix, "lib/node_modules"))).filter(name => !name.startsWith(".")), ["codey"]);
   const pkg = JSON.parse(await readFile(path.join(installed, "package.json"), "utf8"));
   const build = JSON.parse(await readFile(path.join(installed, "codey-build.json"), "utf8"));
+  for (const name of ["react", "react-dom", "mermaid", "lucide-react", "@codemirror/lang-javascript",
+    "@nut-tree-fork/nut-js", "screenshot-desktop"]) {
+    await assert.rejects(readFile(path.join(installed, "node_modules", name, "package.json")), { code: "ENOENT" });
+  }
   assert.equal(createHash("sha256").update(await readFile(path.join(installed, "npm-shrinkwrap.json"))).digest("hex"),
     build.lockSha256, "npm must preserve the signed dependency lock after installation");
   const bin = path.join(home, ".local/bin/codey");
@@ -78,7 +82,8 @@ test("built npm package installs as Codey and starts both real servers without u
   assert.equal(newShell.stdout.trimEnd().split("\n").at(-1), `codey ${pkg.version}`);
 
   // Verify both API families and default preservation through the public Copilot entry.
-  assert.equal((await checkCopilot(installed)).modelRequests, false);
+  assert.equal((await checkCopilot(installed, process.execPath,
+    { startupTimeout: 60000, requestTimeout: 10000 })).modelRequests, false);
 
   // Exercise the actual inlined SDK using a local fake executable, never a paid model call.
   const fakeCodex = path.join(home, "codex-fixture");
@@ -98,7 +103,7 @@ console.log(result.finalResponse);
   const workspacePort = await unusedPort();
   let gatewayPort = await unusedPort();
   while (gatewayPort === workspacePort) gatewayPort = await unusedPort();
-  const child = spawn(bin, ["start", "--workspace-port", String(workspacePort), "--gateway-port", String(gatewayPort)], {
+  const child = spawn(bin, ["start", "--foreground", "--workspace-port", String(workspacePort), "--gateway-port", String(gatewayPort)], {
     env, cwd: home, stdio: ["ignore", "pipe", "pipe"], detached: true,
   });
   let output = "";
@@ -117,29 +122,47 @@ console.log(result.finalResponse);
   const workspace = `http://127.0.0.1:${workspacePort}`;
   const gateway = `http://127.0.0.1:${gatewayPort}`;
   let ready = false;
-  for (let attempt = 0; attempt < 120; attempt++) {
+  const deadline = Date.now() + 60000;
+  while (Date.now() < deadline) {
     assert.equal(child.exitCode, null, output);
     try {
-      const health = await fetch(workspace + "/health");
-      const viewer = await fetch(gateway + "/usage-viewer");
+      const health = await fetch(workspace + "/health", { signal: AbortSignal.timeout(5000) });
+      const viewer = await fetch(gateway + "/usage-viewer", { signal: AbortSignal.timeout(5000) });
       if (health.ok && viewer.ok) {
         const healthBody = await health.json();
         assert.equal(healthBody.version, pkg.version);
-        assert.deepEqual(healthBody.codey, {
-          name: "codey", version: pkg.version, commit: build.sourceCommit,
-          releaseId: "machine-" + createHash("sha256").update(await readFile(path.join(installed, "codey-build.json"))).digest("hex").slice(0, 16),
-          nodeMajor: Number(process.versions.node.split(".")[0]),
-        }, "The Portal must be able to observe the installed Codey package without an updater");
+        if (build.sourceDirty === false) {
+          assert.deepEqual(healthBody.codey, {
+            name: "codey", version: pkg.version, commit: build.sourceCommit,
+            releaseId: "machine-" + createHash("sha256").update(await readFile(path.join(installed, "codey-build.json"))).digest("hex").slice(0, 16),
+            nodeMajor: Number(process.versions.node.split(".")[0]),
+          }, "The Portal must be able to observe the committed Codey release without an updater");
+        } else {
+          assert.equal(healthBody.codey, undefined, "A development build must not claim a committed release identity");
+        }
         assert.equal(health.headers.get("cache-control"), "no-store");
         assert.match(await viewer.text(), /<html/i);
         ready = true;
         break;
       }
-    } catch { /* Wait for the two real entrypoints. */ }
+    } catch (error) {
+      if (error.code === "ERR_ASSERTION") throw error;
+      // Retry connection/startup errors, never hide a failed health contract.
+    }
     await new Promise(resolve => setTimeout(resolve, 250));
   }
   assert.ok(ready, output);
-  assert.equal((await fetch(workspace + "/")).status, 200);
+  const index = await fetch(workspace + "/");
+  assert.equal(index.status, 200);
+  const html = await index.text();
+  const assets = [...new Set([...html.matchAll(/(?:src|href)="(\/assets\/[^"]+\.(?:js|css))"/g)].map(match => match[1]))];
+  assert.ok(assets.some(asset => asset.endsWith(".js")), "Browser entry is still bundled");
+  for (const asset of assets) {
+    const response = await fetch(workspace + asset);
+    assert.equal(response.status, 200, asset);
+    assert.match(response.headers.get("content-type"), /javascript|text\/css/, asset);
+    assert.ok((await response.arrayBuffer()).byteLength > 0, asset);
+  }
   assert.equal((await fetch(gateway + "/token-usage")).status, 401);
   assert.equal((await fetch(gateway + "/token-usage", { headers: { Authorization: `Bearer ${apiKey}` } })).status, 200);
   const pids = (await readFile(`/proc/${child.pid}/task/${child.pid}/children`, "utf8")).trim().split(/\s+/);

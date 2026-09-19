@@ -9,7 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildEnvironment } from "../lib/package-files.mjs";
 
-export async function checkCopilot(root, node = process.execPath) {
+export async function checkCopilot(root, node = process.execPath, { startupTimeout = 12000, requestTimeout = 2000 } = {}) {
   const home = await mkdtemp(path.join(os.tmpdir(), "codey-copilot-smoke-"));
   const apiHome = path.join(home, "api"), configFile = path.join(apiHome, "config.json");
   const key = "isolated-smoke-key-not-a-real-credential";
@@ -41,10 +41,11 @@ globalThis.fetch = async () => {
       });
       const exited = once(child, "exit");
       const request = (target, options = {}) => fetch(`http://127.0.0.1:${port}${target}`,
-        { ...options, signal: AbortSignal.timeout(2000) });
+        { ...options, signal: AbortSignal.timeout(requestTimeout) });
       try {
         let ready = false;
-        for (let attempt = 0; attempt < 120; attempt++) {
+        const deadline = Date.now() + startupTimeout;
+        while (Date.now() < deadline) {
           assert.equal(child.exitCode, null, "Copilot API exited during startup");
           try { if ((await request("/")).ok) { ready = true; break; } } catch { /* Wait for the owned server. */ }
           await new Promise(resolve => setTimeout(resolve, 100));
