@@ -29,7 +29,7 @@ NPM_ONBOARDING_FILES = [
     "scripts/github-auth.mjs", "scripts/github-tunnel.mjs",
     "scripts/install-machine.mjs", "scripts/machine-common.mjs", "scripts/machine-package.mjs", "scripts/machine-resources.mjs",
     "scripts/platform-linux.mjs", "scripts/platform-macos.mjs", "scripts/platform-windows.mjs", "scripts/platform-unix.mjs",
-    "scripts/windows-native.ps1", "scripts/windows-common.ps1", "scripts/windows-process.cs",
+    "scripts/windows-native.ps1", "scripts/windows-native-client.mjs", "scripts/windows-common.ps1", "scripts/windows-process.cs",
     "scripts/windows-service.ps1", "scripts/windows-command.ps1",
     "templates/a100-models.json", "templates/codex-config.toml",
 ]

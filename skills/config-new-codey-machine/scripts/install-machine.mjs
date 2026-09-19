@@ -2,13 +2,13 @@
 /** The installation workflow. Adapters contain native OS operations, not another installer. */
 import { createPublicKey, randomBytes, X509Certificate } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, readFile, readdir, rmdir, statfs, unlink } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, readFile, readdir, realpath, rmdir, statfs, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import {
-  InstallationError, checkedPath, digest, directory, exists, readPrivate, requireValue, run, writePrivate,
+  InstallationError, checkedPath, digest, directory, exists, inside, readPrivate, requireValue, run, writePrivate,
 } from "./machine-common.mjs";
 import { assertInstalled, modelConfiguration, readPackage, readPins } from "./machine-package.mjs";
 import { macosAdapter } from "./platform-macos.mjs";
@@ -24,13 +24,15 @@ const nonce = () => randomBytes(12).toString("hex");
 const secret = () => randomBytes(32).toString("base64url");
 export const HELP = `Usage: node scripts/install-machine.mjs [--check]
        node scripts/install-machine.mjs --apply --network-approved --expected-computer NAME
-         [--replace-existing] [--retry-failed] [--codex-home DIR]
+         [--replace-existing] [--retry-failed] [--codex-home DIR] [--registry HTTPS_URL]
 
 Checks are read-only: no downloads, file changes, logins, services or model requests.
 Apply installs a native Linux, Windows or macOS node. Repeating the same release
 verifies the existing installation and exports JSON; it never upgrades or restarts it.
 --replace-existing permits backed-up Codex configuration changes, not key rotation.
 --retry-failed requires a reviewed failed attempt; never use it to migrate a legacy node.
+Prepared applications and official tools are verified and resumed in place, not copied.
+--registry selects an approved HTTPS public npm mirror without changing global settings.
 Only a private registration JSON file is exported. No automatic Portal registration.
 `;
 export function installOptions(args) {
@@ -41,11 +43,16 @@ export function installOptions(args) {
     requireValue(!Object.hasOwn(options, flag.slice(2)), "Duplicate installation option");
     if (["--apply", "--check", "--network-approved", "--replace-existing", "--retry-failed"].includes(flag)) {
       options[flag.slice(2)] = true;
-    } else if (["--expected-computer", "--codex-home"].includes(flag) && args[i + 1] && !args[i + 1].startsWith("--")) {
+    } else if (["--expected-computer", "--codex-home", "--registry"].includes(flag) && args[i + 1] && !args[i + 1].startsWith("--")) {
       options[flag.slice(2)] = args[++i];
     } else throw new InstallationError("Invalid installation option; use --help");
   }
   requireValue(!(options.apply && options.check), "--check cannot be combined with --apply");
+  if (options.registry) {
+    const url = new URL(options.registry);
+    requireValue(url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash,
+      "Use an HTTPS public npm registry without credentials, query or fragment");
+  }
   return options;
 }
 
@@ -75,6 +82,21 @@ export class Installer {
     this.adapter = typeof adapter === "function" ? adapter(this) : adapter ?? (platform === "darwin" ? macosAdapter(this) :
       platform === "win32" ? windowsAdapter(this) : linuxAdapter(this));
     this.portCheck = portCheck;
+    this.timings = [];
+  }
+  async stage(name, action) {
+    const started = Date.now();
+    console.log(`[${new Date().toISOString()}] ${name}`);
+    const progress = setInterval(() => console.log(`[progress] ${name}: ${((Date.now() - started) / 1000).toFixed(1)}s`), 10000);
+    progress.unref();
+    let ok = false;
+    try { const result = await action(); ok = true; return result; }
+    finally {
+      clearInterval(progress);
+      const seconds = (Date.now() - started) / 1000;
+      this.timings.push({ stage: name, seconds, ok });
+      console.log(`[${ok ? "done" : "failed"}] ${name}: ${seconds.toFixed(1)}s`);
+    }
   }
   checked(file) { return this.adapter.checked ? this.adapter.checked(file) : checkedPath(file, this.home); }
   directory(file) { return this.adapter.directory ? this.adapter.directory(file) : directory(file, this.home); }
@@ -142,6 +164,7 @@ export class Installer {
     const codexHome = await this.checked(path.resolve(options["codex-home"] || process.env.CODEX_HOME || path.join(this.home, ".codex")));
     const saved = await exists(this.file) ? await this.read(this.file) : null;
     const previous = saved ?? await this.adapter.existing?.(codexHome) ?? null;
+    await this.adapter.preflight?.(previous);
     let unfinished = false;
     if (previous) await this.validatePrevious(previous, codexHome);
     else if (await exists(this.configRoot) && (await readdir(this.configRoot)).length) {
@@ -174,7 +197,10 @@ export class Installer {
     return { plan, previous, saved, codexHome };
   }
   async apply(options) {
-    const { plan, previous, saved, codexHome } = await this.preflight(options);
+    this.timings = [];
+    const started = Date.now();
+    const { plan, previous, saved, codexHome } = options.apply
+      ? await this.stage("Preflight", () => this.preflight(options)) : await this.preflight(options);
     if (!options.apply) { console.log(JSON.stringify(plan, null, 2)); return plan; }
     await this.directory(this.configRoot);
     const lock = await this.checked(path.join(this.configRoot, "install.lock"));
@@ -211,7 +237,11 @@ export class Installer {
       console.log(`Codey locally installed and verified. Registration file: ${output}`);
       console.log("Local setup complete; Portal import is manual. No automatic registration or updater.");
       return config;
-    } finally { await rmdir(lock); }
+    } finally {
+      try { await this.write(path.join(this.configRoot, "install-timings.json"),
+        { schema: 1, totalSeconds: (Date.now() - started) / 1000, stages: this.timings }); }
+      finally { await rmdir(lock); }
+    }
   }
   async certificate(identity, create = true) {
     const cert = await this.checked(path.join(this.configRoot, "node-cert.pem"));
@@ -239,28 +269,58 @@ export class Installer {
     "Existing TLS certificate/key needs explicit renewal and Portal re-pinning");
     return { cert, key, serverName };
   }
-  async prepareApplication() {
+  async prepareApplication(options = {}) {
     if (this.prepared) return { release: path.resolve(this.prepared.root, "../../.."), codey: this.prepared.root,
       node: process.execPath };
+    const receiptFile = path.join(this.configRoot, "prepared.json");
+    if (options["retry-failed"] && await exists(receiptFile)) {
+      const receipt = await this.read(receiptFile);
+      requireValue(receipt.schema === 1 && receipt.platform === this.target && receipt.ownerHome === this.home &&
+        receipt.releaseId === this.manifest.releaseId && receipt.artifactSha256 === this.manifest.artifacts[0].sha256 &&
+        receipt.nodeArchiveSha256 === this.pins.node.sha256 &&
+        inside(path.join(this.root, "releases"), receipt.release) &&
+        path.dirname(receipt.release) === path.join(this.root, "releases") &&
+        inside(receipt.release, receipt.node) &&
+        receipt.codey === path.join(receipt.release, this.target === "windows-x64" ? "app/node_modules/codey" : "app/lib/node_modules/codey"),
+      "Prepared application receipt differs from this owner/release; inspect it before retrying");
+      for (const file of [receipt.release, receipt.node, receipt.codey]) await this.checked(file);
+      requireValue(await digest(receipt.node) === receipt.nodeSha256, "Prepared Node fingerprint mismatch");
+      requireValue((await this.run(receipt.node, ["--version"])).stdout.trim() === "v" + this.pins.node.version, "Prepared Node version mismatch");
+      await this.packageFiles(receipt.codey);
+      const { verifyDependencyTree } = await import(pathToFileURL(path.join(receipt.codey, "lib/package-dependencies.mjs")).href);
+      await verifyDependencyTree(receipt.codey, JSON.parse(await readFile(path.join(receipt.codey, "npm-shrinkwrap.json"))), { home: this.home });
+      await this.run(receipt.node, [path.join(receipt.codey, "bin/codey.mjs"), "doctor", "--runtime-only", "--json"],
+        { env: this.baseEnvironment(receipt.node) });
+      return { release: receipt.release, codey: receipt.codey, node: receipt.node };
+    }
     const release = await this.directory(path.join(this.root, "releases", this.manifest.releaseId + "-" + nonce()));
     const windows = this.target === "windows-x64", mac = this.target.startsWith("macos-");
     const archive = path.join(release, windows ? "node.zip" : mac ? "node.tar.gz" : "node.tar.xz");
-    if (process.env.CODEY_BOOTSTRAP_NODE_ARCHIVE) {
-      await copyFile(process.env.CODEY_BOOTSTRAP_NODE_ARCHIVE, archive);
-      requireValue(await digest(archive) === this.pins.node.sha256, "Bootstrap Node checksum mismatch");
-    } else await this.download(this.pins.node, archive);
-    if (windows) await this.adapter.extract(archive, path.join(release, "node"));
-    else await this.run("/usr/bin/tar", [mac ? "-xzf" : "-xJf", archive, "-C", release]);
+    await this.stage("Prepare pinned Node archive", async () => {
+      if (process.env.CODEY_BOOTSTRAP_NODE_ARCHIVE) {
+        await copyFile(process.env.CODEY_BOOTSTRAP_NODE_ARCHIVE, archive);
+        requireValue(await digest(archive) === this.pins.node.sha256, "Bootstrap Node checksum mismatch");
+      } else await this.download(this.pins.node, archive);
+    });
+    await this.stage("Extract pinned Node", async () => {
+      if (windows) await this.adapter.extract(archive, path.join(release, "node"));
+      else await this.run("/usr/bin/tar", [mac ? "-xzf" : "-xJf", archive, "-C", release]);
+    });
     await unlink(archive);
     const distribution = `node-v${this.pins.node.version}-${mac ? "darwin" : windows ? "win" : "linux"}-${this.target.split("-")[1]}`;
     const node = path.join(release, ...(windows ? ["node", distribution, "node.exe"] : [distribution, "bin/node"]));
     requireValue((await this.run(node, ["--version"])).stdout.trim() === "v" + this.pins.node.version, "Node version mismatch");
     const prefix = path.join(release, "app"), artifact = this.manifest.artifacts[0];
-    await this.run(node, [path.join(this.skill, "scripts/install-runtime.mjs"), "--package", path.join(this.skill, "assets", artifact.file),
-      "--sha256", artifact.sha256, "--prefix", prefix, "--no-launcher"],
-    { env: this.baseEnvironment(node), timeout: 1800000 });
+    await this.stage("Install locked dependencies and verify native modules", () => this.run(node,
+      [path.join(this.skill, "scripts/install-runtime.mjs"), "--package", path.join(this.skill, "assets", artifact.file),
+      "--sha256", artifact.sha256, "--prefix", prefix, "--no-launcher",
+      ...(options.registry ? ["--registry", options.registry] : [])],
+      { env: this.baseEnvironment(node), timeout: 1800000 }));
     const codey = path.join(prefix, windows ? "node_modules/codey" : "lib/node_modules/codey");
     await this.packageFiles(codey);
+    await this.write(receiptFile, { schema: 1, platform: this.target, ownerHome: this.home,
+      releaseId: this.manifest.releaseId, artifactSha256: artifact.sha256, nodeArchiveSha256: this.pins.node.sha256,
+      nodeSha256: await digest(node), release, codey, node });
     return { release, codey, node };
   }
   baseEnvironment(node) {
@@ -274,6 +334,63 @@ export class Installer {
     // work later in systemd/launchd's deliberately smaller environment.
     return { ...base, ...Object.fromEntries(Object.entries(process.env)
       .filter(([name]) => /^(?:PATH|GH_CONFIG_DIR|XDG_CONFIG_HOME|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR)$/i.test(name))) };
+  }
+  async officialTool(item, file) {
+    const receiptFile = file + ".verified.json";
+    if (await exists(file) && await exists(receiptFile)) {
+      const receipt = await this.read(receiptFile);
+      await this.checked(file);
+      requireValue(receipt.schema === 1 && receipt.url === item.url &&
+        /^[a-f0-9]{64}$/.test(receipt.sha256) && await digest(file) === receipt.sha256,
+      "Cached official tool changed; inspect it before retrying");
+      if (this.adapter.verifyTunnelBinary) await this.adapter.verifyTunnelBinary(file);
+      return;
+    }
+    await this.download(item, file);
+    if (this.adapter.verifyTunnelBinary) await this.adapter.verifyTunnelBinary(file);
+    await this.write(receiptFile, { schema: 1, url: item.url, sha256: await digest(file) });
+  }
+  async codexDirectory() {
+    const bin = path.join(this.root, "codex-bin");
+    if (this.target !== "windows-x64" || !await exists(bin) || !(await lstat(bin)).isSymbolicLink()) {
+      return this.directory(bin);
+    }
+    const releases = path.join(this.root, "codex-install/packages/standalone/releases");
+    await this.checked(releases);
+    const resolved = await realpath(bin);
+    requireValue(inside(releases, resolved) && path.basename(resolved) === "bin" &&
+      path.dirname(path.dirname(resolved)) === releases,
+    "Codex junction must resolve to this owner's official standalone release");
+    await this.checked(resolved);
+    await this.checked(path.join(resolved, "codex.exe"));
+    return bin;
+  }
+  async installCodex(config, codexBin) {
+    const receiptFile = path.join(this.configRoot, "codex-tool.json");
+    if (await exists(receiptFile)) {
+      const receipt = await this.read(receiptFile);
+      const executable = await realpath(config.codexExe);
+      await this.checked(executable);
+      requireValue(receipt.schema === 1 && receipt.platform === this.target &&
+        receipt.executable === executable && receipt.sha256 === await digest(executable),
+      "Recorded official Codex changed; inspect it before retrying");
+      requireValue((await this.run(config.codexExe, ["--version"], { env: config.environment })).stdout.startsWith("codex-cli "));
+      return;
+    }
+    const windows = this.target === "windows-x64";
+    const installer = path.join(config.releaseDirectory, windows ? "codex-install.ps1" : "codex-install.sh");
+    await this.download(this.pins.codex, installer);
+    requireValue((await readFile(installer, "utf8")).includes("https://releases.openai.com/codex"), "Unexpected official Codex installer");
+    const standaloneHome = await this.directory(path.join(this.root, "codex-install"));
+    await this.run(windows ? config.powershellExe : "/bin/bash",
+      windows ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", installer] : [installer],
+      { env: { ...config.environment, CODEX_INSTALL_DIR: codexBin, CODEX_HOME: standaloneHome,
+        CODEX_RELEASE: "latest", CODEX_NON_INTERACTIVE: "true", CODEX_INSTALLER_USE_RELEASES_OPENAI_COM: "true" }, timeout: 900000 });
+    requireValue((await this.run(config.codexExe, ["--version"], { env: config.environment })).stdout.startsWith("codex-cli "));
+    const executable = await realpath(config.codexExe);
+    requireValue(inside(this.root, executable), "Official Codex executable escaped this installation");
+    await this.checked(executable);
+    await this.write(receiptFile, { schema: 1, platform: this.target, executable, sha256: await digest(executable) });
   }
   async tunnel(devtunnel, identity, base) {
     const authentication = await loginTunnel(devtunnel, base, this.run,
@@ -328,17 +445,16 @@ export class Installer {
       (!previous || previous.nodeId === identity.nodeId), "Existing identity requires review");
     if (!await exists(identityFile)) await this.write(identityFile, identity);
     console.log("[1/4] Prepare the shared Codey package and official tools");
-    const { release, codey, node } = await this.prepareApplication();
+    const { release, codey, node } = await this.stage("Prepare application", () => this.prepareApplication(options));
     await writeResources(this, { nodeId: identity.nodeId, releaseId: this.setup.releaseId,
       releaseDirectory: release, codeyDirectory: codey, codeyEntrySha256: this.manifest.codey.entrySha256, codexHome, state: "preparing" });
     const base = this.baseEnvironment(node), windows = this.target === "windows-x64";
     const devtunnel = this.adapter.devtunnel ?? path.join(release, windows ? "devtunnel.exe" : "devtunnel");
     await this.directory(path.dirname(devtunnel));
-    await this.download(this.pins.devTunnel, devtunnel);
-    if (this.adapter.verifyTunnelBinary) await this.adapter.verifyTunnelBinary(devtunnel);
+    await this.stage("Prepare DevTunnel", () => this.officialTool(this.pins.devTunnel, devtunnel));
     console.log("[2/4] Configure private GitHub DevTunnel and node TLS");
-    const { tunnelFile, qualified, tunnelAuth } = await this.tunnel(devtunnel, identity, base);
-    const { cert, key, serverName } = await this.certificate(identity);
+    const { tunnelFile, qualified, tunnelAuth } = await this.stage("Configure tunnel", () => this.tunnel(devtunnel, identity, base));
+    const { cert, key, serverName } = await this.stage("Prepare TLS", () => this.certificate(identity));
     const signing = path.join(this.configRoot, "client-signing.key");
     await this.write(signing, Buffer.from(identity.clientSigningKey + "\n"));
     const copilot = await this.directory(this.adapter.copilot ?? path.join(this.root, "copilot-home"));
@@ -353,7 +469,7 @@ export class Installer {
     provider.auth ??= { apiKeys: [secret()], adminApiKey: secret(), sessionHistoryApiKey: secret() };
     requireValue(/^[A-Za-z0-9_-]{43}$/.test(provider.auth.apiKeys?.[0]), "Existing model key requires review");
     await this.write(providerFile, provider);
-    const modelKey = provider.auth.apiKeys[0], codexBin = await this.directory(path.join(this.root, "codex-bin"));
+    const modelKey = provider.auth.apiKeys[0], codexBin = await this.codexDirectory();
     const environment = { ...base, CODEY_MANAGED: "true", CODEY_PORTAL_SSO: "true", CODEX_HOME: codexHome,
       COPILOT_API_HOME: copilot, CODEY_MODEL_API_KEY: modelKey, DATABASE_PATH: path.join(data, "auth.db"),
       CODEY_CODEX_EXECUTABLE: path.join(codexBin, windows ? "codex.exe" : "codex"), COPILOT_API_CODEY_HTTPS_PORT: "8443",
@@ -387,22 +503,11 @@ export class Installer {
     const started = [];
     try {
       console.log("[3/4] Authenticate the gateway and configure official Codex");
-      const token = path.join(copilot, "github_token");
-      if (!await exists(token) || !(await lstat(token)).size) {
-        await this.run(node, [config.codeyBin, "copilot", "login"],
-          { env: this.githubEnvironment(environment), cwd: codey, interactive: true, timeout: 900000 });
-      }
-      const installer = path.join(release, windows ? "codex-install.ps1" : "codex-install.sh");
-      await this.download(this.pins.codex, installer);
-      requireValue((await readFile(installer, "utf8")).includes("https://releases.openai.com/codex"), "Unexpected official Codex installer");
-      const standaloneHome = await this.directory(path.join(this.root, "codex-install"));
-      const codexEnv = { ...environment, CODEX_INSTALL_DIR: codexBin, CODEX_HOME: standaloneHome,
-        CODEX_RELEASE: "latest", CODEX_NON_INTERACTIVE: "true", CODEX_INSTALLER_USE_RELEASES_OPENAI_COM: "true" };
-      await this.run(windows ? config.powershellExe : "/bin/bash",
-        windows ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", installer] : [installer],
-        { env: codexEnv, timeout: 900000 });
-      // The official installer owns its links/companions; never use a Desktop cache or a global npm shim.
-      requireValue((await this.run(config.codexExe, ["--version"], { env: environment })).stdout.startsWith("codex-cli "));
+      for (const name of ["github_token", "github-cli.json"]) await this.checked(path.join(copilot, name));
+      // The shared login verifies either saved credentials or a token-free gh binding before Codex/services.
+      await this.stage("Verify GitHub and Copilot access", () => this.run(node, [config.codeyBin, "copilot", "login"],
+        { env: this.githubEnvironment(environment), cwd: codey, interactive: true, timeout: 900000 }));
+      await this.stage("Prepare official Codex", () => this.installCodex(config, codexBin));
       await this.directory(codexHome);
       for (const [name, content] of [
         ["models.json", await readFile(path.join(this.skill, "templates/a100-models.json"))],
@@ -410,6 +515,7 @@ export class Installer {
           path.join(this.skill, "templates/codex-config.toml")))],
       ]) {
         const destination = await this.checked(path.join(codexHome, name));
+        if (await exists(destination) && (await readFile(destination)).equals(content)) continue;
         if (await exists(destination)) {
           requireValue(options["replace-existing"], "Codex configuration appeared during installation; review --replace-existing");
           await this.write(destination + "." + nonce() + ".bak", await readFile(destination));
@@ -431,7 +537,7 @@ export class Installer {
           await this.pause(2000);
         }
       }
-      await this.verifyModels(config);
+      await this.stage("Verify real CLI/SDK model responses", () => this.verifyModels(config));
       Object.assign(config, { ready: true, state: "ready" });
       await this.write(this.file, config);
       return config;

@@ -13,7 +13,7 @@ const DEFAULT_PACKAGE_SHA256 = "";
 const MARKER = "CODEY_SHARED_NPM_LAUNCHER";
 const PUBLIC_REGISTRY = "https://registry.npmjs.org";
 const HELP = `Usage: node install-codey.mjs [--package FILE.tgz] [--sha256 HASH] [--prefix DIR] [--check | --no-launcher]
-                              [--reuse-from EXISTING_CODEY_DIRECTORY]
+                              [--reuse-from EXISTING_CODEY_DIRECTORY] [--registry HTTPS_URL]
 
 Install the SAME Codey npm artifact on Linux x64, Windows x64 or macOS arm64/x64
 using Node.js 22.13+.
@@ -26,6 +26,8 @@ plan without downloads, npm, files or PATH changes. Native dependencies are defe
 --reuse-from copies identical, already installed dependencies instead of downloading
 or rebuilding them. This offline path requires the same dependency lock and a
 compatible existing Node/native ABI; it never falls back to the registry.
+--registry selects an approved HTTPS mirror for public dependencies only.
+User/global npm configuration and npm authentication are not inherited.
 
 No services, DevTunnel, credentials or Codex settings are modified, and no Portal
 registration JSON is generated. For a complete node use the installation Skill's
@@ -51,7 +53,7 @@ export function installOptions(args, directory = path.dirname(fileURLToPath(impo
     seen.add(flag);
     if (flag === "--check") options.check = true;
     else if (flag === "--no-launcher") options.noLauncher = true;
-    else if (["--package", "--sha256", "--prefix", "--reuse-from"].includes(flag) && args[index + 1] && !args[index + 1].startsWith("--")) {
+    else if (["--package", "--sha256", "--prefix", "--reuse-from", "--registry"].includes(flag) && args[index + 1] && !args[index + 1].startsWith("--")) {
       options[flag.slice(2)] = args[++index];
     } else throw new Error(`Invalid installer option: ${flag}`);
   }
@@ -60,8 +62,26 @@ export function installOptions(args, directory = path.dirname(fileURLToPath(impo
     throw new Error("Provide a local Codey .tgz and its SHA-256; do not install the unrelated public npm package.");
   }
   options.sha256 = options.sha256.toLowerCase();
+  options.registry = registryUrl(options.registry ?? PUBLIC_REGISTRY);
   if (options.check && options.noLauncher) throw new Error("--check cannot be combined with --no-launcher");
   return options;
+}
+
+export function registryUrl(value) {
+  const url = new URL(value);
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+    throw new Error("Use an HTTPS public dependency registry without credentials, query or fragment.");
+  }
+  return url.href.replace(/\/$/, "");
+}
+
+export function npmEnvironment(prefix, node, registry, environment = process.env) {
+  const env = Object.fromEntries(Object.entries(environment).filter(([key]) =>
+    !/^npm_config_/i.test(key) && !/^(?:npm_token|node_auth_token|npm_auth_token)$/i.test(key)));
+  return { ...env, PATH: path.dirname(node) + path.delimiter + (env.PATH ?? ""),
+    npm_config_userconfig: path.join(prefix, ".npm-user-config"),
+    npm_config_globalconfig: path.join(prefix, ".npm-global-config"),
+    npm_config_registry: registryUrl(registry), npm_config_strict_ssl: "true" };
 }
 
 export function npmPackageRoot(prefix, platform = process.platform) {
@@ -251,8 +271,11 @@ export async function installRuntime(args) {
     prefix = await mkdtemp(path.join(releases, "npm-"));
   }
   await chmod(prefix, 0o700);
-  const env = { ...process.env, PATH: path.dirname(node) + path.delimiter + (process.env.PATH ?? "") };
-  const npmFlags = ["--omit=dev", "--no-audit", "--no-fund", "--umask=0077", "--strict-ssl=true", `--registry=${PUBLIC_REGISTRY}`];
+  const env = npmEnvironment(prefix, node, options.registry);
+  await Promise.all([env.npm_config_userconfig, env.npm_config_globalconfig].map(file =>
+    writeFile(file, "", { mode: 0o600, flag: "wx" })));
+  const npmFlags = ["--omit=dev", "--no-audit", "--no-fund", "--umask=0077", "--strict-ssl=true",
+    "--fetch-retries=1", "--fetch-timeout=30000", `--registry=${options.registry}`];
   const npmArgs = platform === "win32" ? [npm] : [
     "--input-type=commonjs", "-e", "process.umask(0o077); require(process.argv[1]);", npm,
   ];

@@ -12,7 +12,8 @@ import { doctorOptions } from "../packages/codey/lib/doctor.mjs";
 
 const exec = promisify(execFile);
 const source = name => readFile(new URL(`../copilot-api/src/${name}`, import.meta.url), "utf8");
-const reference = await readFile(new URL("../skills/config-new-codey-machine/references/codey-cli.md", import.meta.url), "utf8");
+const reference = (await readFile(new URL("../skills/config-new-codey-machine/references/codey-cli.md", import.meta.url), "utf8"))
+  .replaceAll("\r\n", "\n");
 const headings = [...reference.matchAll(/^(#{2,3}) (`codey [a-z]+(?: [a-z]+)?`)\n/gm)];
 
 // Read the actual declarative command definitions without loading the gateway,

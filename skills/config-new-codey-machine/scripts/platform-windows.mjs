@@ -2,14 +2,16 @@
 import { randomBytes } from "node:crypto";
 import { readFile, unlink } from "node:fs/promises";
 import path from "node:path";
-import { digest, requireValue } from "./machine-common.mjs";
+import { digest, InstallationError, requireValue, run } from "./machine-common.mjs";
+import { nativeClient, windowsShellEnvironment } from "./windows-native-client.mjs";
 
 export function windowsAdapter(i) {
   const powershell = path.join(process.env.SystemRoot, "System32/WindowsPowerShell/v1.0/powershell.exe");
   const native = path.join(i.skill, "scripts/windows-native.ps1"), execute = i.run;
-  const invoke = async request => {
+  const invoke = execute === run ? nativeClient(powershell, native) : async request => {
     const result = await execute(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", native],
-      { input: JSON.stringify(request), timeout: (request.timeout ?? 180) * 1000 + 30000 });
+      { env: windowsShellEnvironment(), input: JSON.stringify(request), timeout: (request.timeout ?? 180) * 1000 + 30000, check: false });
+    if (result.code) throw new InstallationError("Windows native operation failed; inspect the private installation state.");
     return JSON.parse(result.stdout.trim());
   };
   i.run = async (executable, args, options = {}) => {
@@ -24,7 +26,7 @@ export function windowsAdapter(i) {
     await i.write(file, request);
     try {
       await execute(powershell, ["-NoLogo", "-NoProfile", "-File", native, "-RequestFile", file],
-        { interactive: true, timeout: request.timeout * 1000 + 30000 });
+        { env: windowsShellEnvironment(), interactive: true, timeout: request.timeout * 1000 + 30000 });
       return { code: 0, stdout: "", stderr: "" };
     } finally { await unlink(file); }
   };
@@ -47,6 +49,12 @@ export function windowsAdapter(i) {
         "Run as the original Windows owner");
       i.computer = owner.Computer;
       i.ownerSid = owner.Sid;
+    },
+    async preflight(previous) {
+      try { await invoke({ operation: "preflight", root: i.root, file: i.file, previous }); }
+      catch (error) {
+        throw new InstallationError(`${error.message} Review Task Scheduler: back up, disable and stop stale Codey tasks pointing at this runtime before retrying. No task was changed.`);
+      }
     },
     async ports(previous) {
       const listeners = await invoke({ operation: "ports", previous });

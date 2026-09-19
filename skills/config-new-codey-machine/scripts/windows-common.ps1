@@ -2,6 +2,10 @@
 # No installation side effects when dot-sourced; shared by installer and watchdog.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($env:OS -eq 'Windows_NT' -and $PSVersionTable.PSVersion.Major -le 5) {
+    # A PowerShell 7 parent can otherwise make 5.1 import incompatible Core modules.
+    $env:PSModulePath = Join-Path $PSHOME 'Modules'
+}
 
 function Assert-CodeyPath {
     param([string]$Path, [string]$Root, [switch]$AllowRoot)
@@ -189,6 +193,7 @@ function Invoke-CodeyProcess {
 
 function Get-CodeyDownload {
     param([string]$Url, [string]$Destination, [string]$Sha256)
+    $ProgressPreference = 'SilentlyContinue'
     if (([uri]$Url).Scheme -ne 'https') { throw 'Only official HTTPS downloads are allowed.' }
     $full = Assert-CodeyPath $Destination
     if ($Sha256 -and (Test-Path -LiteralPath $full -PathType Leaf) -and
@@ -235,7 +240,12 @@ function Expand-CodeyZip {
             $total += $entry.Length
             if ($total -gt 8GB -or $zip.Entries.Count -gt 150000) { throw 'Archive exceeds extraction limits.' }
             if (-not $entry.FullName.EndsWith('/')) { $null = $files.Add($name) }
-            $null = Assert-CodeyPath (Join-Path $target ($name.Replace('/', '\'))) $target
+            # The target does not exist and names cannot contain links or traversal.
+            # Walking every ancestor for every npm file makes Node extraction quadratic.
+            $entryPath = [IO.Path]::GetFullPath((Join-Path $target ($name.Replace('/', '\'))))
+            if (-not $entryPath.StartsWith($target + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Archive entry escapes the extraction directory.'
+            }
         }
         foreach ($name in $names) {
             $parts = $name.Split('/')
@@ -271,8 +281,21 @@ function Get-CodeyOwner {
 }
 
 function Get-CodeyProcesses {
-    param([string]$OwnerSid)
+    param([string]$OwnerSid, [int[]]$ProcessIds = @(), [switch]$ControlOnly)
     $all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    if ($ControlOnly) {
+        $ids = [Collections.Generic.HashSet[int]]::new()
+        $currentId = $PID
+        for ($i = 0; $i -lt 64 -and $currentId; $i++) {
+            if (-not $ids.Add($currentId)) { break }
+            $parent = @($all | Where-Object { $_.ProcessId -eq $currentId })
+            if (-not $parent.Count) { break }
+            $currentId = $parent[0].ParentProcessId
+        }
+        $all = @($all | Where-Object { $ids.Contains([int]$_.ProcessId) -or $_.Name -ieq 'codex.exe' })
+    } elseif ($ProcessIds.Count) {
+        $all = @($all | Where-Object { $_.ProcessId -in $ProcessIds })
+    }
     foreach ($process in $all) {
         if (-not $process.ExecutablePath) { continue }
         $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction SilentlyContinue

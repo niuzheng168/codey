@@ -104,6 +104,7 @@ export async function machineFixture(t, target = "macos-arm64") {
       const app = path.join(args[args.indexOf("--prefix") + 1], windows ? "node_modules/codey" : "lib/node_modules/codey");
       await mkdir(path.dirname(app), { recursive: true, mode: 0o700 });
       await cp(appSource, app, { recursive: true });
+      await mkdir(path.join(app, "node_modules"), { recursive: true });
       return ok();
     }
     if (path.basename(file).startsWith("devtunnel")) {
@@ -128,7 +129,12 @@ export async function machineFixture(t, target = "macos-arm64") {
       await writeFile(args[args.indexOf("--output-last-message") + 1], f.answer);
       return ok();
     }
-    if (args[1] === "copilot" && args[2] === "login") { if (f.occupyAfterAuth) f.blockPort = 8443; return ok(); }
+    if (args[1] === "copilot" && args[2] === "login") {
+      if (f.failAuthentication) throw new Error("fixture GitHub HTTP 401");
+      if (f.occupyAfterAuth) f.blockPort = 8443;
+      return ok();
+    }
+    if (args[1] === "doctor" && args.includes("--runtime-only")) return ok('{"ok":true}');
     assert.fail("Unexpected fixture command: " + path.basename(file));
   };
   const fakeNative = i => ({

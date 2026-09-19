@@ -20,8 +20,7 @@ const fs = require("node:fs"), path = require("node:path"), {pathToFileURL} = re
   require("node:assert/strict").deepEqual(fs.readFileSync(path.join(skill, "assets/manifest.json")), original);
 })().catch(e => {console.error(e.message);process.exitCode=1});
 '@
-& $Node -e $script $Root
-if ($LASTEXITCODE -ne 0) { throw 'Shared Node package verification failed' }
+$null = Invoke-CodeyProcess $Node @('-e', ($script -replace '[\r\n]+', ' '), $Root) -TimeoutSeconds 30
 if (Get-Command Read-CodeyWindowsPackage -ErrorAction SilentlyContinue) { throw 'A second package workflow survived' }
 if (Get-Command Install-CodeyAutomaticUpdater -ErrorAction SilentlyContinue) { throw 'An updater survived' }
 Write-Output 'WINDOWS_REGISTRATION_FIXTURE_OK'
