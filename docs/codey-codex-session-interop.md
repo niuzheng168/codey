@@ -74,6 +74,105 @@ opening such an old session explicitly in the App can still be necessary.
 
 ## Scope and remaining limitations
 
+### Cross-platform native continuation (2026-09-19)
+
+The reported macOS desktop session used paginated storage and had a live
+desktop writer, but the desktop app communicated over stdio rather than the
+Unix control socket. Keeping the app open therefore could not satisfy Codey's
+daemon-only continuation guard. The earlier Windows queue repair was still
+behind a `win32` condition.
+
+Discovery, native history and execution now share a capability-based connector
+on Linux, macOS and Windows:
+
+- Prefer the existing owner socket. If the default socket is absent and an
+  absolute `CODEY_CODEX_EXECUTABLE` is configured, use that native CLI over
+  stdio with the same `CODEX_HOME`. Explicit stdio is no longer Windows-only.
+- Explicit socket selections remain authoritative. Connection/protocol
+  failures never switch executables, start exec, or retry a submitted prompt.
+- A native resume that specifically refuses the same thread's active writer
+  can use the existing desktop queue on every platform. The original owner
+  runs the input under the original ID; Codey does not remove locks, rewrite
+  thread metadata, or fork a replacement conversation.
+- Native-only threads can be indexed without JSONL. Native history is read
+  with `thread/read(includeTurns=false)` and complete `thread/turns/list`
+  pages. An older backend may use inclusive `thread/read` only after an
+  explicit unsupported-method response, never a partial export.
+- Queue observation also uses full turn pages: some native versions support
+  legacy thread queues but reject `thread/items/list` for legacy histories.
+  Correlation still requires the submission's native client ID and a durable
+  completion timestamp.
+- Temporary read-only helpers load no thread and close only themselves.
+  Queue executions retain desktop model, effort, permissions, approvals and
+  started-turn interruption ownership.
+
+Unconfigured legacy source installations retain their existing SDK behavior.
+An incompatible native CLI still fails explicitly; “cross-platform” is not a
+promise to reinterpret unsupported native formats. Native fork/edit remains a
+separate limitation.
+
+The fix needs a **node backend** build/deployment. Publishing the shared UI
+alone does not change the running adapter. Verification uses isolated homes,
+mock owners and opt-in real native CLIs against an offline localhost model;
+it must not submit probes into the reported user session.
+
+Validation on 2026-09-19:
+
+- 506 backend tests passed in a clean environment; three were skipped (the two
+  opt-in native tests and the existing missing-rollout fork fixture).
+- Four offline real-CLI round trips passed on macOS: both paginated and legacy
+  histories with CLI `0.152.0` on both sides, and with desktop owner
+  `0.155.0-alpha.9.2` plus Codey's `0.152.0` helper. The owner executes queued
+  input, releases its writer, and resumes Codey-created/continued threads under
+  the same IDs. Ordinary desktop discovery includes the new Codey threads.
+- Transport-selection regressions exercise `linux`, `darwin`, and `win32`.
+  Actual Linux/Windows native binaries were not run in this validation.
+- Build, frontend/backend type checks and lint passed; existing bundle-size
+  and lint warnings remain.
+- The pre-existing submodule checkout (`31c2e25`) was not reset. An isolated
+  forward-port to the parent-pinned `8c294f1` also passed backend type checking
+  and 33 runtime/steering regressions, retaining the newer goal/plan guards and
+  desktop observation logic. Do not deploy the older checkout wholesale over
+  a newer node; merge this repair into that node's release line.
+- No package was published and no running service was replaced or restarted.
+  The reported user conversation was not used for test input or modified.
+
+### Integration with current release branches
+
+The parent `main` was first fast-forwarded to `66f02fd`. The repair is now
+integrated as CloudCLI `02a9228` on top of the parent-pinned `52918b0`, including
+CloudCLI's remote `main` baseline `40563c2`. This retains the newer goal/plan
+guards, runtime identity and Workspace reconnect safeguards rather than
+replacing them with the older development checkout.
+
+Copilot API `3c90b6f` merges remote `dev` baseline `20e4dee` (version `2.6.1`)
+with the parent-pinned `b4a3e91` Codey GitHub-login integration. Both direct
+GitHub authentication and upstream's cross-process Codex credential locking
+and account-removal changes are retained. Neither component changes its
+runtime dependency specifications; the parent's unified manifest and frozen
+dependency lock pass the packaging compatibility checks.
+
+Validation of the integrated source:
+
+- CloudCLI: 563 backend tests passed, nine skipped; all 673 frontend tests
+  passed. Build, frontend/backend type checks and lint passed.
+- Two additional offline native round trips passed on macOS, covering both
+  paginated and legacy histories with desktop owner `0.155.0-alpha.9.2` and
+  Codey helper `0.152.0`. The platform-selection matrix also covers Linux and
+  Windows; their native binaries were not executed on this Mac.
+- Copilot API: all 959 tests passed, including the 76-test auth/token
+  regression group. Build, type checking and full lint passed with the frozen
+  Bun dependency lock.
+- Parent: 587 tests passed, 40 platform/opt-in cases skipped, and syntax checks
+  passed with Node `24.20.0` / npm `11.19.0`. The ignored skill download was
+  rebuilt from source before testing. On macOS, use a canonical temporary
+  directory (not the `/var` symlink) for filesystem-safety fixtures.
+
+This records source integration, not a node rollout. No npm/machine package
+was published and no node backend was manually deployed or restarted.
+Tests used isolated homes; the reported user conversation was not used for
+validation.
+
 ### Windows desktop-owned sessions (2026-09-09)
 
 The Windows stdio history reader is not itself the desktop writer. Starting
