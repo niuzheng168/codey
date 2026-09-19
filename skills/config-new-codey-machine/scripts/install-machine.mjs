@@ -31,6 +31,8 @@ Apply installs a native Linux, Windows or macOS node. Repeating the same release
 verifies the existing installation and exports JSON; it never upgrades or restarts it.
 --replace-existing permits backed-up Codex configuration changes, not key rotation.
 --retry-failed requires a reviewed failed attempt; never use it to migrate a legacy node.
+Codex shares the owner's ~/.codex by default. --codex-home or CODEX_HOME explicitly
+selects another directory; desktop sessions in other directories are not merged.
 Only a private registration JSON file is exported. No automatic Portal registration.
 `;
 export function installOptions(args) {
@@ -190,6 +192,7 @@ export class Installer {
     const listeners = await this.checkPorts(previous);
     const plan = { platform: this.target, computer: this.computer, mode: options.apply ? "apply" : "check",
       releaseId: this.manifest.releaseId, replaceConfiguration: previous?.ready ? [] : overwrites,
+      codexHome,
       existingNode: Boolean(previous), listeners, startup: this.adapter.startup,
       codexPolicy: this.target.startsWith("macos-") ? "reuse-verified-standalone-or-download" : "download-official",
       deferred: ["network/login", "native dependencies", "TLS/SSO/model response", "registration export"],

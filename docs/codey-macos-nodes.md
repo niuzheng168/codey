@@ -11,16 +11,24 @@ bash scripts/install-macos.sh --check
 bash scripts/install-macos.sh --apply --network-approved --expected-computer "$(hostname)"
 ```
 
-已有个人 Codex 设置时，建议为节点单独指定配置目录，不必批准覆盖个人配置：
+**默认让 Codey 与 Codex 桌面/CLI 共用 `~/.codex`**。不要额外指定节点私有的
+`--codex-home`，也不要为避免覆盖提示而擅自隔离会话。安装计划的 `codexHome`
+会显示实际目录；若用户明确配置了 `CODEX_HOME`，先确认桌面也使用同一目录。
 
 ```sh
 CODEY_NPM_REGISTRY=https://mirrors.cloud.tencent.com/npm \
 bash scripts/install-macos.sh --apply --network-approved \
-  --expected-computer "$(hostname)" \
-  --codex-home "$HOME/.local/share/codey-machine-macos/codex-home"
+  --expected-computer "$(hostname)"
 ```
 
-这不迁移个人 auth/sessions，也不改变原有 Codex 程序；模型验收使用节点专属配置。
+已有配置的覆盖仍须批准 `--replace-existing` 并备份，不删除 auth/sessions。
+独立 `--codex-home` 仅用于用户主动要求的隔离环境；它不会读取桌面其他目录的会话。
+既有隔离节点切回共享目录时，受控修改运行配置及服务环境后重启应用，
+保留原目录；不复制、合并或删除 Codex SQLite 数据库，也不重新创建节点身份/隧道。
+Workspace 的增量扫描游标也须失效后重新扫描，否则新目录中较早创建的会话可能被跳过；
+只重置 Codey 自己 `data/auth.db` 中的 `scan_state` 游标，不清空项目/会话记录，
+更不修改桌面的 `state_*.sqlite`。最后应分别核对历史接口和 Workspace 会话列表，
+不能仅凭两个目录路径一致就宣称会话已可见。
 安装本身包含预检，单独 `--check` 只在需要先审阅计划时运行。
 
 **个人 Codex 的模型路由也是需要保留的配置。** 若清理时删除了个人配置中的 Codey

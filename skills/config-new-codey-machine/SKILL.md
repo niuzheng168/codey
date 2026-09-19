@@ -79,6 +79,10 @@ Linux 后台更新无须退出客户端，不等于零中断：进行中的请�
 
 三平台共用 `scripts/install-machine.mjs` 的 Node 安装流程，入口只做原生预检和必要的 Node 引导；不再维护三套安装编排。
 已有 Node 时也可直接运行 `node scripts/install-machine.mjs --check`，确认后改用 `--apply --network-approved --expected-computer "实际机名"`。
+**默认共享 Codex 会话目录**：未显式设置 `--codex-home` / `CODEX_HOME` 时使用 `~/.codex`，
+与本机 Codex 桌面/CLI 共用配置、会话索引和历史。安装计划的 `codexHome` 显示实际选择；
+桌面若另有自定义目录，应明确使用相同路径。只有用户主动要求隔离时才使用独立目录，
+并说明其他目录的会话不会自动出现在 Codey；不能为绕过配置覆盖确认而擅自改用隔离目录。
 Linux 与其他 Codex 服务共存时，可用 `CODEX_HOME="$HOME/.local/share/codey-machine/codex-home"` 调用上述完整 Skill 入口；
 只检查该目录的使用冲突和安装器进程祖先，不停止其他独立 `CODEX_HOME` 的服务，也不覆盖共享 `~/.codex`。
 首次配置节点需覆盖已有 Codex 配置（Linux 也包括网关配置）时，另行确认并加 `--replace-existing`（Linux/Mac）或 `-ReplaceExisting`（Windows）；先备份，保留 auth/sessions。

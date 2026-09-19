@@ -46,6 +46,36 @@ nativeTest("Mac package preflight needs no Python and checks all bundled hashes 
   await assert.rejects(readPackage(f.skill, target), /checksum mismatch/);
 });
 
+nativeTest("Mac defaults to the desktop Codex home and preserves its authentication and sessions", async t => {
+  const previous = process.env.CODEX_HOME;
+  delete process.env.CODEX_HOME;
+  t.after(() => { if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous; });
+  const f = await fixture(t), codexHome = path.join(f.home, ".codex");
+  const options = { ...f.options };
+  delete options["codex-home"];
+  await mkdir(path.join(codexHome, "sessions"), { recursive: true, mode: 0o700 });
+  await writePrivate(path.join(codexHome, "auth.json"), { preserved: "desktop auth" });
+  const session = path.join(codexHome, "sessions/desktop-session.jsonl");
+  await writeFile(session, '{"preserved":"desktop session"}\n', { mode: 0o600 });
+  const plan = await f.installer.apply({ check: true });
+  assert.equal(plan.codexHome, codexHome);
+  const config = await f.installer.apply(options);
+  assert.equal(config.codexHome, codexHome);
+  assert.equal(config.environment.CODEX_HOME, codexHome);
+  assert.deepEqual(await readPrivate(path.join(codexHome, "auth.json")), { preserved: "desktop auth" });
+  assert.equal(await readFile(session, "utf8"), '{"preserved":"desktop session"}\n');
+  await assert.rejects(stat(path.join(f.installer.root, "codex-home")), { code: "ENOENT" });
+});
+
+nativeTest("Mac reports an explicitly selected Codex home without silently replacing it", async t => {
+  const f = await fixture(t), previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = path.join(f.home, "explicit-desktop-home");
+  t.after(() => { if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous; });
+  assert.equal((await f.installer.apply({ check: true })).codexHome, process.env.CODEX_HOME);
+  const explicit = path.join(f.home, "explicit-isolated-home");
+  assert.equal((await f.installer.apply({ check: true, "codex-home": explicit })).codexHome, explicit);
+});
+
 test("Mac port preflight allows empty ports and exact owner Codey processes without stopping anything", async () => {
   const previous = { ownerUid: 501, nodeExe: "/Users/owner's home 中文/node", codeyDirectory: "/Users/owner's home 中文/codey",
     codeyBin: "/Users/owner's home 中文/codey/bin/codey.mjs" };
