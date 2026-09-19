@@ -74,6 +74,84 @@ opening such an old session explicitly in the App can still be necessary.
 
 ## Scope and remaining limitations
 
+### Paused desktop queues and owner delivery (2026-09-20, macOS local time)
+
+The cross-platform queue fallback alone did **not** fix the reported session.
+Its previous turn had been explicitly interrupted. The native owner retained
+the writer and paused automatic queue consumption: `thread/queue/add` succeeded,
+but no model turn started. A read-only helper cannot wake it with
+`thread/queue/start` because that operation requires the loaded owner.
+The earlier offline tests only covered a normally completed previous turn.
+
+After the exact native foreign-writer refusal, Codey now discovers the existing
+owner through the desktop's native peer IPC protocol. An idle owner receives an
+explicit `thread-follower-start-turn` with the original browser input identity
+and `inheritThreadSettings: true`. This retains the native session ID, model,
+effort, permissions and desktop tool approvals; Codey neither claims the writer
+nor uses GUI automation. The adapter identifies itself as Codey, pins the
+discovered owner, and never advertises ownership of any thread.
+
+- Linux/macOS use the user-private `CODEX_HOME/ipc/ipc.sock`; untrusted or
+  symlinked endpoints fail closed. Windows uses the native named pipe only for
+  the shared default profile, not an unrelated custom `CODEX_HOME`.
+- Active desktop work still receives native queued input, not a competing
+  direct turn. A paused owner without the peer capability is rejected before
+  adding another message. An idle, unstarted compatibility queue now reports
+  the problem after 30 seconds instead of waiting silently for a day.
+- Existing pending inputs are never deleted, replayed or leapfrogged by this
+  automatic path. A real native regression proved that direct `turn/start`
+  **does not deduplicate** an input still queued with the same client ID.
+- Lost, rejected, wrong-owner or malformed acknowledgements never trigger a
+  queue fallback, another writer, or an automatic retry. Started desktop turns
+  remain desktop-owned; Stop may remove only Codey's unclaimed queue entry and
+  requires an explicit `deleted: true` acknowledgement.
+- Output is read from complete native turn pages and correlated by client ID.
+  Only a durable completion timestamp proves that the foreign turn ended.
+
+With the user's explicit authorization, the reported real conversation was
+also tested, not merely its history endpoint. The stuck input was privately
+backed up, cancelled through the installed Codey WebSocket using its captured
+run ID, and independently checked to be absent from both the native queue and
+turn history before resubmitting its original text and client ID once.
+
+The candidate's actual Codey WebSocket gateway, strict request-bound SSO,
+verified TLS, provider runtime, real desktop owner and real model then completed
+two consecutive turns in the original conversation. The first answered the
+original question; the second correctly summarized that context and returned a
+fresh nonce. Both produced assistant text, successful Codey completion events,
+exactly one matching persisted native turn, and an empty queue. The desktop
+process and writer-lock inode were unchanged. The candidate used a fresh Codey
+database containing only the target's mapping; no schedules, plugins or fake
+model were started by the test harness.
+
+Private receipts are under the ignored path recorded in
+`artifacts/live-native-queue-goal-path` (`recover-e2e-result.json` and
+`followup-e2e-result.json`). They contain conversation data and must not be
+published. This establishes real **candidate** interoperability, not installation
+of that candidate into the running node.
+
+The opt-in offline native suite additionally covers paginated and legacy
+histories after both normal completion and interruption, using owner
+`0.155.0-alpha.9.2` and helper `0.152.0`. Its peer wire fixture forwards to the
+real native owner but is not a substitute for the real-desktop test above.
+Linux and Windows transport contracts are tested; their native binaries have
+not been executed on this Mac.
+
+Validation of CloudCLI `3c05a02`:
+
+- 581 backend tests passed, 11 opt-in/platform/fixture cases skipped.
+- All 673 frontend tests passed; the four opt-in real native cases also passed.
+- Production build, frontend/backend type checks and lint passed with existing
+  bundle-size/lint warnings.
+- The final mixed backend run used an isolated `HOME` with inherited
+  `CODEX_HOME` unset and four test-file workers; frontend used two workers.
+  An initial run with an overriding `CODEX_HOME` and excessive parallel builds
+  produced fixture failures/timeouts. The environment was corrected and the
+  complete suites rerun; test assertions and timeouts were not weakened.
+- CloudCLI was fast-forwarded to `main` and pushed. The parent integrated the
+  latest remote `main` (`854c976`); Copilot API remains at the freshly verified
+  remote `dev` tip `3c90b6f`. Runtime dependency specifications are unchanged.
+
 ### Cross-platform native continuation (2026-09-19)
 
 The reported macOS desktop session used paginated storage and had a live
