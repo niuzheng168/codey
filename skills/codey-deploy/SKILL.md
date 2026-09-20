@@ -51,6 +51,10 @@ python3 skills/codey-deploy/scripts/deploy.py --workspace /home/zhn/g/codey \
 Portal-only 不 SSH、枚举或探测节点，不检查 Workspace/Usage、节点进程或本机 `4141`，
 不发模型请求。节点离线不能阻塞 Portal 发布；不把过去的模型测试算成本轮验收。
 
+Portal-only 的隔离测试遵循标准 `TMPDIR`，并在其中创建新的私有临时目录。
+构建机磁盘繁忙时可指向源码目录之外、允许执行程序的用户临时文件系统；
+测试内容、时限与发布门禁不变。Workspace 测试仍使用 `/var/tmp`。
+
 ## 显式旧 SSH 范围
 
 只有用户指定该范围，且目标仍为发布器识别的旧拆分布局时使用：

@@ -2,6 +2,7 @@
 import io
 from contextlib import nullcontext
 import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
@@ -386,6 +387,37 @@ class DeploymentSafety(unittest.TestCase):
                 self.assertNotIn("CODEX_HOME", env)
         directory.assert_called_once_with(prefix="codey-test-", dir="/var/tmp")
         self.assertTrue(worker.job.is_dir())
+
+    def test_portal_test_storage_honors_tmpdir_with_a_new_private_directory(self):
+        from builder import Builder
+        worker = object.__new__(Builder)
+        worker.root = self.root / "checkout"
+        worker.job = worker.root / "artifacts/release"
+        storage = self.root / "temporary-storage"
+        storage.mkdir(mode=0o700)
+        with patch.dict("os.environ", {"TMPDIR": str(storage)}), patch("tempfile.tempdir", None):
+            with worker.test_directory("codey-portal-", use_system_temp=True) as temporary:
+                directory = Path(temporary)
+                self.assertEqual(directory.parent, storage.resolve())
+                self.assertTrue(directory.name.startswith("codey-portal-"))
+                if os.name == "posix":
+                    self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+                    self.assertEqual(directory.stat().st_uid, os.getuid())
+                self.assertFalse(directory.is_relative_to(worker.root))
+            self.assertFalse(directory.exists())
+
+    def test_portal_test_storage_rejects_checkout_and_frozen_source_roots(self):
+        from builder import Builder
+        worker = object.__new__(Builder)
+        worker.root = self.root / "checkout"
+        worker.job = self.root / "release"
+        for root in (worker.root, worker.root / "temporary", worker.job, worker.job / "source/portal/tmp"):
+            with self.subTest(root=root), \
+                    patch("builder.tempfile.gettempdir", return_value=str(root)), \
+                    patch("builder.tempfile.TemporaryDirectory") as directory:
+                with self.assertRaisesRegex(RuntimeError, "outside source worktrees"):
+                    worker.test_directory("codey-portal-", use_system_temp=True)
+                directory.assert_not_called()
 
     def test_portal_full_suite_has_a_bounded_disk_io_budget_without_changing_other_checks(self):
         from builder import Builder

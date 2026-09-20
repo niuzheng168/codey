@@ -170,10 +170,18 @@ class Builder:
         (source / "node_modules").symlink_to(cache / "node_modules", target_is_directory=True)
         return read(cache / "ready.json")["mode"]
 
-    def test_directory(self, prefix):
+    def test_directory(self, prefix, *, use_system_temp=False):
         # /dev is blocked by workspace validation; Git ancestors also affect
-        # skill scope. Use short, isolated paths outside the source worktrees.
-        return tempfile.TemporaryDirectory(prefix=prefix, dir="/var/tmp")
+        # skill scope. Keep Workspace tests in /var/tmp. Portal-only tests may
+        # use the standard TMPDIR to avoid a busy disk, still in a new private
+        # directory outside the checkout and frozen source.
+        root = "/var/tmp"
+        if use_system_temp:
+            root = Path(tempfile.gettempdir()).resolve()
+            require(not any(root.is_relative_to(source.resolve()) for source in (self.root, self.job)),
+                    "Portal test temporary root must stay outside source worktrees")
+            root = str(root)
+        return tempfile.TemporaryDirectory(prefix=prefix, dir=root)
 
     def test_environment(self, temporary):
         # Tests receive no real HOME, provider env, Codex state, or production database.
@@ -421,7 +429,7 @@ class Builder:
         """Portal-only release: no Workspace UI or node package build."""
         provenance = self.production_source()
         verify_source_files(self.root, provenance, self.source)
-        with self.test_directory("codey-portal-") as temporary:
+        with self.test_directory("codey-portal-", use_system_temp=True) as temporary:
             env = {
                 "PATH": os.environ["PATH"], "HOME": temporary, "TMPDIR": temporary,
                 "CI": "true", "NODE_ENV": "test", "NO_COLOR": "1",
