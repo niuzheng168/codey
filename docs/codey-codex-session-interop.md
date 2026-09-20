@@ -74,6 +74,29 @@ opening such an old session explicitly in the App can still be necessary.
 
 ## Scope and remaining limitations
 
+### Native session title synchronization (2026-09-20)
+
+This fix belongs to the node's CloudCLI backend, not Portal or the shared UI.
+Nodes must install the new Codey package; publishing Portal alone cannot change
+their session indexes.
+
+- Automatic Codey titles follow Codex's current native name. A name change is
+  detected even if the thread timestamp is unchanged. The append-only
+  `session_index.jsonl` fallback uses its last record, not its first.
+- Explicit Codey renames are recorded separately as `custom_name_source=user`
+  and survive both native polling and rollout indexing, including concurrent
+  sync writes. App-generated first-message titles are not manual overrides.
+- Index-only renames are watched and refresh existing titles outside the
+  rollout birthtime cursor. A stale index cannot replace a newer native
+  database name. Local archives, removals, provider IDs and recency are retained.
+- Old versions recorded no title provenance. Upgrade preserves their Codex
+  labels in `sessions.legacy_custom_name` before enabling native-name following.
+  Historical manual names cannot be distinguished from stale caches; they can
+  be reapplied using Codey's rename action. Later starts preserve both the
+  backup and new manual-rename flags.
+- Only Codey's metadata database is migrated. Codex storage is read-only; no
+  native rename, thread resume, model request or history rewrite is required.
+
 ### Paused desktop queues and owner delivery (2026-09-20, macOS local time)
 
 The cross-platform queue fallback alone did **not** fix the reported session.
