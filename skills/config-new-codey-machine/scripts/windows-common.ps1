@@ -112,9 +112,9 @@ function Write-CodeyJson {
 
 function Join-CodeyArguments {
     param([AllowEmptyCollection()][string[]]$Values)
-    # CommandLineToArgvW/CRT escaping, not cmd.exe or PowerShell interpolation.
+    # Direct CRT arguments may contain quoted CR/LF (e.g. Node -e); only NUL cannot be represented.
     return (($Values | ForEach-Object {
-        if ($_ -match '[\x00\r\n]') { throw 'Invalid native argument.' }
+        if ($_.Contains([string][char]0)) { throw 'Invalid native argument.' }
         '"' + [regex]::Replace([regex]::Replace($_, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1') + '"'
     }) -join ' ')
 }
