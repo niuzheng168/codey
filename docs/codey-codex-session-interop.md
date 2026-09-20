@@ -152,6 +152,30 @@ Validation of CloudCLI `3c05a02`:
   latest remote `main` (`854c976`); Copilot API remains at the freshly verified
   remote `dev` tip `3c90b6f`. Runtime dependency specifications are unchanged.
 
+#### Authorized local installation and follow-up
+
+The macOS development package built from parent `b73bd15` / CloudCLI `3c05a02`
+was installed using the existing CLI's verified offline update. Archive SHA-256:
+`96a033c83a8a63e19cbe5547bdba20ddfd4f2a72d7c9374c9aab6dec6fe6adfe`.
+The original settings, identity, credentials, TLS, native tools and prior
+release were retained; no npm release or other-node rollout was performed.
+
+The first automatic post-check stopped on tunnel readiness after the package
+switch had already succeeded. Follow-up inspection passed all 16 doctor
+checks without repeating the update. At 09:40 CST on 2026-09-20, the **actually
+installed** Codey WebSocket returned a genuine context-aware nonce response in
+the original conversation, with successful completion, exactly one persisted
+matching turn and an empty native queue.
+
+By that time the desktop had released this idle thread's writer, so this final
+installed test exercised ordinary native continuation. The two earlier live
+turns covered the interrupted, desktop-held owner path. A test must not require
+an idle writer lock to remain present forever, or make an unused peer-discovery
+probe a prerequisite for the gateway's own capability selection. Preliminary
+follow-up probes stopped before submitting input; no model prompt was replayed.
+The private installation and conversation receipts are referenced by
+`artifacts/live-native-queue-goal-path`.
+
 ### Cross-platform native continuation (2026-09-19)
 
 The reported macOS desktop session used paginated storage and had a live
