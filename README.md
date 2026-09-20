@@ -35,7 +35,7 @@ Mac 安装和 LaunchAgent worker 改为 Node，正常安装无 Python 前置依�
 
 ```sh
 npm run codey:build -- --output artifacts/codey-npm
-npm install --global ./artifacts/codey-npm/codey-0.1.1.tgz
+npm install --global ./artifacts/codey-npm/codey-0.2.0.tgz
 codey --version
 codey start --foreground
 ```
@@ -60,7 +60,7 @@ Linux 的独立 npm 包和 `install-codey-linux.sh` 入口仍保留，不必解�
 将两者放在同一目录，确认目标机名后运行 `bash install-codey-linux.sh --expected-computer "实际机名"`；也可以从仓库执行：
 
 ```sh
-bash scripts/linux/install-codey.sh --package ./codey-0.1.1.tgz --expected-computer "$(hostname)"
+bash scripts/linux/install-codey.sh --package ./codey-0.2.0.tgz --expected-computer "$(hostname)"
 ```
 
 一键脚本先用 npm 在新的私有 prefix 安装，再由包内私有模块调用公共安装流程，不再经过 `codey setup`。

@@ -20,6 +20,8 @@ test("Codey has one application identity, executable and lock, not dependencies 
   assert.deepEqual(pkg.bin, { codey: "bin/codey.mjs" });
   assert.equal(lock.name, pkg.name);
   assert.equal(lock.version, pkg.version);
+  assert.equal(lock.packages[""].name, pkg.name);
+  assert.equal(lock.packages[""].version, pkg.version);
   const sources = await Promise.all(["cloudcli", "copilot-api"].map(name =>
     json(new URL(`../${name}/package.json`, import.meta.url))));
   for (const group of ["dependencies", "optionalDependencies"]) {
