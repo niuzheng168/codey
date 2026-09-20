@@ -97,7 +97,99 @@ their session indexes.
 - Only Codey's metadata database is migrated. Codex storage is read-only; no
   native rename, thread resume, model request or history rewrite is required.
 
+### Live desktop-owner controls (2026-09-20)
+
+The earlier owner-delivery repair enabled continuation but not in-flight
+controls: `desktopQueue` explicitly disabled steering and Stop, and private
+stdio connections were excluded from `prepareObservation`. In addition,
+resuming an idle desktop thread before discovering its UI owner could acquire
+a second process's writer, blocking desktop input during a Codey continuation.
+
+The peer path now:
+
+- Discovers an existing desktop owner **before** a private `thread/resume` for
+  ordinary messages. Idle continuation stays on that owner, preserving its
+  session ID, model, permissions and approvals. No locks or metadata are edited.
+- Attaches to a live desktop turn on Codey subscription without sending a
+  prompt or acquiring a writer. An owner-pinned, versioned IPC snapshot supplies
+  the active turn; another process's disk `interrupted` status is not evidence
+  that the desktop is idle.
+- Supports native `thread-follower-steer-turn` and explicit, run-bound
+  `thread-follower-interrupt-turn`. The owner is not transferred. Disconnects,
+  automatic cleanup and generic cancellation do not stop desktop work.
+- Enables the existing durable Codey queue/atomic queued-card promotion via
+  the same negotiated gateway capabilities used on Linux. Desktop-origin
+  inputs and native steering receipts are also streamed back to Codey with
+  their original identities and ordered transcript positions.
+- Keeps the old native queue fallback for owners without a control channel.
+  A verified peer uses fresh live state rather than a delayed disk snapshot
+  when deciding whether its paused/idle session needs an explicit start.
+
+Snapshots are scoped to the discovered owner, host and conversation. Canonical
+history uses its ordered current tail, never an old unfinished turn or an
+unordered entity map. Stale snapshot revisions are ignored. Owner discovery
+allows the native router's full 10-second discovery window; the former
+8-second timeout could reject a legitimate `no-client-found` result.
+
+Before steering, Codey checks the owner's active turn and validates the native
+returned turn ID. The desktop's version-1 steering protocol itself selects
+its active turn (unlike direct daemon RPC, it does not accept a caller-supplied
+`expectedTurnId`). If a turn rolls over during delivery or the receipt is
+missing/wrong, Codey reports **unconfirmed**, keeps the queued draft held for
+review and never retries or automatically queues the same input. Stop uses
+the native version-4 expected-turn guard.
+
+This is capability-based, not a blanket OS promise: an undiscoverable desktop,
+an incompatible peer protocol, legacy exec-only execution, and native goal/
+mode changes do not acquire these peer controls. New Codey-only threads with
+no desktop owner retain the native execution path; this change does not
+advertise a fabricated desktop owner for their private writer.
+
+Validation adds isolated peer/runtime regressions and opt-in tests with two
+real native processes, an IPC owner fixture and a localhost model. They cover
+paginated and legacy histories, interleaved Codey/desktop steering, desktop
+queue consumption during a Codey continuation, and explicit Stop. These tests
+do not submit prompts into an existing user conversation or constitute a
+real-desktop UI end-to-end test. Applying the repair requires a node backend
+update; publishing the shared UI alone cannot change the runtime.
+
+Local validation of this development repair:
+
+- 596 backend tests passed; 13 opt-in/platform/fixture cases were skipped.
+- All 673 frontend tests passed.
+- All six opt-in native interoperability cases passed with desktop fixture
+  `0.155.0-alpha.9.2` and reader `0.152.0`, including the two new bidirectional
+  peer/queue/Stop cases.
+- Production build and frontend/backend type checks passed. Lint reported
+  zero errors and the existing 129 warnings; bundle-size warnings remain.
+- The final backend run used a clean environment, private `HOME`, short
+  `TMPDIR=/var/tmp` socket paths and two file workers, without concurrent
+  frontend builds. Earlier inherited runtime settings, macOS socket-path
+  truncation and parallel-build contention caused fixture failures; those
+  environments were corrected, not the assertions or deadlines.
+- No running node or desktop was restarted. This conversation is itself
+  inside the managed Codey/Codex process tree, so the macOS updater's
+  external-terminal requirement must be respected.
+
+The local installable candidate is based on the **installed** `0.2.0` source
+revision `91c3ca3`, not the worktree's older `0.1.18` package declaration.
+Detached, private worktrees preserve the installed Windows-update fix and the
+unchanged dependency lock; the user's checked-out revisions were not reset.
+The original `0.1.18` packaging attempt was not offered for installation.
+
+The compatible archive and a checksum-pinned `install.zsh` are under the ignored
+`artifacts/mac-peer-controls-0.2.0.189rzc/` directory. Archive SHA-256:
+`d52b90abc5b7e5af971815f94b2b2a0ce0d34fe1d07fedbeec73bbafe3792c4f`.
+The installed updater's `--check --offline` validation passed, confirming an
+in-place `0.2.0` patch with existing dependencies and no downloads. This is a
+local development artifact, not an npm release or an already-applied update.
+Run its installer from an external macOS terminal after current Codey work
+finishes; do not bypass the internal-terminal guard to restart this session.
+
 ### Paused desktop queues and owner delivery (2026-09-20, macOS local time)
+
+The start-only behavior in this historical repair is extended by the live
+controls described above.
 
 The cross-platform queue fallback alone did **not** fix the reported session.
 Its previous turn had been explicitly interrupted. The native owner retained
