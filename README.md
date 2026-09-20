@@ -49,6 +49,8 @@ registry，不要从公共源安装同名包。构建不会自动发布或部署
 macOS arm64/x64 均已完成平台验收，使用同一份跨平台发行包；安装与安全边界见 Skill。
 
 “账号与节点 → 添加节点”只保留一个 Codey 安装 Skill 下载入口，不再让用户选择系统。
+一键安装包统一命名为 `codey-<version>.zip`（例如 `codey-0.2.0.zip`），
+与运行/升级包 `codey-<version>.tgz` 使用同一个 Codey 版本号。
 Skill 内是同一份 Linux x64、Windows x64、macOS arm64/x64 npm 包；原生安装支持范围随发行包明确列出。
 旧的 Linux 专用发行版不会被当作共用安装包开放此入口。
 已有节点在“安装包与本机更新”下载 `.tgz`，按页面提供的 SHA-256 命令先检查，

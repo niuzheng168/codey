@@ -40,6 +40,15 @@ export function machineReleaseId(manifest) {
   return `machine-${manifest.package.sha256.slice(0, 16)}`;
 }
 
+function machineSkillFilename(manifest) {
+  if (manifest.codey === undefined) return `${MACHINE_SKILL}.zip`;
+  const version = manifest.codey?.version;
+  if (typeof version !== "string" || !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(version)) {
+    throw new Error("Invalid Codey version for installer archive");
+  }
+  return `codey-${version}.zip`;
+}
+
 async function releasedFile(release, item, expectedName, magic, maximum) {
   if (item?.file !== expectedName || !Number.isSafeInteger(item?.size) ||
       item.size <= 0 || item.size > maximum || !/^[a-f0-9]{64}$/.test(item?.sha256 ?? "")) {
@@ -82,6 +91,7 @@ export async function loadMachineBundle(root, platformId = "linux-x64") {
   }
   const manifest = JSON.parse(raw);
   const packageInfo = manifest.package;
+  const packageFilename = machineSkillFilename(manifest);
   if (manifest.schema !== 2 || manifest.kind !== "codey-machine-skill" ||
       manifest.registrationSchema !== 2 || manifest.platform !== platformId ||
       !/^machine-[a-f0-9]{16}$/.test(manifest.releaseId ?? "") ||
@@ -90,7 +100,7 @@ export async function loadMachineBundle(root, platformId = "linux-x64") {
       JSON.stringify(manifest.downloadedOfficialRuntimes) !== JSON.stringify(["node", "codex", "devtunnel"]) ||
       !/^\d+\.\d+\.\d+$/.test(manifest.node ?? "") ||
       typeof manifest.cloudcli?.version !== "string" || typeof manifest.copilotApi?.version !== "string" ||
-      packageInfo?.file !== `${MACHINE_SKILL}.zip` ||
+      ![packageFilename, `${MACHINE_SKILL}.zip`].includes(packageInfo?.file) ||
       !Number.isInteger(packageInfo?.size) || packageInfo.size <= 0 || packageInfo.size > 1536 * 1024 * 1024 ||
       !/^[a-f0-9]{64}$/.test(packageInfo?.sha256 ?? "")) {
     throw new Error("Invalid machine bundle manifest");
@@ -250,9 +260,13 @@ export class MachineSetup {
     if (!packageInfo) throw requestError("尚未发布支持直接 npm 安装的 Codey 包和 Linux 一键脚本，请先更新机器发行版", 503);
     const contentType = format === "npm" ? "application/gzip"
       : format === "installer" ? "text/x-shellscript; charset=utf-8" : "application/zip";
+    // Legacy releases keep their immutable storage name; only the download
+    // name changes to match the validated Codey version.
+    const filename = format === "npm" || format === "installer"
+      ? packageInfo.file : machineSkillFilename(selected.manifest);
     res.writeHead(200, {
       "content-type": contentType, "content-length": packageInfo.size,
-      "content-disposition": `attachment; filename="${packageInfo.file}"`,
+      "content-disposition": `attachment; filename="${filename}"`,
       "cache-control": "private, no-store", vary: "Cookie", "x-content-type-options": "nosniff",
       "referrer-policy": "no-referrer",
     });

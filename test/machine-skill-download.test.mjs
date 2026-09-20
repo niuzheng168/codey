@@ -7,7 +7,7 @@ import { LEGACY_NODE_CONNECTIONS_ENABLED } from "../public/portal-features.js";
 
 const source = (await readFile(new URL("../public/settings.js", import.meta.url), "utf8")).replace(/^import .*;\r?\n/gm, "");
 const nodeId = `n-${"a".repeat(24)}`;
-const filename = "config-new-codey-machine.zip";
+const filename = "codey-0.1.1.zip";
 const endpoint = "/api/settings/machines/shared-skill";
 const sharedSetup = {
   sharedSkillAvailable: true, sharedSkillBytes: 4194304, codey: "0.1.1",
@@ -171,6 +171,20 @@ test("the same static package can be downloaded repeatedly without refreshing ma
   assert.equal(p.settingsRequests, 1);
 });
 
+test("the browser derives installer filenames from each published Codey version", async () => {
+  for (const version of ["0.2.0", "0.3.0-rc.1"]) {
+    const name = `codey-${version}.zip`;
+    const p = await page({
+      machineSetup: { ...sharedSetup, enabled: true, codey: version },
+      download: async () => archiveResponse({ name }),
+    });
+    await p.submit().finished;
+    assert.deepEqual(p.downloads, [{ href: "blob:test-download", download: name }]);
+    assert.match(p.elements.get("#machine-download-message").textContent, new RegExp(name.replaceAll(".", "\\.")));
+    assert.equal(p.settingsRequests, 1);
+  }
+});
+
 test("download failures stay on the settings page, show the error and permit retry without identity refresh", async () => {
   for (const [name, download, expected] of [
     ["origin", async () => new Response(JSON.stringify({ error: "Cross-origin operations are not allowed" }), { status: 403 }), /Cross-origin/],
@@ -179,6 +193,9 @@ test("download failures stay on the settings page, show the error and permit ret
     ["network", async () => { throw new Error("Network interrupted"); }, /Network interrupted/],
     ["wrong type", async () => archiveResponse({ type: "text/html", body: "<html>login</html>" }), /安装 Skill/],
     ["platform-specific filename", async () => archiveResponse({ name: "config-new-codey-machine-windows.zip" }), /文件名/],
+    ["unversioned filename", async () => archiveResponse({ name: "config-new-codey-machine.zip" }), /文件名/],
+    ["changed version", async () => archiveResponse({ name: "codey-0.2.0.zip" }), /发行包已变化/],
+    ["unsafe filename", async () => archiveResponse({ name: "../codey-0.1.1.zip" }), /文件名/],
     ["bare npm package", async () => archiveResponse({ type: "application/gzip", name: "codey-0.1.1.tgz" }), /安装 Skill/],
     ["empty", async () => archiveResponse({ body: "" }), /不完整|空/],
     ["truncated", async () => archiveResponse({ length: 1000 }), /不完整/],
@@ -253,6 +270,9 @@ test("old or incomplete releases cannot enable the shared entry or send a hidden
     { enabled: true, npmAvailable: true, npmFile: "codey-0.1.0.tgz" },
     { ...sharedSetup, enabled: true, runtimePlatforms: ["linux-x64"] },
     { ...sharedSetup, enabled: true, sharedSkillAvailable: false },
+    ...[undefined, null, ["0.1.1"], "latest", "0.1.1/other", "0.1.1\r\n"].map(codey => ({
+      ...sharedSetup, enabled: true, codey,
+    })),
   ]) {
     const p = await page({ machineSetup });
     assert.equal(p.button.disabled, true);

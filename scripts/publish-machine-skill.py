@@ -15,11 +15,13 @@ import tempfile
 import uuid
 import zipfile
 from urllib.parse import urlsplit
-from codey_package import MACHINE_SKILL_FILES, NPM_ONBOARDING_FILES, RUNTIME_PLATFORMS, inspect_npm_package, release_source
+from codey_package import (
+    MACHINE_SKILL_FILES, NPM_ONBOARDING_FILES, RUNTIME_PLATFORMS,
+    inspect_npm_package, machine_skill_filename, release_source,
+)
 
 MARKER = b'{"schema":1,"kind":"codey-machine-skill-store"}\n'
 RELEASE = re.compile(r"machine-[a-f0-9]{16}")
-PACKAGE_NAME = "config-new-codey-machine.zip"
 MAX_PACKAGE = 1536 * 1024 * 1024
 
 
@@ -192,7 +194,7 @@ def inspect_package(file):
         "releaseSource": manifest.get("releaseSource"),
         "bundledRuntimes": ["cloudcli", "copilot-api"],
         "downloadedOfficialRuntimes": ["node", "codex", "devtunnel"],
-        "package": {"file": PACKAGE_NAME, "size": size, "sha256": package_sha},
+        "package": {"file": machine_skill_filename(version), "size": size, "sha256": package_sha},
     }
     return file, outer, (json.dumps(outer, indent=2) + "\n").encode()
 
@@ -329,6 +331,9 @@ def publish(store, package_file, manifest, manifest_raw, expected_current):
     expected = None if expected_current == "none" else expected_current
     if expected is not None and not RELEASE.fullmatch(expected):
         raise PublishError("INVALID_EXPECTED_CURRENT")
+    package = manifest["package"]
+    if package["file"] != machine_skill_filename(manifest["codey"]["version"]):
+        raise PublishError("INVALID_PACKAGE_NAME")
     store.ensure_root()
     marker = store.read(".codey-machine-skill-store.json", 1024)
     if marker is None:
@@ -352,10 +357,15 @@ def publish(store, package_file, manifest, manifest_raw, expected_current):
         if (previous["releaseId"] if previous else None) != expected:
             raise PublishError("ACTIVE_RELEASE_CHANGED")
         release_root = "releases/" + manifest["releaseId"]
+        manifest_name = release_root + "/manifest.json"
+        existing = store.read(manifest_name, 16384)
+        # A renamed copy has the same content-addressed release ID. Never add
+        # differently named files to an existing immutable release.
+        if existing is not None and existing != manifest_raw:
+            raise PublishError("IMMUTABLE_MANIFEST_COLLISION")
         store.mkdir(release_root)
-        package = manifest["package"]
         store.write_file_new(
-            release_root + "/" + PACKAGE_NAME,
+            release_root + "/" + package["file"],
             package_file, package["size"], package["sha256"],
         )
         if manifest.get("npmSetup") == 1:
@@ -373,12 +383,8 @@ def publish(store, package_file, manifest, manifest_raw, expected_current):
                     extracted = Path(extraction_dir) / item["file"]
                     extracted.write_bytes(body)
                     store.write_file_new(release_root + "/" + item["file"], extracted, item["size"], item["sha256"])
-        manifest_name = release_root + "/manifest.json"
-        existing = store.read(manifest_name, 16384)
         if existing is None:
             store.write_bytes_new(manifest_name, manifest_raw)
-        elif existing != manifest_raw:
-            raise PublishError("IMMUTABLE_MANIFEST_COLLISION")
         if store.read("active.json", 1024) != previous_raw:
             raise PublishError("ACTIVE_DESCRIPTOR_CHANGED_DURING_UPLOAD")
         descriptor = {

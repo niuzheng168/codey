@@ -42,6 +42,12 @@ MAX_PACKAGE_BYTES = 8 * 1024 * 1024
 TEXT_SUFFIXES = {".js", ".mjs", ".cjs", ".json", ".map", ".md", ".html", ".css", ".svg", ".txt", ".toml", ".sh", ".ps1"}
 
 
+def machine_skill_filename(version):
+    if not isinstance(version, str) or not release_source.VERSION.fullmatch(version):
+        raise RuntimeError("Invalid Codey version for installer archive")
+    return f"codey-{version}.zip"
+
+
 def validate_runtime_lock(package, lock):
     if (lock.get("name") != "codey" or lock.get("version") != package["version"]
             or lock.get("lockfileVersion") != 3 or "os" in package or "cpu" in package):

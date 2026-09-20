@@ -13,13 +13,13 @@ const machineDownloadMessage = document.querySelector("#machine-download-message
 const machineSkillButton = document.querySelector("#download-machine-skill");
 const machinePackageButton = document.querySelector("#download-machine-package");
 const refreshNodeButton = document.querySelector("#refresh-node-status");
-const machineSkillFilename = "config-new-codey-machine.zip";
 const platformLabels = {
   "linux-x64": "Linux x64", "windows-x64": "Windows x64",
   "macos-arm64": "macOS Apple Silicon", "macos-x64": "macOS Intel",
 };
 let machineSkillDownloading = false;
 let machineSkillAvailable = false;
+let machineSkillFilename = null;
 let runtimePackage = null;
 let runtimePlatforms = "";
 let nodeStatusLoading = false;
@@ -138,21 +138,24 @@ function updateMachineSkillButtons() {
 }
 
 function renderPublishedPackage(setup) {
+  const version = typeof setup?.codey === "string" && /^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/i.test(setup.codey)
+    ? setup.codey : null;
+  machineSkillFilename = version ? `codey-${version}.zip` : null;
   runtimePlatforms = (Array.isArray(setup?.runtimePlatforms) ? setup.runtimePlatforms : [])
     .filter(platform => Object.hasOwn(platformLabels, platform)).map(platform => platformLabels[platform]).join(" / ");
-  machineSkillAvailable = Boolean(setup?.enabled && setup.sharedSkillAvailable &&
+  machineSkillAvailable = Boolean(machineSkillFilename && setup?.enabled && setup.sharedSkillAvailable &&
     Array.isArray(setup.runtimePlatforms) &&
     ["linux-x64", "windows-x64"].every(platform => setup.runtimePlatforms.includes(platform)));
   runtimePackage = setup?.enabled && setup.npmAvailable &&
     /^codey-\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?\.tgz$/i.test(setup.npmFile ?? "") &&
-    setup.npmFile === `codey-${setup.codey}.tgz` &&
+    setup.npmFile === `codey-${version}.tgz` &&
     /^[a-f0-9]{64}$/.test(setup.npmSha256 ?? "")
     ? { filename: setup.npmFile, sha256: setup.npmSha256 } : null;
   document.querySelector("#machine-package-status").textContent = machineSkillAvailable
-    ? `Codey ${setup.codey}（统一 npm 包） · ${runtimePlatforms} · Skill 约 ${Math.ceil(setup.sharedSkillBytes / 1024 / 1024)} MB`
+    ? `Codey ${version}（统一 npm 包） · ${runtimePlatforms} · Skill 约 ${Math.ceil(setup.sharedSkillBytes / 1024 / 1024)} MB`
     : `Codey 共用安装 Skill 暂不可用。${setup?.reason || "请先发布完整跨平台安装包，不会以旧的 Linux 专用包代替。"}`;
-  document.querySelector("#published-codey-version").textContent = setup?.enabled && setup.codey
-    ? `已发布 Codey ${setup.codey}` : "暂无可用发行包";
+  document.querySelector("#published-codey-version").textContent = setup?.enabled && version
+    ? `已发布 Codey ${version}` : "暂无可用发行包";
   document.querySelector("#published-codey-platforms").textContent = runtimePlatforms;
   document.querySelector("#machine-native-status").textContent = setup?.enabled
     ? `完整节点安装：${(Array.isArray(setup.managedInstallPlatforms) ? setup.managedInstallPlatforms : ["linux-x64"])
@@ -396,7 +399,7 @@ async function downloadMachineArtifact(event) {
   machineSkillDownloading = true;
   updateMachineSkillButtons();
   const contentType = updating ? "application/gzip" : "application/zip";
-  report(`正在下载 ${updating ? filename : "Codey 安装 Skill"}。文件不含节点凭据，${runtimePlatforms} 共用。`);
+  report(`正在下载 ${filename}。文件不含节点凭据，${runtimePlatforms} 共用。`);
   try {
     // Native POST navigation under no-referrer can have an opaque Origin.
     // Keep strict server-side CSRF checks and limit this request to our origin.

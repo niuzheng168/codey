@@ -67,6 +67,14 @@ class MemoryStore:
 
 
 class BuildHostTests(unittest.TestCase):
+    def test_installer_archive_names_use_only_valid_codey_versions(self):
+        for version in ("0.2.0", "12.34.56", "0.3.0-rc.1"):
+            with self.subTest(version=version):
+                self.assertEqual(package.machine_skill_filename(version), f"codey-{version}.zip")
+        for version in (None, ["0.2.0"], "", "latest", "0.2", "../0.2.0", "0.2.0/other", "0.2.0\r\n"):
+            with self.subTest(version=version), self.assertRaisesRegex(RuntimeError, "Invalid Codey version"):
+                package.machine_skill_filename(version)
+
     def test_mac_experiments_cannot_become_production_builds(self):
         for system, machine in (("Darwin", "arm64"), ("Darwin", "x86_64")):
             with patch.object(package.platform, "system", return_value=system), \
@@ -139,8 +147,9 @@ class CodeyPackageTests(unittest.TestCase):
             "codey": package.inspect_npm_package(self.file), "artifact": self.artifact,
             "releaseSource": self.release_source,
         }
-        bundle.assemble_bundle(self.root, built, "https://codey.example.test")
-        return self.root / "config-new-codey-machine.zip"
+        result = bundle.assemble_bundle(self.root, built, "https://codey.example.test")
+        self.assertEqual(result["package"]["file"], f"codey-{self.version}.zip")
+        return self.root / result["package"]["file"]
 
     def rewritten(self, transform):
         with tarfile.open(self.file, "r:gz") as archive:
@@ -299,6 +308,9 @@ class CodeyPackageTests(unittest.TestCase):
     def test_machine_bundle_and_publisher_use_the_npm_package_without_changing_portal_outer_schema(self):
         file = self.machine_bundle()
         _, outer, raw = publisher.inspect_package(file)
+        self.assertEqual(file.name, f"codey-{self.version}.zip")
+        self.assertEqual(outer["package"]["file"], file.name)
+        self.assertFalse((self.root / "config-new-codey-machine.zip").exists())
         self.assertEqual(outer["schema"], 2)
         self.assertEqual(outer["runtimePackage"]["name"], "codey")
         self.assertEqual(outer["runtimePackage"]["file"], self.artifact["file"])
@@ -333,6 +345,14 @@ class CodeyPackageTests(unittest.TestCase):
             "--expected-current", "none",
         ], check=True, capture_output=True, text=True)
         self.assertEqual(json.loads(result.stdout)["azureRequests"], 0)
+
+    def test_publisher_derives_archive_name_from_validated_contents_not_input_filename(self):
+        file = self.machine_bundle()
+        renamed = file.rename(self.root / "downloaded-copy.zip")
+        inspected, manifest, _ = publisher.inspect_package(renamed)
+        self.assertEqual(inspected, renamed)
+        self.assertEqual(manifest["package"]["file"], f"codey-{self.version}.zip")
+        self.assertEqual(manifest["package"]["sha256"], package.metadata(renamed)["sha256"])
 
     def test_complete_skill_preserves_guidance_and_legacy_npm_entrypoint(self):
         file = self.machine_bundle()
@@ -381,6 +401,9 @@ class CodeyPackageTests(unittest.TestCase):
         store = MemoryStore()
         publisher.publish(store, file, manifest, raw, "none")
         release = "releases/" + manifest["releaseId"] + "/"
+        self.assertEqual(store.files[release + f"codey-{self.version}.zip"], file.read_bytes())
+        self.assertNotIn(release + "config-new-codey-machine.zip", store.files)
+        self.assertLess(store.writes.index(release + f"codey-{self.version}.zip"), store.writes.index("active.json"))
         self.assertEqual(store.files[release + self.artifact["file"]], self.file.read_bytes())
         self.assertEqual(store.files[release + "install-codey-linux.sh"], (self.root / "install-codey-linux.sh").read_bytes())
         self.assertEqual(store.files[release + "install-codey.mjs"], (self.root / "install-codey.mjs").read_bytes())
@@ -390,12 +413,48 @@ class CodeyPackageTests(unittest.TestCase):
         self.assertEqual(json.loads(store.files["active.json"])["releaseId"], manifest["releaseId"])
         self.assertEqual(len([name for name in store.writes if name.startswith(".active-")]), 1)
         self.assertNotIn("publish.lock", store.directories)
-        for failed_file in ("install-codey-linux.sh", "install-codey.mjs"):
+        for failed_file in (f"codey-{self.version}.zip", "install-codey-linux.sh", "install-codey.mjs"):
             failed = MemoryStore(fail_on=failed_file)
             with self.subTest(file=failed_file), self.assertRaises(OSError):
                 publisher.publish(failed, file, manifest, raw, "none")
             self.assertNotIn("active.json", failed.files)
             self.assertNotIn("publish.lock", failed.directories)
+
+    def test_renaming_an_existing_release_cannot_mutate_its_files_or_active_pointer(self):
+        file = self.machine_bundle()
+        _, manifest, raw = publisher.inspect_package(file)
+        legacy = {**manifest, "package": {**manifest["package"], "file": "config-new-codey-machine.zip"}}
+        legacy_raw = (json.dumps(legacy, indent=2) + "\n").encode()
+        release = "releases/" + manifest["releaseId"]
+        store = MemoryStore()
+        store.directories.add(release)
+        store.files.update({
+            ".codey-machine-skill-store.json": publisher.MARKER,
+            release + "/manifest.json": legacy_raw,
+            release + "/config-new-codey-machine.zip": file.read_bytes(),
+            "active.json": (json.dumps({
+                "schema": 1, "releaseId": manifest["releaseId"],
+                "manifestSha256": hashlib.sha256(legacy_raw).hexdigest(),
+            }) + "\n").encode(),
+        })
+        before = dict(store.files)
+        with self.assertRaisesRegex(publisher.PublishError, "IMMUTABLE_MANIFEST_COLLISION"):
+            publisher.publish(store, file, manifest, raw, manifest["releaseId"])
+        self.assertEqual(store.files, before)
+        self.assertEqual(store.directories, {release})
+        self.assertFalse(any(name.startswith(release + "/") for name in store.writes))
+
+    def test_publisher_rejects_noncanonical_archive_names_before_store_access(self):
+        file = self.machine_bundle()
+        _, manifest, raw = publisher.inspect_package(file)
+        for filename in ("config-new-codey-machine.zip", "codey-99.0.0.zip", "../codey.zip"):
+            store = MemoryStore()
+            with self.subTest(filename=filename), self.assertRaisesRegex(publisher.PublishError, "INVALID_PACKAGE_NAME"):
+                publisher.publish(store, file, {
+                    **manifest, "package": {**manifest["package"], "file": filename},
+                }, raw, "none")
+            self.assertEqual(store.files, {})
+            self.assertEqual(store.directories, set())
 
     def test_production_machine_publication_refuses_missing_or_dirty_main_proof_before_store_access(self):
         file = self.machine_bundle()

@@ -9,12 +9,16 @@ import shlex
 import urllib.parse
 import zipfile
 
-from codey_package import ROOT, MACHINE_SKILL_FILES, RUNTIME_PLATFORMS, build_package, metadata, write_runtime_installer
+from codey_package import (
+    ROOT, MACHINE_SKILL_FILES, RUNTIME_PLATFORMS, build_package,
+    machine_skill_filename, metadata, write_runtime_installer,
+)
 
 
 def assemble_bundle(output, built, portal_origin, source_root=None):
     source_root = Path(source_root or ROOT)
     output = Path(output).resolve()
+    package_file = output / machine_skill_filename(built["codey"]["version"])
     work = output / ".build-machine"
     work.mkdir()
     artifacts = [built["artifact"]]
@@ -65,7 +69,6 @@ def assemble_bundle(output, built, portal_origin, source_root=None):
         for name in [*[item["file"] for item in artifacts], "manifest.json", "setup.json"]
     ]
     (assets / "SHA256SUMS").write_text("\n".join(checksums) + "\n")
-    package_file = output / "config-new-codey-machine.zip"
     with zipfile.ZipFile(package_file, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
         for file in sorted(package_root.rglob("*")):
             if not file.is_file():

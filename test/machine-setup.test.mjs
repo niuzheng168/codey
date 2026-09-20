@@ -42,13 +42,14 @@ async function temporary(t) {
   return root;
 }
 
-async function bundle(root, platform = "linux-x64", { shared = false, managed = false } = {}) {
+async function bundle(root, platform = "linux-x64", {
+  shared = false, managed = false, legacyName = false, version = shared ? "0.1.1" : "0.1.0",
+} = {}) {
   assert.equal(platform, "linux-x64");
   await mkdir(root, { recursive: true });
   const npmBytes = gzipSync("fixture npm application");
   const installerBytes = Buffer.from("#!/usr/bin/env bash\n# fixture npm launcher\n");
   const metadata = (file, body) => ({ file, size: body.length, sha256: createHash("sha256").update(body).digest("hex") });
-  const version = shared ? "0.1.1" : "0.1.0";
   const npmMetadata = metadata(`codey-${version}.tgz`, npmBytes);
   const runtimeInstallerBytes = Buffer.from(`#!/usr/bin/env node\nconst DEFAULT_PACKAGE_FILE = "${npmMetadata.file}";\nconst DEFAULT_PACKAGE_SHA256 = "${npmMetadata.sha256}";\n`);
   const entries = [
@@ -79,7 +80,8 @@ async function bundle(root, platform = "linux-x64", { shared = false, managed = 
     bundledRuntimes: ["cloudcli", "copilot-api"],
     downloadedOfficialRuntimes: ["node", "codex", "devtunnel"],
     package: {
-      file: "config-new-codey-machine.zip", size: packageBytes.length, sha256: packageSha256,
+      file: legacyName ? "config-new-codey-machine.zip" : `codey-${version}.zip`,
+      size: packageBytes.length, sha256: packageSha256,
     },
   };
   manifest.releaseId = machineReleaseId(manifest);
@@ -164,7 +166,7 @@ async function machineFile(root, nodeId, options = {}) {
   };
 }
 
-async function fixture(t, { shared = false, managed = false } = {}) {
+async function fixture(t, { shared = false, managed = false, legacyName = false, version } = {}) {
   const root = await temporary(t);
   const master = randomBytes(32).toString("base64url");
   const ticketMaster = randomBytes(32).toString("base64url");
@@ -183,7 +185,7 @@ async function fixture(t, { shared = false, managed = false } = {}) {
   const admin = (await auth.login("admin", password)).cookie.split(";")[0];
   const cookie = (await auth.login("member", password)).cookie.split(";")[0];
   const bundleRoot = path.join(root, "bundle");
-  const manifest = await bundle(bundleRoot, "linux-x64", { shared, managed });
+  const manifest = await bundle(bundleRoot, "linux-x64", { shared, managed, legacyName, version });
   const data = new NodeDataGateway({ nodes: [], signingKey: ticketMaster, ca: "legacy-test-ca" }, { nodePolicy: policy });
   const workspace = new CloudCliGateway({ nodes: [], ssoMaster: master, ca: "legacy-test-ca" }, { sessionAuthenticator: auth, nodePolicy: policy });
   const probes = [];
@@ -222,7 +224,7 @@ test("the independently published Linux Skill streams unchanged and activates on
   f.machineSetup.network = null;
   const response = await f.request("/api/settings/machines/skill", { method: "POST" });
   assert.equal(response.status, 200);
-  assert.equal(response.headers.get("content-disposition"), 'attachment; filename="config-new-codey-machine.zip"');
+  assert.equal(response.headers.get("content-disposition"), 'attachment; filename="codey-0.1.0.zip"');
   const bytes = Buffer.from(await response.arrayBuffer());
   assert.deepEqual(bytes, f.manifest.packageBytes);
   const files = unzip(bytes);
@@ -342,7 +344,7 @@ test("one authenticated shared Skill endpoint returns identical bytes without a 
     const response = await f.request(endpoint, { method: "POST", user, headers: { "user-agent": agent } });
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("content-type"), "application/zip");
-    assert.equal(response.headers.get("content-disposition"), 'attachment; filename="config-new-codey-machine.zip"');
+    assert.equal(response.headers.get("content-disposition"), 'attachment; filename="codey-0.1.1.zip"');
     assert.equal(response.headers.get("cache-control"), "private, no-store");
     assert.equal(response.headers.get("vary"), "Cookie");
     const bytes = Buffer.from(await response.arrayBuffer());
@@ -362,6 +364,78 @@ test("one authenticated shared Skill endpoint returns identical bytes without a 
   assert.equal((await f.policy.pendingMachines(f.member.id)).length, 0);
   assert.equal(f.probes.length, 0);
   assert.equal(f.tunnelProbes.length, 0);
+});
+
+test("shared archive filenames follow the Codey version, including prereleases", async t => {
+  for (const version of ["0.2.0", "0.3.0-rc.1"]) {
+    const f = await fixture(t, { shared: true, managed: true, version });
+    const selected = await loadMachineBundle(f.bundleRoot);
+    assert.equal(selected.package.file, `codey-${version}.zip`);
+    assert.equal(path.basename(selected.package.path), selected.package.file);
+    const response = await f.request("/api/settings/machines/shared-skill", { method: "POST" });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-disposition"), `attachment; filename="codey-${version}.zip"`);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), f.manifest.packageBytes);
+  }
+});
+
+test("legacy archive storage stays immutable while downloads use the validated Codey version", async t => {
+  const f = await fixture(t, { shared: true, legacyName: true, version: "0.2.0" });
+  const selected = await loadMachineBundle(f.bundleRoot);
+  assert.equal(selected.package.file, "config-new-codey-machine.zip");
+  const manifestFile = path.join(path.dirname(selected.package.path), "manifest.json");
+  const pointerFile = path.join(f.bundleRoot, "packages-v2", "active.json");
+  const before = await Promise.all([manifestFile, pointerFile, selected.package.path].map(file => readFile(file)));
+  for (const endpoint of ["shared-skill", "skill"]) {
+    const response = await f.request(`/api/settings/machines/${endpoint}`, { method: "POST" });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-disposition"), 'attachment; filename="codey-0.2.0.zip"');
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), f.manifest.packageBytes);
+  }
+  assert.deepEqual(await Promise.all([manifestFile, pointerFile, selected.package.path].map(file => readFile(file))), before);
+  assert.deepEqual(await f.policy.list(f.member.id), []);
+  assert.equal(f.probes.length, 0);
+  assert.equal(f.tunnelProbes.length, 0);
+});
+
+test("archive names must match the declared version and never permit other paths or unsafe versions", async t => {
+  const root = await temporary(t);
+  const original = await bundle(root, "linux-x64", { shared: true, version: "0.2.0" });
+  const store = path.join(root, "packages-v2");
+  const manifestFile = path.join(store, "releases", original.releaseId, "manifest.json");
+  const before = JSON.parse(await readFile(manifestFile, "utf8"));
+  const rewrite = async manifest => {
+    const raw = JSON.stringify(manifest);
+    await writeFile(manifestFile, raw);
+    await writeFile(path.join(store, "active.json"), JSON.stringify({
+      schema: 1, releaseId: original.releaseId, manifestSha256: createHash("sha256").update(raw).digest("hex"),
+    }));
+  };
+  for (const file of ["codey-0.1.0.zip", "codey-0.2.0-windows.zip", "../codey-0.2.0.zip", "/codey-0.2.0.zip"]) {
+    await rewrite({ ...before, package: { ...before.package, file } });
+    await assert.rejects(loadMachineBundle(root), /Invalid machine bundle manifest/);
+  }
+  for (const version of ["../0.2.0", '0.2.0";evil', "0.2.0\r\n", ["0.2.0"], null]) {
+    await rewrite({ ...before, codey: { ...before.codey, version } });
+    await assert.rejects(loadMachineBundle(root), /Invalid Codey version/);
+  }
+});
+
+test("historical releases without a Codey version remain readable only under the legacy archive name", async t => {
+  const root = await temporary(t);
+  const original = await bundle(root, "linux-x64", { legacyName: true });
+  const store = path.join(root, "packages-v2");
+  const manifestFile = path.join(store, "releases", original.releaseId, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestFile, "utf8"));
+  for (const key of ["codey", "npmSetup", "runtimePackage", "installer"]) delete manifest[key];
+  const raw = JSON.stringify(manifest);
+  await writeFile(manifestFile, raw);
+  await writeFile(path.join(store, "active.json"), JSON.stringify({
+    schema: 1, releaseId: original.releaseId, manifestSha256: createHash("sha256").update(raw).digest("hex"),
+  }));
+  const selected = await loadMachineBundle(root);
+  assert.equal(selected.package.file, "config-new-codey-machine.zip");
+  assert.equal(selected.npmPackage, undefined);
 });
 
 test("the shared endpoint never silently downloads an older Linux-only Skill", async t => {

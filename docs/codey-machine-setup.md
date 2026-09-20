@@ -13,7 +13,9 @@ CLI 参考见 [Codey 包说明](../packages/codey/README.md)。
 包含编译后的 Workspace、模型网关与统一依赖锁；不内置另一份应用、平台原生二进制、
 `node_modules`、Python 脚本或升级器。原生 npm 依赖在目标机准备。
 
-完整 `config-new-codey-machine.zip` 包含 Skill、平台依赖声明、Linux/Windows 原生入口、
+完整一键安装包统一命名为 `codey-<version>.zip`，例如 `codey-0.2.0.zip`，
+与应用 `.tgz` 使用相同的 Codey 版本号，不使用固定名称或按操作系统分别命名。
+包内的 `config-new-codey-machine/` Skill 目录保持不变，包含 Skill、平台依赖声明、Linux/Windows 原生入口、
 公共 `install-machine.mjs`、三个原生平台适配、共享注册与验证工具，
 以及唯一的应用 `.tgz`。不能把独立运行包安装成功当作节点已接入。
 
@@ -122,3 +124,8 @@ npm run machine:build -- --output artifacts/codey-machine --portal-origin https:
 唯一锁文件、包摘要和独立发布器；构建端 Python/Bun 不属于用户执行 Skill 的依赖。
 本地测试与构建不自动上传、发布或改动既有节点。各平台原生验收已完成，
 不再以 Windows/macOS 待验收阻塞统一发行；main 来源、包摘要、权限和安装前安全检查仍然保留。
+
+文件名切换时先部署兼容版本的 Portal，再发布新构建的 `codey-<version>.zip`。
+Portal 继续读取旧发行目录中的 `config-new-codey-machine.zip`；有 Codey 版本元数据的旧包，
+下载时也使用对应的 `codey-<version>.zip`，不修改归档内容、清单或摘要。
+不要原地重命名已发布的不可变文件；仅重命名本地副本不会产生新的发行 ID，也不能覆盖旧清单。
