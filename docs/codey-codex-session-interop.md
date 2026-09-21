@@ -74,6 +74,81 @@ opening such an old session explicitly in the App can still be necessary.
 
 ## Scope and remaining limitations
 
+### Files linked from related Git worktrees (2026-09-21)
+
+A native conversation can retain the main checkout as its `cwd` while linking
+to an absolute file path in another worktree. Codey's File Tree API previously
+rejected those links with `403: Path must be under project root`, even when the
+file was readable and Codex desktop could open it.
+
+Single-file text reads, media/raw reads, and text saves now resolve absolute
+out-of-project paths against the source repository's NUL-delimited Git worktree
+inventory. The candidate must still be a real checkout with the same canonical
+Git common directory. Prunable, missing, replaced, and unrelated worktrees fail
+closed. A project registered below the repository root only gains access to the
+corresponding subdirectory in the other checkout.
+
+This does not register the worktree as a project or fall back to a Home project.
+Workspace-root checks, canonical filesystem boundaries, and relative traversal
+rejection still apply; symlinks cannot escape the selected root. Directory
+listing, create, rename, delete, and upload keep their original project scope.
+Git metadata queries are bounded, disable optional locks, and ignore inherited
+repository-selection environment variables.
+
+The editor displays the backend's concrete error message and cannot save a
+failed-load diagnostic as file contents. A late response for a previously opened
+file cannot replace the current editor buffer.
+
+The access fix is in the **node backend** and requires a node package update;
+publishing only the Portal cannot enable it on older nodes. Error presentation
+also requires the updated workspace frontend. Source tests cover real linked
+repositories, narrow projects, stale registrations, unusual paths, symlink
+escapes, raw/text/save routes, and editor error/reload behavior.
+
+### Automatic titles for Codey-created threads (2026-09-21)
+
+The earlier fix synchronized names that Codex already had, but a conversation
+created in Codey only received a local first-message prefix. Its native `name`
+could remain empty. The node backend now supplies the missing creation path:
+
+- The runtime dispatcher observes the first native ID of a newly allocated
+  Codey conversation. Both native and SDK creation events are deduplicated;
+  ordinary resumes, imports, forks and passive observation do not trigger it.
+- A separate background job summarizes up to 4,000 characters of the first
+  user message in its language, using the selected model and the effective
+  custom Responses provider returned by native `config/read`. It reuses
+  configured environment-key/header credentials, never ChatGPT OAuth tokens
+  or an unrelated provider/account.
+- This is one tool-free, non-streaming model request with a requested output
+  budget of 512 tokens. Strict JSON, an 80-character single-line title limit,
+  a 64-KiB response-body limit, two concurrent jobs, 32 total admitted jobs and
+  a 30-second deadline bound the background work. Failure does not fail or
+  delay a user turn; neither model calls nor uncertain name writes are retried.
+- After fresh native and local name checks, `thread/name/set` assigns the name
+  only to a still-unnamed thread. Its read-back is verified before caching and
+  broadcasting the automatic title. Manual Codey names, removed/archived rows
+  and changed provider-ID mappings are protected at the database write too.
+- A desktop name notification cancels pending generation. Native naming has
+  no compare-and-set API, so its final empty-name check cannot provide atomic
+  exclusion against another client renaming at precisely the same instant.
+- The metadata connection does not resume/load the user's thread or acquire
+  its writer. No title-generation prompt is added to conversation history.
+  Isolated real-native tests cover naming while a user turn is active in both
+  legacy and paginated storage, with an offline localhost model fixture.
+
+This feature requires an updated **Codey node package**, not a Portal/shared-UI
+deployment. Existing unnamed conversations are not bulk-renamed. Empty-text,
+attachment-only conversations and unsupported provider authentication retain
+the existing fallback behavior. Implementation/testing alone does not install
+or publish a new running-node package.
+
+Validation: 672 backend tests passed (15 opt-in/platform cases skipped), all
+719 frontend tests passed, and type checks, lint and production build passed
+with existing warnings. The two automatic-title native cases additionally
+passed with Codex 0.154.0 and an offline model fixture. One bounded synthetic
+Chinese prompt against the configured real model produced a valid Chinese
+summary title; it did not create/rename a native thread or modify user history.
+
 ### Native session title synchronization (2026-09-20)
 
 This fix belongs to the node's CloudCLI backend, not Portal or the shared UI.
