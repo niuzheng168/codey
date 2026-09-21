@@ -107,6 +107,12 @@ retains the image digest plus UI/installer checksums. Missing or mismatched
 provenance fails acceptance. Local development without the generated file
 explicitly reports unavailable provenance, not an invented SHA.
 
+ACA snapshots, drift checks and the update request use the same pinned ARM API
+version. They must not inherit a newer `az containerapp show` response shape:
+new response fields such as `imageType` may be rejected by the pinned write API.
+The deployer reads through `az resource show --api-version` instead of stripping
+unknown fields or weakening the full template/configuration/identity comparison.
+
 ## Optional GitHub Actions rollout
 
 `.github/workflows/deploy-portal.yml` deploys **only Portal**, on pushes to main

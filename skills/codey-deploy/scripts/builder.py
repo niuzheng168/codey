@@ -16,6 +16,7 @@ from release_source import commits as source_commits, export_sources, select_mai
 
 
 REMOVED_MCP_ENV = frozenset({"PORTAL_MCP_PROXY_URL", "SESSION_SHARE_PORTAL_CONFIG"})
+CONTAINER_APP_API_VERSION = "2025-07-01"
 
 
 def portal_topology(template):
@@ -66,7 +67,12 @@ class Builder:
         return json.loads(result) if result else None
 
     def app(self):
-        return self.az(["containerapp", "show", "-g", self.config["resourceGroup"], "-n", "codey"])
+        # Read the same ARM contract we PATCH. Newer Container Apps CLI models
+        # can add response fields such as imageType that this write API rejects.
+        # Keep complete snapshots and drift checks rather than dropping fields.
+        return self.az(["resource", "show", "-g", self.config["resourceGroup"],
+                        "-n", "codey", "--resource-type", "Microsoft.App/containerApps",
+                        "--api-version", CONTAINER_APP_API_VERSION])
 
     def publisher(self):
         file = self.source / "portal/scripts/publish-cloudcli-ui.py"
@@ -397,7 +403,7 @@ class Builder:
              "beforeFile": "aca-before.private.json", "restorePersistentData": False})
         started = time.monotonic()
         # Exactly one PATCH. Poll eventual consistency, never retry it blindly.
-        self.az(["rest", "--method", "patch", "--url", before["id"] + "?api-version=2025-07-01",
+        self.az(["rest", "--method", "patch", "--url", before["id"] + "?api-version=" + CONTAINER_APP_API_VERSION,
                  "--body", "@" + str(patch)], timeout=120)
         while time.monotonic() - started < 270:
             after = self.app()

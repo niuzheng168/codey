@@ -1,5 +1,6 @@
 """Offline regression checks; never connect to Azure, SSH, or a model."""
 import io
+import copy
 from contextlib import nullcontext
 import json
 import os
@@ -315,6 +316,103 @@ class DeploymentSafety(unittest.TestCase):
                     {"name": "new-sidecar", "image": "other@sha256:old"},
                 ],
             }, "registry.example/codey@sha256:" + "a" * 64)
+
+    def test_aca_reads_pin_the_write_api_instead_of_inheriting_cli_response_fields(self):
+        from builder import Builder, CONTAINER_APP_API_VERSION
+        worker = object.__new__(Builder)
+        worker.config = {"resourceGroup": "existing-resource-group"}
+        response = {"id": "existing-app", "properties": {"template": {"containers": [
+            {"name": "portal", "image": "old-image", "probes": [], "resources": {"cpu": 1}},
+        ]}}}
+        with patch.object(worker, "az", return_value=response) as az:
+            self.assertIs(worker.app(), response)
+        self.assertEqual(az.call_args.args[0], [
+            "resource", "show", "-g", "existing-resource-group", "-n", "codey",
+            "--resource-type", "Microsoft.App/containerApps",
+            "--api-version", CONTAINER_APP_API_VERSION,
+        ])
+
+    def test_aca_activation_uses_one_pinned_contract_and_preserves_full_drift_checks(self):
+        from builder import Builder, CONTAINER_APP_API_VERSION
+        for introduce_drift in (False, True):
+            with self.subTest(introduce_drift=introduce_drift):
+                worker = object.__new__(Builder)
+                worker.root = self.root
+                worker.job = self.root / ("drift" if introduce_drift else "success")
+                worker.job.mkdir()
+                worker.request = {}
+                worker.config = {"resourceGroup": "existing-resource-group"}
+                worker.release = "fast-20260921-080000-abcdef"
+                committed_fixture(worker)
+                before = {
+                    "id": "/subscriptions/fixture/resourceGroups/existing-resource-group/providers/Microsoft.App/containerApps/codey",
+                    "identity": {"type": "SystemAssigned", "principalId": "unchanged"},
+                    "properties": {
+                        "configuration": {"activeRevisionsMode": "Single", "ingress": {"external": True}},
+                        "template": {
+                            "revisionSuffix": "previous",
+                            "containers": [{
+                                "name": "portal", "image": "registry.example/codey@sha256:" + "a" * 64,
+                                "env": [{"name": "KEEP", "secretRef": "unchanged-secret"}],
+                                "resources": {"cpu": 1, "memory": "2Gi"},
+                                "probes": [{"type": "Readiness", "httpGet": {"path": "/api/health", "port": 3000}}],
+                            }],
+                            "scale": {"minReplicas": 1, "maxReplicas": 1},
+                        },
+                        "latestRevisionName": "codey--previous",
+                        "latestReadyRevisionName": "codey--previous",
+                        "provisioningState": "Succeeded",
+                    },
+                }
+                save(worker.job / "aca-before.private.json", before)
+                save(worker.job / "manifest.json", {
+                    "releaseSource": MAIN_SOURCE,
+                    "images": {"portal": {"image": "registry.example/codey@sha256:" + "b" * 64}},
+                })
+                save(worker.job / "validation.json", {"passed": True})
+                observed = copy.deepcopy(before)
+                patches = []
+                read_calls = []
+
+                def azure(arguments, **_kwargs):
+                    if arguments[:2] == ["resource", "show"]:
+                        read_calls.append(arguments)
+                        self.assertEqual(arguments[-2:], ["--api-version", CONTAINER_APP_API_VERSION])
+                        return copy.deepcopy(observed)
+                    if arguments[:2] == ["rest", "--method"]:
+                        self.assertEqual(arguments[2], "patch")
+                        self.assertEqual(arguments[4], before["id"] + "?api-version=" + CONTAINER_APP_API_VERSION)
+                        body = read(arguments[6].removeprefix("@"))
+                        patches.append(body)
+                        template = body["properties"]["template"]
+                        self.assertNotIn("imageType", template["containers"][0])
+                        self.assertEqual(template["scale"], before["properties"]["template"]["scale"])
+                        self.assertEqual(template["containers"][0]["env"], before["properties"]["template"]["containers"][0]["env"])
+                        self.assertEqual(template["containers"][0]["probes"], before["properties"]["template"]["containers"][0]["probes"])
+                        observed["properties"].update({
+                            "template": copy.deepcopy(template),
+                            "latestRevisionName": "codey--" + template["revisionSuffix"],
+                            "latestReadyRevisionName": "codey--" + template["revisionSuffix"],
+                        })
+                        if introduce_drift:
+                            observed["properties"]["template"]["containers"][0]["resources"]["cpu"] = 2
+                        return {}
+                    if arguments[:3] == ["containerapp", "replica", "list"]:
+                        return [{"properties": {"containers": [{"name": "portal", "ready": True, "restartCount": 0}]}}]
+                    raise AssertionError("Unexpected Azure command: " + repr(arguments))
+
+                with patch.object(worker, "az", side_effect=azure), \
+                        patch("builder.verify_source_files"), patch("builder.verify_gateway_routes"):
+                    if introduce_drift:
+                        with self.assertRaisesRegex(RuntimeError, "Unexpected ACA template change"):
+                            worker.activate()
+                    else:
+                        result = worker.activate()
+                        self.assertTrue(result["ready"])
+                        self.assertTrue(result["configurationPreserved"])
+                self.assertEqual(len(patches), 1)
+                self.assertEqual(len(read_calls), 2)
+                self.assertNotIn("imageType", before["properties"]["template"]["containers"][0])
 
     def test_portal_only_verifier_never_requests_node_routes(self):
         import hashlib
