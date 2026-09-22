@@ -74,6 +74,40 @@ opening such an old session explicitly in the App can still be necessary.
 
 ## Scope and remaining limitations
 
+### Large native histories on Windows, Linux and macOS (2026-09-23)
+
+The native history reader previously requested up to 100 full turns per RPC.
+Screenshot-heavy threads could exceed the stdio transport's 16-MiB frame
+limit; reducing the turn page size alone is insufficient when one turn is
+already larger than that limit.
+
+The shared reader now requests lightweight turn metadata and loads full items
+through `thread/items/list`, scoped to each turn and ordered by native cursors.
+One item per response prevents adjacent screenshots from forming an oversized
+frame. The same implementation serves Windows/macOS/Linux stdio readers and
+Linux/macOS Unix-socket daemons. Thread, turn and item identities, ordering and
+the original writer are preserved; no thread is resumed, forked or rewritten.
+
+Only an explicit initial unsupported-method response allows the older
+full-turn protocol, with one turn per page. Partial pages, repeated cursors or
+items, foreign turn IDs, summaries, later capability failures and reader-owned
+threads fail closed rather than falling back to incomplete JSONL exports.
+Snapshots remain bounded by 20,000 turns, 100,000 items, 128 MiB and a
+60-second traversal deadline (individual RPC deadlines still apply). An
+individual item must still fit the existing transport frame limit.
+
+The desktop owner's separate IPC state snapshot is not paginated. Its bounded
+receive allowance is now 64 MiB on both Windows named pipes and Unix sockets;
+outgoing requests retain their 16-MiB limit. Fragmented frames are assembled
+once instead of repeatedly copying the growing payload. Owner/thread/revision
+checks and submission/interrupt safeguards are unchanged.
+
+Regression fixtures cover histories over 40 MiB, individual turns over
+16 MiB, fragmented desktop snapshots, malformed pages, legacy compatibility
+and unchanged writer ownership. The `Codex Native History` CI workflow runs
+them on Windows, Ubuntu and macOS with Node 22 and 24. This is a **node
+backend** fix; a Portal/shared-UI-only deployment cannot apply it.
+
 ### Files linked from related Git worktrees (2026-09-21)
 
 A native conversation can retain the main checkout as its `cwd` while linking
