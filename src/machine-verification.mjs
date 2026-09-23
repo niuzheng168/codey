@@ -4,6 +4,7 @@ import { issueClientTicket } from "./client-ticket.mjs";
 import { issueWorkspaceAssertion } from "./workspace-sso.mjs";
 import { requestError } from "./signed-store.mjs";
 import { nodeTlsOptions } from "./machine-identity.mjs";
+import { machineRegistrationPlatform } from "./machine-platforms.mjs";
 import { DevTunnelTransport } from "./devtunnel-transport.mjs";
 
 function probe(machine, port, pathname, headers, { requestImpl, timeoutMs, websocket = false, agents }) {
@@ -103,7 +104,8 @@ export async function verifyMachine(machine, { principal, master, workspaceBindi
       // The optional Copilot quota API may fail while the node remains usable.
       // Do not turn that into a successful quota result or waive authentication.
       const ownerBoundData = health.body?.relay === "codey-node-relay" ||
-        (machine.platform === "linux-x64" && health.body?.service === "copilot-api-codey-https");
+        (health.body?.service === "copilot-api-codey-https" &&
+          machineRegistrationPlatform(machine.platform).registrationSupported);
       if (machine.networkMode !== "devtunnel" || !ownerBoundData ||
           health.body.nodeId !== machine.id) {
         throw new Error("An unavailable quota API requires a verified owner-bound relay");

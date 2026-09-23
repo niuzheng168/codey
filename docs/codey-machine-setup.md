@@ -95,6 +95,21 @@ Workspace subject/username，不包含 TLS 私钥、模型 key、GitHub 登录�
 相同身份重试保持幂等。旧 schema-2 文件可带合法的 `updaterCredential`，但会被忽略、
 不会持久化或触发代理注册。旧节点的数据/认证格式不因此自动迁移。
 
+私有 DevTunnel 验收中，Copilot 配额 `/usage` 返回 `200 null`、`404`、`429` 或 `5xx`
+时，可以沿用带明确警告的配额不可用路径，但不会把配额或模型推理标记为正常。
+`/healthz` 必须返回 `200`、严格匹配本节点 `nodeId`，并声明旧版
+`relay: codey-node-relay`，或支持注册的原生平台共用的
+`service: copilot-api-codey-https`（Linux x64、Windows x64、macOS arm64/x64）。
+证书/SAN/指纹校验、已鉴权 History、Workspace SSO 与真实 WebSocket 握手仍必须通过；
+还必须独立验证已鉴权 `/token-usage` 返回 `200` 且为无 `error` 的非数组 JSON 对象，
+匿名 `/usage`、`/token-usage` 和 Workspace 认证请求均返回 `401`。未知服务标记、
+错误节点身份、节点接口 `401/403`、重定向或其他认证失败仍拒绝；VNet 行为不变。
+
+此时验收结果为 `usage: false`、`tokenUsage: true`，保留 `usageHttpStatus` 和
+`copilot_quota_unavailable_model_inference_not_tested` 警告。这不证明上游 GitHub
+凭据有效：网关可能把上游 `401 Bad credentials` 包装为本地 `/usage` 的 `500`。
+上游凭据和模型健康需独立排查，不能以允许注册替代安装器的真实模型验收。
+
 节点总览改为按需 Workspace 健康检查，不建立状态上报代理；Workspace 版本不冒充 Codey
 整包版本。当前可以在节点使用 `codey --version` 查询应用版本。
 
