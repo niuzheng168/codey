@@ -216,14 +216,23 @@ const server = http.createServer(async (req, res) => {
       } else if (req.method !== "GET") { send(res, 405, { error: "Method denied." }); return; }
       send(res, 200, { success: true, preferences: state.preferences }); return;
     }
-    if (apiPath === "/api/user/drafts") {
+    if (apiPath === "/api/user/drafts" || apiPath === "/api/user/drafts/queue") {
       if (["PUT", "DELETE"].includes(req.method)) {
         const body = await readJson(req);
         if (!["preview-a", "preview-b"].includes(body.scope)) throw new Error("Not a preview draft.");
+        const existing = state.drafts.get(body.scope)?.queuedMessage;
+        let queued = Array.isArray(existing) ? existing : existing ? [existing] : [];
+        if (apiPath.endsWith("/queue")) {
+          if (!Array.isArray(body.queueOperations)) throw new Error("Queue operations required.");
+          for (const operation of body.queueOperations) {
+            if (operation.kind === "append" && !queued.some(message => message.id === operation.message.id)) queued.push(operation.message);
+            else if (operation.kind === "remove") queued = queued.filter(message => message.id !== operation.message.id);
+          }
+        }
         if (req.method === "DELETE") state.drafts.delete(body.scope);
         else state.drafts.set(body.scope, {
           scope: body.scope, text: String(body.text || ""),
-          queuedMessage: body.preserveQueuedMessage === true
+          queuedMessage: apiPath.endsWith("/queue") ? queued.length ? queued : null : body.preserveQueuedMessage === true
             ? state.drafts.get(body.scope)?.queuedMessage ?? null : body.queuedMessage ?? null,
         });
       } else if (req.method !== "GET") { send(res, 405, { error: "Method denied." }); return; }
@@ -232,8 +241,12 @@ const server = http.createServer(async (req, res) => {
     if (apiPath === "/api/user/drafts/steer" && req.method === "POST") {
       const body = await readJson(req);
       const draft = state.drafts.get(body.scope);
-      const accepted = Boolean(draft?.queuedMessage?.id && draft.queuedMessage.id === body.queuedMessage?.id);
-      if (accepted) state.drafts.set(body.scope, { ...draft, queuedMessage: null });
+      const queued = Array.isArray(draft?.queuedMessage) ? draft.queuedMessage : draft?.queuedMessage ? [draft.queuedMessage] : [];
+      const accepted = queued.some(message => message.id && message.id === body.queuedMessage?.id);
+      if (accepted) {
+        const remaining = queued.filter(message => message.id !== body.queuedMessage.id);
+        state.drafts.set(body.scope, { ...draft, queuedMessage: remaining.length ? remaining : null });
+      }
       send(res, 200, {
         kind: "chat_steer_result", sessionId: body.scope, requestId: body.requestId,
         accepted, ...(!accepted ? { error: "Preview queue changed." } : {}),
