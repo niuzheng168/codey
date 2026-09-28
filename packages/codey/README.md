@@ -13,6 +13,9 @@ read-only MCP entries. No source checkout or managed node is required.
 From 0.2.5, Linux also discovers `$HOME/.config/agency/CurrentVersion/agency`
 without relying on an updated PATH. Custom installations can still use
 `--agency /absolute/path/to/agency`.
+From 0.2.6, `--timeout` also covers executable version probes (default 120
+seconds), rather than killing a slow but valid Agency startup after ten seconds.
+Timeouts are reported separately from malformed version output.
 
 The bundled [Agency guide](onboarding/references/agency-codex-mcp.md) includes
 Linux installation, explicit Teams **and Mail** browser-login commands,

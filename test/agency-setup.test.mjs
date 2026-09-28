@@ -111,6 +111,31 @@ test("default setup only discovers; explicit verify-read checks both services wi
   assert.deepEqual(await readdir(f.home), ["config.toml"]);
 });
 
+test("setup forwards its timeout to both executable version probes and both MCP clients", async t => {
+  const f = await fixture(t);
+  for (const [extra, expected] of [[{}, 120000], [{ timeout: "60" }, 60000]]) {
+    const resolved = [], started = [];
+    const FakeClient = f.implementations.Client;
+    await configureAgency({ "codex-home": f.home, ...extra }, {
+      ...f.implementations,
+      resolve: async (name, options) => {
+        resolved.push(name);
+        assert.equal(options.timeoutMs, expected);
+        return f.implementations.resolve(name);
+      },
+      Client: class extends FakeClient {
+        constructor(command, args, options) {
+          super(command, args, options);
+          started.push(args[1]);
+          assert.equal(options.timeoutMs, expected);
+        }
+      },
+    });
+    assert.deepEqual(resolved, ["agency", "codex"]);
+    assert.deepEqual(started, ["teams", "mail"]);
+  }
+});
+
 test("apply validates both services before backing up, retains other settings and reapplies idempotently", async t => {
   const f = await fixture(t);
   const options = { "codex-home": f.home, apply: true, "verify-read": true };

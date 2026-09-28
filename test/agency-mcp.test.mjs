@@ -117,6 +117,59 @@ test("the Linux PathInstaller candidate runs with spaces and no PATH without inv
   assert.equal(found.version, "agency 2026.9.26.2 (fixture)");
 });
 
+test("version probes use a bounded caller timeout rather than a fixed ten-second deadline", async () => {
+  for (const [options, expected] of [[{}, 60000], [{ timeoutMs: 120000 }, 120000]]) {
+    const found = await resolveExecutable("agency", {
+      explicit: process.execPath, ...options,
+      executeImpl: async (command, args, settings) => {
+        assert.equal(command, process.execPath);
+        assert.deepEqual(args, ["--version"]);
+        assert.equal(settings.timeout, expected);
+        assert.equal(settings.maxBuffer, 256 * 1024);
+        return { stdout: "agency 2026.9.26.2 (fixture)\n" };
+      },
+    });
+    assert.equal(found.version, "agency 2026.9.26.2 (fixture)");
+  }
+  for (const timeoutMs of [0, -1, Infinity, NaN, 600001]) {
+    await assert.rejects(resolveExecutable("agency", { timeoutMs }), /probe timeout/);
+  }
+});
+
+test("version deadlines, malformed output and nonzero exits have distinct private-safe diagnostics", async () => {
+  const secret = "PRIVATE-CHILD-DIAGNOSTIC";
+  for (const [details, expected] of [
+    [{ killed: true, code: null, signal: "SIGTERM" }, /timed out after 30 seconds/],
+    [{ code: "ETIMEDOUT" }, /timed out after 30 seconds/],
+    [{ code: 7, stdout: secret, stderr: secret }, /exited with code 7/],
+    [{ code: null, signal: "SIGKILL" }, /terminated with SIGKILL/],
+    [{ killed: true, code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }, /exceeded the output limit/],
+  ]) {
+    await assert.rejects(resolveExecutable("agency", {
+      explicit: process.execPath, timeoutMs: 30000,
+      executeImpl: async () => { throw Object.assign(new Error(secret), details); },
+    }), error => expected.test(error.message) && !error.message.includes(secret));
+  }
+  await assert.rejects(resolveExecutable("agency", {
+    explicit: process.execPath,
+    executeImpl: async () => ({ stdout: secret }),
+  }), error => /unrecognized Agency version output/.test(error.message) && !error.message.includes(secret));
+});
+
+test("automatic discovery reports a found-but-timed-out Agency instead of claiming it is not installed", {
+  skip: process.platform === "win32",
+}, async t => {
+  const home = await temporary(t);
+  const command = executableCandidates("agency", { platform: "linux", home, env: {} })[0];
+  await mkdir(path.dirname(command), { recursive: true });
+  await writeFile(command, "fixture; the injected executor never runs this file", { mode: 0o700 });
+  await assert.rejects(resolveExecutable("agency", {
+    platform: "linux", home, env: { PATH: "" }, timeoutMs: 120000,
+    executeImpl: async () => { throw Object.assign(new Error("PRIVATE-PROBE-DETAIL"), { killed: true, code: null, signal: "SIGTERM" }); },
+  }), error => error.message.includes(command) && /timed out after 120 seconds/.test(error.message)
+    && !/not installed|invalid version|PRIVATE-PROBE-DETAIL/.test(error.message));
+});
+
 test("chooses the newer installed Agency without updating PATH or downloading software", () => {
   const choices = [
     { command: "old", version: "agency 2026.4.7.9 (target: x86_64-windows)" },

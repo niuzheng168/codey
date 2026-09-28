@@ -80,23 +80,49 @@ export function newestAgency(installations) {
   })[0];
 }
 
-export async function resolveExecutable(name, { explicit, env = process.env, ...options } = {}) {
+function executableFailureReason(error, timeoutMs) {
+  // execFile reports its deadline as killed=true with code=null on Linux.
+  // Never print child stdout/stderr: those can contain private diagnostics.
+  if (error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return "--version exceeded the output limit";
+  if (error.killed || error.code === "ETIMEDOUT") {
+    return `--version timed out after ${timeoutMs / 1000} seconds; retry with a larger --timeout (maximum 600 seconds)`;
+  }
+  if (error.code === "AGENCY_VERSION_FORMAT") return "--version returned unrecognized Agency version output";
+  if (Number.isInteger(error.code)) return `--version exited with code ${error.code}`;
+  if (/^SIG[A-Z0-9]+$/.test(error.signal ?? "")) return `--version terminated with ${error.signal}`;
+  if (/^[A-Z][A-Z0-9_]+$/.test(error.code ?? "")) return error.code;
+  return "version probe failed";
+}
+
+export async function resolveExecutable(name, {
+  explicit, env = process.env, timeoutMs = 60000, executeImpl = execute, ...options
+} = {}) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000) {
+    throw new Error("Executable probe timeout must be between 1 and 600000 milliseconds.");
+  }
   const candidates = explicit ? [path.resolve(explicit)] : executableCandidates(name, { env, ...options });
-  const found = [];
+  const found = [], failures = [];
   for (const command of candidates) {
+    let accessible = false;
     try {
       await access(command, process.platform === "win32" ? constants.F_OK : constants.X_OK);
-      const { stdout } = await execute(command, ["--version"], {
-        env, windowsHide: true, timeout: 10000, maxBuffer: 256 * 1024,
+      accessible = true;
+      const { stdout } = await executeImpl(command, ["--version"], {
+        env, windowsHide: true, timeout: timeoutMs, maxBuffer: 256 * 1024,
       });
       const version = stdout.trim();
-      if (name === "agency" && !versionParts(version)) throw new Error("Unexpected Agency version output.");
+      if (name === "agency" && !versionParts(version)) {
+        throw Object.assign(new Error("Unexpected Agency version output."), { code: "AGENCY_VERSION_FORMAT" });
+      }
       found.push({ command, version });
       if (name !== "agency") break;
     } catch (error) {
-      if (explicit) throw new Error(`Cannot run ${name} at ${command}: ${error.code || "invalid version output"}`);
+      const message = `Cannot run ${name} at ${command}: ${executableFailureReason(error, timeoutMs)}`;
+      if (explicit) throw new Error(message);
+      if (accessible) failures.push(message);
     }
   }
+  if (!found.length && failures.length) throw new Error(failures[0]);
   if (!found.length) throw new Error(`${name} is not installed or executable. Install its native build, then pass --${name} /absolute/path/to/${name}.`);
   return name === "agency" ? newestAgency(found) : found[0];
 }

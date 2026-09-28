@@ -26,6 +26,7 @@ Default: discover both servers and validate a plan without changing config.toml.
 --apply: back up config.toml, then atomically install the verified read-only entries.
 --verify-read: read at most one search result per service and its message/preview.
                Only success/counts are printed; no message content or IDs are saved.
+--timeout: seconds per executable version probe and MCP request (default 120; range 1–600).
 Agency and Codex must already be installed. Agency handles per-host Entra sign-in.
 Headless Linux uses a pre-authenticated AzureAuth cache; sign in separately using web mode.
 Teams and Mail browser-login commands: onboarding/references/agency-codex-mcp.md in this package.
@@ -44,8 +45,8 @@ export async function configureAgency(values, {
     if (error.code === "ENOENT") return "";
     throw error;
   });
-  const agency = await resolve("agency", { explicit: values.agency || process.env.AGENCY_BIN });
-  const codex = await resolve("codex", { explicit: values.codex || process.env.CODEX_BIN });
+  const agency = await resolve("agency", { explicit: values.agency || process.env.AGENCY_BIN, timeoutMs });
+  const codex = await resolve("codex", { explicit: values.codex || process.env.CODEX_BIN, timeoutMs });
   const updated = mergeAgencyConfig(original, agency.command);
   const catalogs = [];
   for (const service of Object.keys(AGENCY_SERVERS)) {

@@ -23,7 +23,7 @@ codey agency setup [--apply] [--verify-read] [--agency ABSOLUTE_PATH]
 | `--agency` | 绝对路径；否则 `AGENCY_BIN` 或原生发现 | 使用目标主机的 Agency |
 | `--codex` | 绝对路径；否则 `CODEX_BIN` 或原生发现 | 使用目标主机的 Codex CLI 校验配置 |
 | `--codex-home` | 目录；否则 `CODEX_HOME` 或用户 `.codex` | 选择实际 Codex 配置目录 |
-| `--timeout` | 秒；默认 `120`，范围 `1–600` | 单次 MCP 请求超时，不是 AzureAuth 登录超时 |
+| `--timeout` | 秒；默认 `120`，范围 `1–600` | 从 0.2.6 起用于单次版本探测和 MCP 请求；0.2.4/0.2.5 只用于 MCP，版本探测固定 10 秒；不是 AzureAuth 登录超时 |
 
 默认只发现服务、验证计划，不修改 `config.toml`；不下载软件、复制凭据、变更
 模型/provider 或重启服务。不提供 `codey agency login`；使用指南中的 Agency/
