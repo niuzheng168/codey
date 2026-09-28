@@ -4,6 +4,21 @@ One npm application containing the Workspace and model gateway, compiled from
 CloudCLI and copilot-api. Both use one locked dependency tree. The official
 Codex CLI is a separate tool; its SDK JavaScript is inlined into Codey.
 
+## Optional Agency Teams/Mail integration (0.2.4+)
+
+After installing Agency and completing organization-approved, host-local Entra
+sign-in, run `codey agency setup --verify-read`, then
+`codey agency setup --apply --verify-read` to back up and register the reviewed
+read-only MCP entries. No source checkout or managed node is required.
+
+The bundled [Agency guide](onboarding/references/agency-codex-mcp.md) includes
+Linux installation, explicit Teams **and Mail** browser-login commands,
+Copilot-first authentication, headless configuration, credential-storage
+limitations and troubleshooting. Installing/upgrading Codey does not install
+Agency, log in, grant consent, or enable these optional tools automatically.
+
+## Runtime package
+
 The published manifest contains only dependencies used by the Node runtime.
 React, CodeMirror, Mermaid and other browser dependencies stay in CloudCLI's
 build environment; their compiled UI assets are still included. Unused desktop

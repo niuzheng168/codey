@@ -74,6 +74,12 @@ test("built npm package installs as Codey and starts both real servers without u
     build.lockSha256, "npm must preserve the signed dependency lock after installation");
   const bin = path.join(home, ".local/bin/codey");
   assert.equal((await exec(bin, ["--version"], { env })).stdout.trim(), `codey ${pkg.version}`);
+  assert.match((await exec(bin, ["agency", "setup", "--help"], { env })).stdout, /Usage: codey agency setup/);
+  const agencyGuide = await readFile(path.join(installed, "onboarding/references/agency-codex-mcp.md"), "utf8");
+  assert.match(agencyGuide, /mcp_MailTools/);
+  assert.match(agencyGuide, /mcp_TeamsServer/);
+  await assert.rejects(readFile(path.join(home, ".codex/config.toml")), { code: "ENOENT" },
+    "Installing Codey or requesting Agency help must not silently enable MCP");
   const prepared = await installedSetup(installed, publicConfig);
   assert.equal(prepared.manifest.codey.version, pkg.version);
   // The common workflow's native check is exercised with an isolated HOME in

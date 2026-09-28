@@ -55,6 +55,16 @@ Linux 后台更新无须退出客户端，不等于零中断：进行中的请�
 
 ## 用户执行时的依赖
 
+### 可选：Agency Teams / Mail
+
+仅在用户要求此集成时，阅读 [Agency 配置与认证](references/agency-codex-mcp.md)。
+Codey 0.2.4+ 随包提供 `codey agency setup`，不需要源码仓库。安装/升级 Codey
+不自动安装 Agency 或替用户登录、授权、启用 MCP。认证与配置必须在目标
+Codex 主机、原用户和正确的 `CODEX_HOME` 完成，分别验证 Teams 与 Mail，
+保留只读白名单及现有模型配置；不要把 GitHub 模型登录当作 Entra 服务授权。
+
+### 基础依赖
+
 - **Linux x64**：Bash、curl、tar/xz、OpenSSL、`ss`（iproute2）等基础工具、systemd 用户服务；开启 linger 等操作需 sudo。
 - **Windows x64**：PowerShell 5.1、.NET Framework 4.7.2+、任务计划程序；使用原用户的非管理员终端。
 - **macOS arm64/x64**：原生终端与 GUI 登录会话；使用系统 Bash、curl、tar、OpenSSL、plutil、shasum、launchctl、lsof/ps。

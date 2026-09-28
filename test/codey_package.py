@@ -67,6 +67,20 @@ class MemoryStore:
 
 
 class BuildHostTests(unittest.TestCase):
+    def test_agency_guide_is_shipped_in_both_runtime_and_installation_skill(self):
+        name = "references/agency-codex-mcp.md"
+        self.assertIn(name, package.NPM_ONBOARDING_FILES)
+        self.assertIn(name, package.MACHINE_SKILL_FILES)
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            package.copy_onboarding(ROOT, runtime)
+            guide = runtime / "onboarding" / name
+            self.assertEqual(guide.read_bytes(), (ROOT / "skills/config-new-codey-machine" / name).read_bytes())
+            text = guide.read_text()
+            for expected in ("codey agency setup", "mcp_TeamsServer", "mcp_MailTools", "--mode web",
+                             "BROWSER=/bin/false", "--verify-read"):
+                self.assertIn(expected, text)
+
     def test_installer_archive_names_use_only_valid_codey_versions(self):
         for version in ("0.2.0", "12.34.56", "0.3.0-rc.1"):
             with self.subTest(version=version):

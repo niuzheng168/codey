@@ -9,6 +9,7 @@ import { runInNewContext } from "node:vm";
 import { commandPlan } from "../packages/codey/lib/cli.mjs";
 import { machineOptions, MACHINE_USAGE } from "../packages/codey/lib/machine.mjs";
 import { doctorOptions } from "../packages/codey/lib/doctor.mjs";
+import { AGENCY_SETUP_OPTIONS } from "../packages/codey/lib/agency-setup.mjs";
 
 const exec = promisify(execFile);
 const source = name => readFile(new URL(`../copilot-api/src/${name}`, import.meta.url), "utf8");
@@ -57,8 +58,8 @@ const literal = /const cliArgs = (\{[\s\S]*?\n  \}) as const/.exec(await source(
 const globals = runInNewContext("(" + literal + ")");
 
 test("every business command has its own reference entry under the actual CLI hierarchy", () => {
-  const leaves = [...Object.keys(MACHINE_USAGE), "copilot login", "copilot start", "doctor"];
-  const groups = ["copilot", "devtunnel"];
+  const leaves = [...Object.keys(MACHINE_USAGE), "agency setup", "copilot login", "copilot start", "doctor"];
+  const groups = ["agency", "copilot", "devtunnel"];
   assert.deepEqual(headings.map(heading => heading[2].slice(1, -1)).sort(),
     [...groups, ...leaves].map(command => `codey ${command}`).sort());
   for (const command of leaves) {
@@ -77,6 +78,12 @@ test("every business command has its own reference entry under the actual CLI hi
       assert.match(text, /^\| `FILE\.(?:gz|tgz)` \| 必填；/m, `${name}: required file argument`);
     }
   }
+});
+
+test("Agency reference follows the shipped setup options without promising automatic login", () => {
+  assertFlags("`codey agency setup`", Object.fromEntries(
+    Object.entries(AGENCY_SETUP_OPTIONS).filter(([name]) => name !== "help")));
+  assert.match(section("`codey agency setup`"), /不提供 `codey agency login`/);
 });
 
 test("the public reference distinguishes Codey's force option from forwarded upstream Copilot options", () => {
@@ -138,10 +145,10 @@ test("every shell example in the reference parses without running a login, servi
     assert.equal(tokens.shift(), "codey");
     const plan = commandPlan(tokens, {});
     if (plan.kind === "doctor") doctorOptions(plan.args);
-    covered.add(tokens.slice(0, ["copilot", "devtunnel"].includes(tokens[0]) ? 2 : 1).join(" "));
+    covered.add(tokens.slice(0, ["agency", "copilot", "devtunnel"].includes(tokens[0]) ? 2 : 1).join(" "));
   }
   assert.deepEqual([...covered].sort(),
-    [...Object.keys(MACHINE_USAGE), "copilot login", "copilot start", "doctor"].sort());
+    [...Object.keys(MACHINE_USAGE), "agency setup", "copilot login", "copilot start", "doctor"].sort());
 });
 
 test("documented Copilot examples parse without starting any service or authentication flow", async t => {

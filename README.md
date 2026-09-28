@@ -75,6 +75,22 @@ bash scripts/linux/install-codey.sh --package ./codey-0.2.0.tgz --expected-compu
 已安装节点用 `codey guard` 启用并启动全部后台守护；与后台 `codey start` 共用幂等流程。
 `codey restart/stop` 管理整节点，`codey devtunnel start/stop` 仅管理隧道及其守护。
 
+## 可选 Agency Teams / Mail
+
+Codey **0.2.4+** 安装包自带 `codey agency setup`，不再要求用户 clone 此仓库。
+先按[随包 Agency 指南](./skills/config-new-codey-machine/references/agency-codex-mcp.md)
+安装 Agency/AzureAuth，并在 Codex 所在主机完成 Teams 与 Mail 的浏览器认证，
+再运行：
+
+```sh
+codey agency setup --verify-read
+codey agency setup --apply --verify-read
+```
+
+仅启用明确的只读工具，备份并保留其他 Codex 配置，不改变模型/provider 或
+自动启动服务。完成后重新加载 MCP；不需要通过 Copilot 对话才能认证。
+源码入口 `npm run agency:setup -- --apply --verify-read` 保持兼容。
+
 ## Portal 本地检查
 
 实际机器配置、`.env`、证书、账号/会话数据及构建产物不在 Git 中。新 clone 先按

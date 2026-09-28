@@ -8,6 +8,7 @@ for (const name of [
   "onboarding/scripts/linux-preflight.sh", "onboarding/scripts/windows-runtime.mjs",
   "onboarding/scripts/github-auth.mjs", "onboarding/scripts/github-tunnel.mjs",
   "lib/copilot-auth.mjs", "lib/tunnel.mjs",
+  "lib/agency-mcp.mjs", "lib/agency-setup.mjs", "onboarding/references/agency-codex-mcp.md",
   "lib/machine-update.mjs", "lib/machine-update-job.mjs",
   "onboarding/scripts/install-devtunnel-health.sh", "onboarding/scripts/linux-devtunnel-health.mjs",
   "lib/package-info.mjs", "lib/doctor.mjs",

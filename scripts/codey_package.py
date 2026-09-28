@@ -23,6 +23,7 @@ _source_spec.loader.exec_module(release_source)
 RUNTIME_PLATFORMS = ["linux-x64", "windows-x64", "macos-arm64", "macos-x64"]
 NPM_ONBOARDING_FILES = [
     "dependencies.json", "dependencies.windows.json", "dependencies.macos.json", "references/codey-cli.md",
+    "references/agency-codex-mcp.md",
     "scripts/install.sh", "scripts/macos-service.mjs", "scripts/macos-tools.mjs",
     "scripts/install-devtunnel-health.sh", "scripts/linux-devtunnel-health.mjs", "scripts/linux-preflight.sh",
     "scripts/registration.mjs", "scripts/windows-runtime.mjs",
@@ -448,7 +449,8 @@ def build_package(output, *, allow_reviewed_diff=False, node_dir=None, keep_work
     home = work / "smoke-home"
     home.mkdir()
     smoke_env = {**env, "HOME": str(home), "COPILOT_API_HOME": str(home / "copilot-api")}
-    for args in (["--version"], ["--help"], ["copilot", "login", "--help"], ["copilot", "start", "--help"],
+    for args in (["--version"], ["--help"], ["agency", "setup", "--help"],
+                 ["copilot", "login", "--help"], ["copilot", "start", "--help"],
                  ["start", "--help"], ["guard", "--help"], ["doctor", "--runtime-only", "--json"]):
         run([node / "bin/node", runtime / "bin/codey.mjs", *args], cwd=runtime, env=smoke_env)
     if setup_config is not None:

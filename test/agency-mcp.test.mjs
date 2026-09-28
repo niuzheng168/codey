@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
-  AGENCY_SERVERS, StdioMcpClient, callReadOnlyTool, executableCandidates,
+  AGENCY_SERVERS, StdioMcpClient, agencyMcpEnvironment, callReadOnlyTool, executableCandidates,
   installAgencyConfig, mergeAgencyConfig, newestAgency, parseToolData,
   redactDiagnostic, renderAgencyConfig, validateCodexConfig, validateReadOnlyCatalog,
   verifyAgencyReadAccess,
@@ -27,6 +27,46 @@ const clientFor = (t, mode = "normal", options = {}) => {
   t.after(() => client.close());
   return client;
 };
+
+test("headless Linux uses cached AzureAuth without persisting a session-specific browser or secrets", () => {
+  for (const env of [{}, { BROWSER: "/private/vscode/browser.sh", API_TOKEN: "private" }]) {
+    const original = { ...env };
+    assert.deepEqual(agencyMcpEnvironment({ platform: "linux", env }), {
+      AGENCY_AEC_ENABLED: "0", BROWSER: "/bin/false",
+    });
+    assert.deepEqual(env, original);
+  }
+});
+
+test("Windows, macOS, and graphical Linux retain their native browser authentication environment", () => {
+  for (const options of [
+    { platform: "win32", env: {} }, { platform: "darwin", env: {} },
+    { platform: "linux", env: { DISPLAY: ":0" } },
+    { platform: "linux", env: { WAYLAND_DISPLAY: "wayland-0" } },
+  ]) assert.deepEqual(agencyMcpEnvironment(options), { AGENCY_AEC_ENABLED: "0" });
+});
+
+test("generated entries persist the same headless authentication environment as setup probes", () => {
+  const options = { platform: "linux", env: { BROWSER: "/private/vscode/browser.sh" } };
+  const config = renderAgencyConfig("/bin/agency", "\n", options);
+  assert.equal((config.match(/env = \{ AGENCY_AEC_ENABLED = "0", BROWSER = "\/bin\/false" \}/g) || []).length, 2);
+  assert.doesNotMatch(config, /private\/vscode|devicecode/);
+  for (const platform of ["win32", "darwin"]) {
+    assert.doesNotMatch(renderAgencyConfig("/bin/agency", "\n", { platform, env: {} }), /BROWSER/);
+  }
+});
+
+test("headless environment upgrades preserve unrelated config and remain idempotent", () => {
+  const prefix = 'model = "keep"\n\n';
+  const suffix = '\n[projects."keep"]\ntrust_level = "trusted"\n';
+  const old = prefix + renderAgencyConfig("/bin/agency", "\n", { platform: "linux", env: { DISPLAY: ":0" } }) + suffix;
+  const options = { platform: "linux", env: {} };
+  const updated = mergeAgencyConfig(old, "/bin/agency", options);
+  assert.ok(updated.startsWith(prefix));
+  assert.ok(updated.endsWith(suffix));
+  assert.equal((updated.match(/BROWSER = "\/bin\/false"/g) || []).length, 2);
+  assert.equal(mergeAgencyConfig(updated, "/bin/agency", options), updated);
+});
 
 test("Windows discovers native per-user Agency before PATH, with spaces and no shell", () => {
   const candidates = executableCandidates("agency", {
@@ -176,12 +216,32 @@ test("candidate validation uses isolated CODEX_HOME and checks the exact native 
       calls++;
       return { stdout: JSON.stringify({
         enabled: true, enabled_tools: AGENCY_SERVERS[service].tools,
-        transport: { command: "/bin/agency", args: ["mcp", service] },
+        transport: { command: "/bin/agency", args: ["mcp", service], env: agencyMcpEnvironment() },
       }) };
     },
   });
   assert.equal(calls, 2);
   await assert.rejects(stat(temporaryRoot), { code: "ENOENT" });
+});
+
+test("native validation rejects missing or changed authentication environment overrides", async () => {
+  const environment = agencyMcpEnvironment({ platform: "linux", env: {} });
+  for (const env of [
+    { AGENCY_AEC_ENABLED: "0" },
+    { AGENCY_AEC_ENABLED: "1", BROWSER: "/bin/false" },
+    { AGENCY_AEC_ENABLED: "0", BROWSER: "/private/vscode/browser.sh" },
+  ]) {
+    await assert.rejects(validateCodexConfig("codex", "", "/bin/agency", {
+      environment,
+      executeImpl: async (command, args) => {
+        const service = args[2].slice("agency_".length);
+        return { stdout: JSON.stringify({
+          enabled: true, enabled_tools: AGENCY_SERVERS[service].tools,
+          transport: { command: "/bin/agency", args: ["mcp", service], env },
+        }) };
+      },
+    }), /rejected/);
+  }
 });
 
 test("candidate validation never prints secret-bearing native config errors", async () => {

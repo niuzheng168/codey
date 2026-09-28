@@ -3,6 +3,41 @@
 适用于 Linux x64、Windows x64、macOS arm64/x64 的统一跨平台发行。
 后台节点操作要求已完成本机安装；安装流程见 [Skill](../SKILL.md)。
 
+## `codey agency`
+
+### `codey agency setup`
+
+可选的、原用户级 native Codex Teams/Mail 只读 MCP 配置；不要求先安装托管节点，
+不启动网关。Agency、Codex CLI 及目标主机的 Entra 登录必须事先准备。
+浏览器登录、Linux 依赖及两个资源地址见 [Agency 指南](agency-codex-mcp.md)。
+
+```text
+codey agency setup [--apply] [--verify-read] [--agency ABSOLUTE_PATH]
+                  [--codex ABSOLUTE_PATH] [--codex-home DIRECTORY] [--timeout SECONDS]
+```
+
+| 参数 | 取值与默认值 | 含义 |
+| --- | --- | --- |
+| `--apply` | 布尔；默认关闭 | 先验证，再备份并原子更新受管 MCP 配置 |
+| `--verify-read` | 布尔；默认关闭 | 分别查询最多一条结果及消息/邮件预览，只报告状态与数量 |
+| `--agency` | 绝对路径；否则 `AGENCY_BIN` 或原生发现 | 使用目标主机的 Agency |
+| `--codex` | 绝对路径；否则 `CODEX_BIN` 或原生发现 | 使用目标主机的 Codex CLI 校验配置 |
+| `--codex-home` | 目录；否则 `CODEX_HOME` 或用户 `.codex` | 选择实际 Codex 配置目录 |
+| `--timeout` | 秒；默认 `120`，范围 `1–600` | 单次 MCP 请求超时，不是 AzureAuth 登录超时 |
+
+默认只发现服务、验证计划，不修改 `config.toml`；不下载软件、复制凭据、变更
+模型/provider 或重启服务。不提供 `codey agency login`；使用指南中的 Agency/
+AzureAuth 浏览器流程。无头 Linux 仅对后台 MCP 设置 `BROWSER=/bin/false`，
+要求已有认证缓存。成功后重新加载 MCP 或在同一主机启动新 Codex 任务。
+
+**示例**
+
+```sh
+codey agency setup --verify-read
+codey agency setup --apply --verify-read
+codey agency setup --codex-home "$HOME/.codex" --timeout 60
+```
+
 ## `codey copilot`
 
 ### `codey copilot login`

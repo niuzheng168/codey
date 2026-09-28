@@ -37,6 +37,8 @@ const HELP = `Codey — workspace and model gateway
 Usage:
   codey [--help|-h|help]
   codey --version|-v|version
+  codey agency setup [--apply] [--verify-read] [--agency PATH] [--codex PATH]
+    [--codex-home DIRECTORY] [--timeout SECONDS]
   codey copilot login [--force] [--verbose|-v] [--show-token] [connection options]
   codey copilot start [--host HOST] [--port PORT|-p PORT]
     [--verbose|-v] [--proxy-env] [connection options]
@@ -76,6 +78,8 @@ Codey's start/guard require space-separated values, not --name=value.
 Port changes do not reconfigure model URLs, HTTPS 8443, DevTunnel or OS services.
 
 Copilot and DevTunnel reuse gh when their own credentials are absent; existing accounts win.
+agency setup independently configures read-only Teams/Mail MCP for native Codex.
+It requires Agency and host-local Entra sign-in; it does not start or reconfigure the gateway.
 GitHub CLI bindings pin the account; changing gh's active account does not switch Codey.
 copilot login --force explicitly signs in again; --show-token can print secrets during that flow.
 doctor checks the package and node components without repair or interactive login.
@@ -149,6 +153,13 @@ export function commandPlan(args, env = process.env) {
   if (["--version", "-v", "version"].includes(command)) {
     if (rest.length) throw new Error("codey --version does not accept arguments");
     return { kind: "version" };
+  }
+  if (command === "agency") {
+    if (!rest.length || rest.length === 1 && ["--help", "-h"].includes(rest[0])) {
+      return { kind: "agency", args: ["--help"] };
+    }
+    if (rest[0] !== "setup") throw new Error("Use codey agency setup; sign in separately with Agency/AzureAuth");
+    return { kind: "agency", args: rest.slice(1) };
   }
   if (command === "copilot") {
     if (!rest.length || rest.length === 1 && ["--help", "-h"].includes(rest[0])) {
@@ -262,6 +273,10 @@ export async function runCli(args = process.argv.slice(2)) {
   if (plan.kind === "version") {
     const metadata = JSON.parse(await readFile(path.join(ROOT, "package.json"), "utf8"));
     console.log(`codey ${metadata.version}`);
+    return;
+  }
+  if (plan.kind === "agency") {
+    await (await import("./agency-setup.mjs")).runAgencySetup(plan.args);
     return;
   }
   if (plan.kind === "start") {
