@@ -21,6 +21,8 @@
   "scripts": {
     "start": "node src/server.mjs",
     "dev": "node --watch src/server.mjs",
+    "agency:setup": "node scripts/configure-agency-mcp.mjs",
+    "agency:test": "node --test test/agency-mcp.test.mjs",
     "skill:build": "node scripts/build-node-skill.mjs",
     "skill:check": "node scripts/build-node-skill.mjs --check",
     "machine:build": "python3 scripts/build-machine-bundle.py",

@@ -1,0 +1,40 @@
+name: Agency MCP portability
+
+on:
+  pull_request:
+    paths:
+      - "src/agency-mcp.mjs"
+      - "scripts/configure-agency-mcp.mjs"
+      - "test/agency-mcp.test.mjs"
+      - "test/fixtures/agency-mcp-server.mjs"
+      - ".github/workflows/agency-mcp.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/agency-mcp.mjs"
+      - "scripts/configure-agency-mcp.mjs"
+      - "test/agency-mcp.test.mjs"
+      - "test/fixtures/agency-mcp-server.mjs"
+      - ".github/workflows/agency-mcp.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable-setup:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --check src/agency-mcp.mjs
+      - run: node --check scripts/configure-agency-mcp.mjs
+      - run: node --test test/agency-mcp.test.mjs
