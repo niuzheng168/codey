@@ -53,6 +53,10 @@ export function executableCandidates(name, { platform = process.platform, env = 
   if (name === "agency" && platform === "win32") {
     directories.push(paths.join(env.APPDATA || paths.join(home, "AppData", "Roaming"), "agency", "CurrentVersion"));
   }
+  if (name === "agency" && platform === "linux") {
+    // PathInstaller's per-user installation may not be on a service/login shell's PATH.
+    directories.push(paths.join(home, ".config", "agency", "CurrentVersion"));
+  }
   directories.push(...pathValue.split(platform === "win32" ? ";" : ":"));
   if (platform !== "win32") {
     directories.push(paths.join(home, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin");

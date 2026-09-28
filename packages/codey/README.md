@@ -10,6 +10,9 @@ After installing Agency and completing organization-approved, host-local Entra
 sign-in, run `codey agency setup --verify-read`, then
 `codey agency setup --apply --verify-read` to back up and register the reviewed
 read-only MCP entries. No source checkout or managed node is required.
+From 0.2.5, Linux also discovers `$HOME/.config/agency/CurrentVersion/agency`
+without relying on an updated PATH. Custom installations can still use
+`--agency /absolute/path/to/agency`.
 
 The bundled [Agency guide](onboarding/references/agency-codex-mcp.md) includes
 Linux installation, explicit Teams **and Mail** browser-login commands,

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,7 +7,7 @@ import test from "node:test";
 import {
   AGENCY_SERVERS, StdioMcpClient, agencyMcpEnvironment, callReadOnlyTool, executableCandidates,
   installAgencyConfig, mergeAgencyConfig, newestAgency, parseToolData,
-  redactDiagnostic, renderAgencyConfig, validateCodexConfig, validateReadOnlyCatalog,
+  redactDiagnostic, renderAgencyConfig, resolveExecutable, validateCodexConfig, validateReadOnlyCatalog,
   verifyAgencyReadAccess,
 } from "../src/agency-mcp.mjs";
 
@@ -83,10 +83,39 @@ test("Windows discovers native per-user Agency before PATH, with spaces and no s
 for (const [platform, home] of [["darwin", "/Users/some user"], ["linux", "/home/some user"]]) {
   test(`${platform} resolves POSIX Agency without Windows paths or empty PATH entries`, () => {
     const candidates = executableCandidates("agency", { platform, home, env: { PATH: ":/usr/bin:relative:/usr/local/bin:." } });
-    assert.deepEqual(candidates, ["/usr/bin/agency", "/usr/local/bin/agency", `${home}/.local/bin/agency`, "/opt/homebrew/bin/agency"]);
+    assert.deepEqual(candidates, [
+      ...(platform === "linux" ? [`${home}/.config/agency/CurrentVersion/agency`] : []),
+      "/usr/bin/agency", "/usr/local/bin/agency", `${home}/.local/bin/agency`, "/opt/homebrew/bin/agency",
+    ]);
     assert.ok(candidates.every(value => !value.includes("\\") && !value.endsWith(".exe")));
   });
 }
+
+test("Linux discovers PathInstaller Agency with an empty PATH, deduplicates it and leaves other tools alone", () => {
+  const home = "/home/some user";
+  const installed = `${home}/.config/agency/CurrentVersion/agency`;
+  for (const env of [{}, { PATH: "" }, { PATH: `${home}/.config/agency/CurrentVersion:/usr/bin` }]) {
+    const before = { ...env };
+    const candidates = executableCandidates("agency", { platform: "linux", home, env });
+    assert.equal(candidates[0], installed);
+    assert.equal(candidates.filter(file => file === installed).length, 1);
+    assert.deepEqual(env, before, "Discovery must not modify shell startup files or environment");
+    assert.ok(executableCandidates("codex", { platform: "linux", home, env: {} })
+      .every(file => !file.includes("/.config/agency/")));
+  }
+});
+
+test("the Linux PathInstaller candidate runs with spaces and no PATH without invoking authentication", {
+  skip: process.platform === "win32",
+}, async t => {
+  const home = path.join(await temporary(t), "home with spaces");
+  const command = executableCandidates("agency", { platform: "linux", home, env: {} })[0];
+  await mkdir(path.dirname(command), { recursive: true });
+  await writeFile(command, '#!/bin/sh\n[ "$#" -eq 1 ] && [ "$1" = "--version" ] || exit 91\nprintf "agency 2026.9.26.2 (fixture)\\n"\n', { mode: 0o700 });
+  const found = await resolveExecutable("agency", { explicit: command, env: { PATH: "" } });
+  assert.equal(found.command, command);
+  assert.equal(found.version, "agency 2026.9.26.2 (fixture)");
+});
 
 test("chooses the newer installed Agency without updating PATH or downloading software", () => {
   const choices = [

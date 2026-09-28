@@ -5,6 +5,8 @@
 Codey **0.2.4+** 的 `.tgz` 内置 `codey agency setup`，完整安装 Skill `.zip`
 也包含本指南。无需 clone 源码仓库；安装包不含 Agency/AzureAuth 二进制、账号、
 token、聊天或邮件。Agency 是可选集成，不会在 Codey 安装、启动或升级时自动启用。
+从 **0.2.5** 起，Linux 自动发现 `$HOME/.config/agency/CurrentVersion/agency`，
+不再要求安装目录已进入当前终端或后台进程的 PATH。
 
 正确顺序是：**安装 Agency 与认证依赖 → 在目标主机完成 Entra 浏览器登录 →
 注册只读 MCP → 验证两个服务 → 重新加载 Codex**。
@@ -47,6 +49,23 @@ codey agency setup --apply --verify-read \
 
 4. 重新加载 MCP，或重启 Codex 并在同一主机创建新任务。确认 `agency_teams`
    和 `agency_mail` 出现后，再请求只读查询。配置成功不等于旧任务已经加载新工具。
+
+**已发布的 Codey 0.2.4 在 Linux 的路径检测限制：** 安装器显示
+`already installed` / `Existing binary installed through the CTF path`，
+但 `codey agency setup` 仍报找不到 Agency 时，不要反复重装或清认证缓存。
+该版本只搜索 PATH 和通用目录，漏掉了 Linux 的原生安装目录。
+先确认文件可执行，再显式传路径：
+
+```sh
+"$HOME/.config/agency/CurrentVersion/agency" --version
+codey agency setup \
+  --agency "$HOME/.config/agency/CurrentVersion/agency" \
+  --apply --verify-read
+```
+
+上述参数修复程序发现问题，不代替 Teams/Mail 的浏览器授权。重新打开 shell
+也不保证 PATH 已包含该目录。Codey **0.2.5** 已增加对此安装目录的自动发现；既有
+0.2.4 安装包不会因此原地改变，仍可一直使用显式路径。
 
 **另一条可用路径是 `agency cp` 中实际发起一次只读 Teams 调用。**
 本次实测该调用才触发认证并填充共享 AzureAuth 缓存；只打开 Copilot 并不够。
