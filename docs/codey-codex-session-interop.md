@@ -74,6 +74,33 @@ opening such an old session explicitly in the App can still be necessary.
 
 ## Scope and remaining limitations
 
+### Large live desktop turns (2026-09-30)
+
+The paginated history viewer did not cover live observation: the desktop queue
+observer still fetched 20 full turns at once, and shared-daemon attachment
+fetched one full active turn. Either response could exceed the unchanged
+16-MiB native transport limit, disconnecting Codey while the original desktop
+continued working.
+
+Both live paths now read lightweight turn metadata and hydrate selected turns
+through ordered, single-item `thread/items/list` pages. Once observation is
+bound to a turn, unrelated turns are not hydrated. Queue preflight verifies
+item readability before submitting input; correlation remains tied to the
+native client-message identity, not message text. Legacy full-item responses
+remain supported with one turn per request. Only an initial explicit
+unsupported-item-method response permits the legacy full-turn fallback, and
+its turn identity must still match after any concurrent rollover.
+
+The queue lookup retains its 400-turn bound and adds a traversal deadline.
+Individual hydrated turns are bounded by 100,000 items, 128 MiB and 60 seconds.
+Malformed, repeated, foreign or partial pages fail closed. Transport limits,
+writer ownership and the prohibition on replaying an unconfirmed correction
+are unchanged. A single oversized item (or an oversized full legacy turn on a
+backend without item pagination) still fails explicitly.
+
+This requires updating the **Codey node backend**, not merely the Portal/UI.
+Source changes and tests do not update an already-running installed node.
+
 ### Large native histories on Windows, Linux and macOS (2026-09-23)
 
 The native history reader previously requested up to 100 full turns per RPC.
