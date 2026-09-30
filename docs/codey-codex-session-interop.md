@@ -74,6 +74,44 @@ opening such an old session explicitly in the App can still be necessary.
 
 ## Scope and remaining limitations
 
+### Desktop rendering after a Codey continuation (2026-09-30)
+
+Codey passed SDK-shaped text input (`{ type: "text", text: "..." }`)
+directly to the desktop peer. Native app-server parsing supplies an empty
+`text_elements` array, but the desktop renders optimistic input **before**
+that parsing occurs. Its message navigation and continuation checks expect
+the array to exist. Local desktop logs showed `undefined.length` and
+`undefined.some` rendering failures immediately after a peer-started turn;
+the latter stack resolves to an unguarded `text_elements.some` call.
+
+The peer boundary now supplies `text_elements: []` for omitted text-element
+arrays in both turn starts and steering, including steering's restoration
+envelope. Existing rich-text elements, mixed image input, input ordering,
+client IDs and inherited settings are preserved without mutating caller data.
+Explicit non-array values fail locally before any submission. Native RPC/SDK
+input formats, writer ownership and no-replay safeguards are unchanged.
+
+The reported thread's four persisted turns were still readable, and its
+persisted text items already contained the array. This is an optimistic UI
+input defect, not evidence that the native transcript needs rewriting.
+No user conversation, database, lock or desktop installation was modified.
+
+Validation used Node 24.20.0 on Windows:
+
+- 50 focused peer/control/selection/queue/steering regressions passed; three
+  Unix-only cases were skipped.
+- Two offline native interoperability cases passed, covering paginated and
+  legacy history with Codey's CLI 0.157.1 and owner CLI 0.159.0. The test peer
+  checks renderer-required arrays before native parsing; it uses a random
+  named pipe, isolated homes and a localhost model, never the user's UI.
+- Frontend and backend builds, type checks and lint passed (existing CSS,
+  bundle-size and lint warnings).
+
+This is a **Codey node backend** repair. Source changes do not update an
+already-running installed Codey process; no package publication or service
+restart was performed. A real desktop UI round trip remains to be verified
+after deployment, without resubmitting any earlier unconfirmed prompt.
+
 ### Large live desktop turns (2026-09-30)
 
 The paginated history viewer did not cover live observation: the desktop queue
