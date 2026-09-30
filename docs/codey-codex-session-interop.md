@@ -112,6 +112,41 @@ already-running installed Codey process; no package publication or service
 restart was performed. A real desktop UI round trip remains to be verified
 after deployment, without resubmitting any earlier unconfirmed prompt.
 
+### Windows mobile “Send now” and preflight failures (2026-09-30)
+
+The reported phone showed a held queued message rather than an unsupported
+Windows capability. Read-only inspection found the running Windows Codey
+`0.2.7` package still lacked the desktop text-input normalization above.
+Desktop logs around the report contained the corresponding
+`text_elements.some` rendering failure. The source repair had not updated
+that installed backend. A later read-only peer discovery/state query for the
+reported thread succeeded; it did not submit or interrupt any input.
+
+A separate, reproducible error-classification bug could also leave “Send now”
+disabled: a failed live-state snapshot **before** the steering request was
+classified by the gateway as uncertain delivery. The peer now reports
+`STEER_UNAVAILABLE` for those preflight failures, restoring the original
+queued receipt without a delivery-review hold. No automatic retry is added.
+After dispatch, missing/wrong receipts and disconnects remain
+`STEER_UNCONFIRMED`, so potentially delivered input cannot be sent twice.
+Previously held messages are not automatically released.
+
+Validation on Windows with Node 24.20.0:
+
+- The new preflight regression failed before the change and passed afterward.
+- 69 provider/peer/queue/user-route tests passed; three Unix-only tests skipped.
+- 85 frontend steering, composer, mobile-card and queue API tests passed.
+- Both offline native peer interoperability cases passed (paginated and legacy
+  history, isolated profiles, random test pipes and a localhost model).
+- Frontend/backend builds, type checks and lint passed; unrelated existing
+  CSS, bundle-size and lint warnings remain.
+
+This requires a **node backend update**, including the text-input repair;
+refreshing or publishing only the shared UI is insufficient. No installed
+package, running service, user queue or native transcript was modified during
+diagnosis/validation. Update through the normal reviewed release process
+without replaying the earlier unconfirmed message.
+
 ### Large live desktop turns (2026-09-30)
 
 The paginated history viewer did not cover live observation: the desktop queue
