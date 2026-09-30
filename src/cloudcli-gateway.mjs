@@ -51,6 +51,12 @@ function requestTransport(url) {
 
 function forwardedRequestHeaders(req, node, { websocket = false, workspace, target } = {}) {
   const headers = {};
+  // Paced, fixed-length multipart bodies can reach the node but lose their
+  // response over relay-backed TLS (ECONNRESET). End these uploads with HTTP
+  // chunked framing instead, without buffering or replaying the file content.
+  const chunkedUpload = node.devTunnel && !websocket &&
+    ["POST", "PUT", "PATCH"].includes(req.method) &&
+    /^multipart\/form-data(?:;|$)/i.test(String(req.headers["content-type"] ?? "").trim());
   for (const [name, value] of Object.entries(req.headers)) {
     const normalized = name.toLowerCase();
     if (
@@ -61,6 +67,7 @@ function forwardedRequestHeaders(req, node, { websocket = false, workspace, targ
       normalized.startsWith("x-ms-client-principal") ||
       normalized.startsWith("x-forwarded-") ||
       normalized === "forwarded" ||
+      (chunkedUpload && normalized === "content-length") ||
       (workspace && normalized === "authorization") ||
       (!websocket && HOP_BY_HOP_HEADERS.has(normalized))
     ) {
@@ -425,7 +432,9 @@ export class CloudCliGateway {
       upstreamRequest.once("error", (error) => {
         cleanup();
         sendProxyError(res, 502, node.devTunnel
-          ? `CloudCLI node ${node.id} is unavailable; check the tunnel host and connect-token expiry`
+          ? (["ECONNRESET", "EPIPE"].includes(error.code)
+            ? `CloudCLI node ${node.id} tunnel connection closed before its response was received (${error.code})`
+            : `CloudCLI node ${node.id} is unavailable; check the tunnel host and connect-token expiry`)
           : `CloudCLI node ${node.id} is unavailable: ${error.message}`);
         resolve();
       });

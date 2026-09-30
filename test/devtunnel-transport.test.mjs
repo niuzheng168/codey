@@ -8,7 +8,7 @@ import https from "node:https";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { Duplex } from "node:stream";
+import { Duplex, Readable } from "node:stream";
 import test from "node:test";
 import { promisify } from "node:util";
 import { CancellationTokenSource } from "@microsoft/dev-tunnels-ssh";
@@ -312,6 +312,116 @@ test("a bad node TLS name or pinned certificate rejects the tunnel before any HT
     await assert.rejects(transport.openTlsSocket(), { code: "ERR_CODEY_DEV_TUNNEL" });
   }
   assert.equal(requests, 0);
+});
+
+test("Dev Tunnel multipart uploads finish with chunked framing, including paced fixed-length browser bodies", { timeout: 15000 }, async t => {
+  const fixture = await tlsFixture(t);
+  const received = [];
+  let receiveFirstChunk;
+  const upstream = https.createServer(fixture, async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) {
+      chunks.push(chunk);
+      receiveFirstChunk?.();
+    }
+    received.push({ headers: req.headers, body: Buffer.concat(chunks), complete: req.complete });
+    res.setHeader("content-type", "application/json");
+    res.end('{"uploaded":true}');
+  });
+  const sdk = sdkFixture(await listen(t, upstream));
+  const node = {
+    id: "local", basePath: "/cloudcli/local", upstream: new URL("https://localhost:3001"),
+    ca: fixture.cert, tlsServerName: "localhost", fingerprint: fixture.fingerprint, devTunnel: tunnelConfig,
+  };
+  const gateway = new CloudCliGateway({ nodes: [node] }, {
+    tunnelTransportFactory: (target, ca) => new DevTunnelTransport(target.devTunnel, nodeTlsOptions(target, ca), {
+      getToken: () => token(), sdkFactory: sdk.sdkFactory, timeoutMs: 2000,
+    }),
+  });
+  t.after(() => gateway.close());
+  const incomingLengths = [];
+  const portal = http.createServer((req, res) => {
+    incomingLengths.push(req.headers["content-length"]);
+    gateway.proxyHttp(req, res, ["local"]).catch(() => { res.writeHead(500); res.end(); });
+  });
+  const port = await listen(t, portal);
+  const url = `http://127.0.0.1:${port}/cloudcli/local/api/assets/files`;
+  const boundary = "codey-paced-upload";
+  const body = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="files"; filename="probe.png"\r\nContent-Type: image/png\r\n\r\n`),
+    randomBytes(677 * 1024),
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  ]);
+  for (const method of ["POST", "PUT", "PATCH"]) {
+    const firstChunk = new Promise(resolve => { receiveFirstChunk = resolve; });
+    const response = await fetch(url, {
+      method, duplex: "half",
+      headers: { "content-type": `multipart/form-data; boundary=${boundary}`, "content-length": String(body.length) },
+      body: Readable.from((async function* () {
+        for (let offset = 0; offset < body.length; offset += 8192) {
+          yield body.subarray(offset, offset + 8192);
+          // The upstream must see data before the browser finishes uploading.
+          if (offset === 0) await firstChunk;
+          else await new Promise(setImmediate);
+        }
+      })()),
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { uploaded: true });
+    assert.equal(incomingLengths.at(-1), String(body.length), "The browser still supplies its original length");
+    const upload = received.at(-1);
+    assert.equal(upload.headers["content-length"], undefined, "Do not use a fixed-length body on the relay upload stream");
+    assert.equal(upload.headers["transfer-encoding"], "chunked");
+    assert.equal(upload.headers["content-type"], `multipart/form-data; boundary=${boundary}`);
+    assert.equal(upload.complete, true);
+    assert.deepEqual(upload.body, body, "Framing must not change multipart bytes");
+  }
+  const json = '{"message":"unchanged"}';
+  const response = await fetch(url, {
+    method: "POST", headers: { "content-type": "application/json" }, body: json,
+    signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(response.status, 200);
+  await response.arrayBuffer();
+  assert.equal(received.at(-1).headers["content-length"], String(Buffer.byteLength(json)));
+  assert.equal(received.at(-1).headers["transfer-encoding"], undefined);
+  assert.equal(received.at(-1).body.toString(), json);
+  assert.equal(sdk.observed.clients.length, 1, "The fix must not reconnect the relay or replay uploads");
+  assert.equal(received.length, 4);
+});
+
+test("tunnel request resets are distinguished from token failures without exposing raw SDK errors", async t => {
+  let code;
+  class FailingAgent extends https.Agent {
+    createConnection(_options, callback) {
+      queueMicrotask(() => callback(Object.assign(new Error("Authorization: secret-never-return-this"), { code })));
+    }
+  }
+  const agent = new FailingAgent();
+  const gateway = new CloudCliGateway({ nodes: [{
+    id: "local", basePath: "/cloudcli/local", upstream: new URL("https://localhost:3001"),
+    devTunnel: tunnelConfig,
+  }] }, { tunnelTransportFactory: () => ({ agent, dispose() { agent.destroy(); } }) });
+  t.after(() => gateway.close());
+  const portal = http.createServer((req, res) => {
+    gateway.proxyHttp(req, res, ["local"]).catch(() => { res.writeHead(500); res.end(); });
+  });
+  const port = await listen(t, portal);
+  for (code of ["ECONNRESET", "EPIPE", "ERR_CODEY_DEV_TUNNEL"]) {
+    const response = await fetch(`http://127.0.0.1:${port}/cloudcli/local/api/assets/files`, {
+      method: "POST", body: "probe", signal: AbortSignal.timeout(2000),
+    });
+    assert.equal(response.status, 502);
+    const { error } = await response.json();
+    assert.doesNotMatch(error, /secret-never|Authorization/);
+    if (code === "ERR_CODEY_DEV_TUNNEL") assert.match(error, /check the tunnel host and connect-token expiry/);
+    else {
+      assert.match(error, /tunnel connection closed before its response was received/);
+      assert.ok(error.includes(code));
+      assert.doesNotMatch(error, /token/);
+    }
+  }
 });
 
 for (const [kind, Gateway, forwardedPort] of [

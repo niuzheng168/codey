@@ -204,6 +204,34 @@ test("client-generated machine Workspace keys sign the local binding without exp
   assert.notEqual(claims.username, principal.name);
 });
 
+test("direct multipart uploads retain Content-Length and their original bytes", async t => {
+  let headers;
+  const upstream = http.createServer(async (req, res) => {
+    headers = req.headers;
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    res.end(Buffer.concat(chunks));
+  });
+  const upstreamUrl = await listen(upstream);
+  t.after(() => upstream.close());
+  const gateway = new CloudCliGateway({ nodes: [{
+    id: "direct", basePath: "/cloudcli/direct", upstream: new URL(upstreamUrl),
+  }] });
+  t.after(() => gateway.close());
+  const portal = http.createServer((req, res) => { void gateway.proxyHttp(req, res, ["direct"]); });
+  const portalUrl = await listen(portal);
+  t.after(() => portal.close());
+  const body = '--test\r\nContent-Disposition: form-data; name="files"; filename="test.txt"\r\n\r\nprobe\r\n--test--\r\n';
+  const response = await fetch(`${portalUrl}/cloudcli/direct/api/assets/files`, {
+    method: "POST", headers: { "content-type": "multipart/form-data; boundary=test" }, body,
+    signal: AbortSignal.timeout(2000),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), body);
+  assert.equal(headers["content-length"], String(Buffer.byteLength(body)));
+  assert.equal(headers["transfer-encoding"], undefined);
+});
+
 test("CloudCLI WebSocket proxy authorizes the node and tunnels the upgrade", async (t) => {
   let upstreamPeer;
   const upstream = http.createServer();
